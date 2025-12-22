@@ -1,0 +1,37 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 9000,
+    "database": "polygon",
+    "user": "default",
+    "password": ""
+  },
+  "services": {
+    "control_port": 8000,
+    "alpaca_port": 8100,
+    "polygon_port": 8200,
+    "finnhub_port": 8300,
+    "bind_address": "127.0.0.1"
+  },
+  "defaults": {
+    "initial_capital": 100000.0,
+    "speed_factor": 0.0,
+    "max_sessions": 20
+  },
+  "execution": {
+    "enable_latency": false,
+    "fixed_latency_us": 0,
+    "enable_slippage": false,
+    "fixed_slippage_bps": 0.0
+  },
+  "websocket": {
+    "queue_size": 1000,
+    "overflow_policy": "drop_oldest",
+    "batch_size": 50
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "file": "/var/log/broker_simulator/simulator.log"
+  }
+}
