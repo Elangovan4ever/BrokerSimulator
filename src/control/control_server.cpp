@@ -115,7 +115,15 @@ void ControlServer::listSessions(const drogon::HttpRequestPtr& req,
             {"cash", s->cash},
             {"equity", s->equity},
             {"queue_size", qsize},
-            {"queue_dropped", qdrop}
+            {"queue_dropped", qdrop},
+            {"created_at", utils::ts_to_iso(s->created_at)},
+            {"started_at", s->started_at ? utils::ts_to_iso(*s->started_at) : ""},
+            {"start_time", utils::ts_to_iso(s->config.start_time)},
+            {"end_time", utils::ts_to_iso(s->config.end_time)},
+            {"speed_factor", s->time_engine->speed()},
+            {"current_time", utils::ts_to_iso(s->time_engine->current_time())},
+            {"symbols", s->config.symbols},
+            {"initial_capital", s->config.initial_capital}
         });
     }
     callback(json_resp(arr));
