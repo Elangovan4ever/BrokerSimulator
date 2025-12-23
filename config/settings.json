@@ -1,9 +1,17 @@
 {
-  "database": {
+  "clickhouse": {
     "host": "localhost",
     "port": 9000,
-    "database": "polygon",
+    "database": "market_data",
     "user": "default",
+    "password": ""
+  },
+  "postgres": {
+    "enabled": true,
+    "host": "localhost",
+    "port": 5432,
+    "database": "broker_sim",
+    "user": "postgres",
     "password": ""
   },
   "services": {
@@ -11,7 +19,7 @@
     "alpaca_port": 8100,
     "polygon_port": 8200,
     "finnhub_port": 8300,
-    "bind_address": "127.0.0.1"
+    "bind_address": "0.0.0.0"
   },
   "defaults": {
     "initial_capital": 100000.0,
@@ -32,6 +40,6 @@
   "logging": {
     "level": "info",
     "format": "json",
-    "file": "/var/log/broker_simulator/simulator.log"
+    "file": "logs/simulator.log"
   }
 }

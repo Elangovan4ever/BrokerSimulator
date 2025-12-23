@@ -4797,4 +4797,151 @@ namespace FeePresets {
 
 ---
 
+## Appendix D: Data Source Configuration (Updated 2025-12-22)
+
+### D.1 ClickHouse Database
+
+**Database Name:** `market_data` (NOT `polygon`)
+
+The simulator connects to ClickHouse on localhost:9000 by default. Configure in `config/settings.json`:
+
+```json
+{
+  "database": {
+    "host": "localhost",
+    "port": 9000,
+    "database": "market_data",
+    "user": "default",
+    "password": ""
+  }
+}
+```
+
+### D.2 Real Historical Data Requirement
+
+**CRITICAL:** The BrokerSimulator uses ONLY real historical data from ClickHouse.
+- No fake/stub data is generated for Polygon or Finnhub APIs
+- If data doesn't exist for a symbol/timeframe, the API returns empty results
+- The StubDataSource (fallback when ClickHouse is unavailable) returns empty data, not fake data
+- This ensures backtesting results are meaningful for live trading decisions
+
+### D.3 Available ClickHouse Tables
+
+#### Polygon Data Tables (stock_*)
+| Table | Use | Column Notes |
+|-------|-----|--------------|
+| stock_trades | Tick trades | timestamp (DateTime64), price (Decimal), size (UInt32) |
+| stock_quotes | NBBO quotes | sip_timestamp (DateTime64), bid_price, ask_price, bid_size, ask_size |
+| stock_daily_bars | Daily OHLCV | date (Date), open, high, low, close, volume |
+| stock_minute_bars | 1-min bars | Same structure as daily |
+| stock_second_bars | 1-sec bars | Same structure as daily |
+| stock_5m_bars, stock_15m_bars, etc. | Aggregated bars | Various timeframes |
+| stock_splits | Stock splits | ticker, execution_date, split_from, split_to |
+| stock_dividends | Dividends | From Polygon |
+| ticker_details | Company info | ticker, name, description, market_cap, etc. |
+| stock_news | News articles | Published articles |
+
+#### Finnhub Data Tables (finnhub_*)
+| Table | Use | Notes |
+|-------|-----|-------|
+| finnhub_company_profiles | Company profiles | symbol, name, industry, market_cap |
+| finnhub_company_peers | Peer symbols | symbol, peer |
+| finnhub_company_news | Company news | symbol, datetime, headline, summary |
+| finnhub_news_sentiment | Sentiment scores | buzz, bullish_percent, bearish_percent |
+| finnhub_basic_financials | Key metrics | PE, PB, dividend yield, etc. |
+| finnhub_dividends | Dividend history | ex_date, payment_date, amount |
+| finnhub_earnings_calendar | Earnings dates | date, eps_estimate, eps_actual |
+| finnhub_recommendation_trends | Analyst ratings | strong_buy, buy, hold, sell counts |
+| finnhub_price_targets | Price targets | target_high, target_low, target_mean |
+| finnhub_upgrades_downgrades | Rating changes | from_grade, to_grade, action |
+
+### D.3.1 ClickHouse LowCardinality Column Handling (Fixed 2025-12-22)
+
+**IMPORTANT:** Many Finnhub tables use `LowCardinality(String)` columns for storage efficiency.
+The clickhouse-cpp library's `As<ColumnString>()` returns nullptr for LowCardinality columns,
+causing segfaults if accessed directly.
+
+**Solution:** Use `CAST(column AS String)` in SQL queries for all LowCardinality columns:
+
+```sql
+-- WRONG: toString() preserves LowCardinality type
+SELECT toString(symbol), name FROM finnhub_company_profiles  -- Still returns LowCardinality(String)
+
+-- CORRECT: CAST converts to regular String
+SELECT CAST(symbol AS String), name FROM finnhub_company_profiles  -- Returns String
+```
+
+**Affected columns by table:**
+| Table | LowCardinality Columns |
+|-------|------------------------|
+| finnhub_company_profiles | symbol, country, currency, estimate_currency |
+| finnhub_company_peers | symbol, peer |
+| finnhub_company_news | symbol, category |
+| finnhub_news_sentiment | symbol |
+| finnhub_basic_financials | symbol |
+| finnhub_dividends | symbol, currency |
+| finnhub_earnings_calendar | symbol, hour |
+| finnhub_recommendation_trends | symbol |
+| finnhub_price_targets | symbol |
+| finnhub_upgrades_downgrades | symbol, from_grade, to_grade, action |
+
+### D.4 Alpaca Account Persistence (PostgreSQL)
+
+Currently, Alpaca account state is stored in-memory per session. For production:
+
+**Planned PostgreSQL Tables:**
+```sql
+-- Account balances and configuration
+CREATE TABLE alpaca_accounts (
+    account_id UUID PRIMARY KEY,
+    session_id VARCHAR(64),
+    cash DECIMAL(18,2),
+    buying_power DECIMAL(18,2),
+    equity DECIMAL(18,2),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+-- Position tracking
+CREATE TABLE alpaca_positions (
+    id SERIAL PRIMARY KEY,
+    account_id UUID REFERENCES alpaca_accounts(account_id),
+    symbol VARCHAR(16),
+    qty DECIMAL(18,8),
+    avg_entry_price DECIMAL(18,6),
+    market_value DECIMAL(18,2),
+    unrealized_pl DECIMAL(18,2),
+    updated_at TIMESTAMP
+);
+
+-- Order history
+CREATE TABLE alpaca_orders (
+    order_id UUID PRIMARY KEY,
+    account_id UUID REFERENCES alpaca_accounts(account_id),
+    symbol VARCHAR(16),
+    side VARCHAR(8),
+    type VARCHAR(16),
+    qty DECIMAL(18,8),
+    limit_price DECIMAL(18,6),
+    stop_price DECIMAL(18,6),
+    status VARCHAR(32),
+    filled_qty DECIMAL(18,8),
+    filled_avg_price DECIMAL(18,6),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+-- Fill/execution history
+CREATE TABLE alpaca_fills (
+    fill_id UUID PRIMARY KEY,
+    order_id UUID REFERENCES alpaca_orders(order_id),
+    qty DECIMAL(18,8),
+    price DECIMAL(18,6),
+    commission DECIMAL(12,4),
+    executed_at TIMESTAMP
+);
+```
+
+---
+
 *Document End*

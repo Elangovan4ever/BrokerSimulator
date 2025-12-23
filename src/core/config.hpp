@@ -15,8 +15,17 @@ using json = nlohmann::json;
 struct DatabaseConfig {
     std::string host{"localhost"};
     uint16_t port{9000};
-    std::string database{"polygon"};
+    std::string database{"market_data"};
     std::string user{"default"};
+    std::string password{};
+};
+
+struct PostgresConfig {
+    bool enabled{false};
+    std::string host{"localhost"};
+    uint16_t port{5432};
+    std::string database{"broker_sim"};
+    std::string user{"postgres"};
     std::string password{};
 };
 
@@ -355,7 +364,8 @@ struct AuthConfig {
 };
 
 struct Config {
-    DatabaseConfig database;
+    DatabaseConfig database;    // ClickHouse config (aliased as "clickhouse" in JSON)
+    PostgresConfig postgres;    // PostgreSQL config for Alpaca persistence
     ServiceConfig services;
     DefaultsConfig defaults;
     ExecutionConfig execution;
@@ -372,13 +382,31 @@ inline void load_config(Config& cfg, const std::string& path) {
         return;
     }
     json j = json::parse(f, nullptr, true, true);
-    if (j.contains("database")) {
+    // ClickHouse config: prefer "clickhouse" key, fall back to "database" for backward compatibility
+    if (j.contains("clickhouse")) {
+        auto& db = j["clickhouse"];
+        cfg.database.host = db.value("host", cfg.database.host);
+        cfg.database.port = db.value("port", cfg.database.port);
+        cfg.database.database = db.value("database", cfg.database.database);
+        cfg.database.user = db.value("user", cfg.database.user);
+        cfg.database.password = db.value("password", cfg.database.password);
+    } else if (j.contains("database")) {
         auto& db = j["database"];
         cfg.database.host = db.value("host", cfg.database.host);
         cfg.database.port = db.value("port", cfg.database.port);
         cfg.database.database = db.value("database", cfg.database.database);
         cfg.database.user = db.value("user", cfg.database.user);
         cfg.database.password = db.value("password", cfg.database.password);
+    }
+    // PostgreSQL config for Alpaca account persistence
+    if (j.contains("postgres")) {
+        auto& pg = j["postgres"];
+        cfg.postgres.enabled = pg.value("enabled", cfg.postgres.enabled);
+        cfg.postgres.host = pg.value("host", cfg.postgres.host);
+        cfg.postgres.port = pg.value("port", cfg.postgres.port);
+        cfg.postgres.database = pg.value("database", cfg.postgres.database);
+        cfg.postgres.user = pg.value("user", cfg.postgres.user);
+        cfg.postgres.password = pg.value("password", cfg.postgres.password);
     }
     if (j.contains("services")) {
         auto& svc = j["services"];

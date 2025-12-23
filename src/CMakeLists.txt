@@ -19,6 +19,27 @@ if(clickhouse-cpp_FOUND)
     add_compile_definitions(USE_CLICKHOUSE)
 endif()
 
+# PostgreSQL support for Alpaca account persistence
+find_package(PostgreSQL QUIET)
+if(PostgreSQL_FOUND)
+    list(APPEND CORE_FILES core/postgres_store.cpp)
+    add_compile_definitions(USE_POSTGRES)
+    message(STATUS "PostgreSQL found: ${PostgreSQL_INCLUDE_DIRS}")
+else()
+    # Try pkg-config fallback
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(LIBPQ QUIET libpq)
+        if(LIBPQ_FOUND)
+            list(APPEND CORE_FILES core/postgres_store.cpp)
+            add_compile_definitions(USE_POSTGRES)
+            set(PostgreSQL_INCLUDE_DIRS ${LIBPQ_INCLUDE_DIRS})
+            set(PostgreSQL_LIBRARIES ${LIBPQ_LIBRARIES})
+            message(STATUS "PostgreSQL found via pkg-config: ${LIBPQ_LIBRARIES}")
+        endif()
+    endif()
+endif()
+
 add_library(broker_core STATIC ${CORE_FILES})
 target_link_libraries(broker_core PUBLIC
     nlohmann_json::nlohmann_json
@@ -40,9 +61,16 @@ if(USE_DROGON)
     target_link_libraries(broker_core PUBLIC Drogon::Drogon)
 endif()
 
+# PostgreSQL linking
+if(PostgreSQL_FOUND OR LIBPQ_FOUND)
+    target_include_directories(broker_core PUBLIC ${PostgreSQL_INCLUDE_DIRS})
+    target_link_libraries(broker_core PUBLIC ${PostgreSQL_LIBRARIES} pq)
+endif()
+
 target_include_directories(broker_core PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     /usr/include/jsoncpp
+    /usr/include/postgresql
 )
 
 add_executable(broker_simulator ${APP_FILES})

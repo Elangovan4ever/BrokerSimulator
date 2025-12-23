@@ -137,5 +137,95 @@ Sources:
   https://github.com/quodfinancial/quant-replay
 
 ### Broker API Reference (for Emulation)
-- Alpaca Trading API Docs  
+- Alpaca Trading API Docs
   https://alpaca.markets/docs/
+
+---
+
+## Data Source Requirements (Added 2025-12-22)
+
+### IMPORTANT: Real Historical Data Only
+
+The BrokerSimulator is designed for backtesting with REAL historical data only. Fake/stub data
+is NOT supported for simulation purposes because:
+1. Backtesting requires historical accuracy to validate trading strategies
+2. If data doesn't exist for a symbol/timeframe, that API endpoint returns empty results
+3. Testing with fake data provides no predictive value for live trading
+
+### ClickHouse Database Configuration
+
+Database: `market_data` (not `polygon`)
+
+### Available Tables and API Mappings
+
+#### Polygon API Data (from polygon.io sync)
+| Table | API Endpoint | Description |
+|-------|-------------|-------------|
+| stock_trades | /v2/ticks/stocks/trades | Tick-level trade data |
+| stock_quotes | /v2/ticks/stocks/nbbo | NBBO quote data |
+| stock_daily_bars | /v2/aggs/ticker/.../range | Daily OHLCV bars |
+| stock_minute_bars | /v2/aggs/ticker/.../range | Minute-level bars |
+| stock_second_bars | /v2/aggs/ticker/.../range | Second-level bars |
+| stock_5m_bars, stock_15m_bars, etc. | /v2/aggs/ticker/.../range | Various timeframe bars |
+| ticker_details | /v3/reference/tickers | Company reference data |
+| stock_dividends | /v3/reference/dividends | Dividend history |
+| stock_splits | /v3/reference/splits | Stock split history |
+| stock_news | /v2/reference/news | News articles |
+
+#### Finnhub API Data (from finnhub.io sync)
+| Table | API Endpoint | Description |
+|-------|-------------|-------------|
+| finnhub_company_profiles | /stock/profile2 | Company profiles |
+| finnhub_company_peers | /stock/peers | Company peer symbols |
+| finnhub_company_news | /company-news | Company news |
+| finnhub_news_sentiment | /news-sentiment | News sentiment analysis |
+| finnhub_basic_financials | /stock/metric | Financial metrics |
+| finnhub_dividends | /stock/dividend | Dividend data |
+| finnhub_earnings_calendar | /calendar/earnings | Earnings calendar |
+| finnhub_recommendation_trends | /stock/recommendation | Analyst recommendations |
+| finnhub_price_targets | /stock/price-target | Analyst price targets |
+| finnhub_upgrades_downgrades | /stock/upgrade-downgrade | Analyst ratings changes |
+| finnhub_market_news | /news | Market-wide news |
+
+### APIs Without ClickHouse Data (Not Simulated)
+
+The following Finnhub API endpoints do NOT have corresponding tables in ClickHouse
+and will return empty results. These cannot be simulated for backtesting:
+- /stock/insider-transactions (no finnhub_insider_transactions data)
+- /stock/ownership (no finnhub_ownership data)
+- /stock/financials-reported (no finnhub_financials_reported data)
+
+### ClickHouse LowCardinality Column Handling (Fixed 2025-12-22)
+
+Many Finnhub tables use `LowCardinality(String)` columns for storage efficiency.
+The clickhouse-cpp library cannot read these directly - `As<ColumnString>()` returns nullptr.
+
+**Solution:** Use `CAST(column AS String)` in SQL queries (NOT `toString()` which preserves type):
+```sql
+SELECT CAST(symbol AS String), name FROM finnhub_company_profiles
+```
+
+See plan1_design_and_architecture.md Appendix D.3.1 for full list of affected columns.
+
+### Alpaca API - PostgreSQL Requirement
+
+The Alpaca API is used for TRADING operations (not market data), which requires
+persistent storage for:
+- User account information (cash, buying power, margin)
+- Position tracking (symbol, qty, avg_entry_price, market_value)
+- Order history (submitted, filled, cancelled orders)
+- Trade execution log (fills, fees, commissions)
+
+**PostgreSQL Integration (Planned):**
+Currently, account state is maintained in-memory per session and lost on restart.
+For production use, implement PostgreSQL tables:
+- `alpaca_accounts` - account configuration and balances
+- `alpaca_positions` - current positions per account
+- `alpaca_orders` - order history
+- `alpaca_fills` - fill/execution history
+
+This will enable:
+1. Session recovery after restart
+2. Multi-session account sharing
+3. Historical trade analysis
+4. Compliance/audit logging

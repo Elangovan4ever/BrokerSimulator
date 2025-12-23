@@ -37,7 +37,7 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, price, size, exchange, conditions, tape
+        SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
         FROM stock_trades
         WHERE symbol IN ({})
           AND timestamp >= '{}'
@@ -69,12 +69,12 @@ void ClickHouseDataSource::stream_quotes(const std::vector<std::string>& symbols
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, bid_price, bid_size, ask_price, ask_size, bid_exchange, ask_exchange, tape
+        SELECT sip_timestamp, symbol, toFloat64(bid_price), bid_size, toFloat64(ask_price), ask_size, bid_exchange, ask_exchange, tape
         FROM stock_quotes
         WHERE symbol IN ({})
-          AND timestamp >= '{}'
-          AND timestamp < '{}'
-        ORDER BY timestamp ASC
+          AND sip_timestamp >= '{}'
+          AND sip_timestamp < '{}'
+        ORDER BY sip_timestamp ASC
     )", sym_list, start_str, end_str);
 
     client_->Select(query, [&cb](const clickhouse::Block& block) {
@@ -109,40 +109,40 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
             SELECT timestamp as ts,
                    symbol,
                    toUInt8(1) as kind,
-                   price,
-                   size,
-                   price as bid_price,
-                   size as bid_size,
-                   price as ask_price,
-                   size as ask_size,
-                   exchange,
+                   toFloat64(price) as price,
+                   toInt64(size) as size,
+                   toFloat64(price) as bid_price,
+                   toInt64(size) as bid_size,
+                   toFloat64(price) as ask_price,
+                   toInt64(size) as ask_size,
+                   toInt32(exchange) as exchange,
                    conditions,
-                   tape,
-                   exchange as bid_exch,
-                   exchange as ask_exch
+                   toInt32(tape) as tape,
+                   toInt32(exchange) as bid_exch,
+                   toInt32(exchange) as ask_exch
             FROM stock_trades
             WHERE symbol IN ({})
               AND timestamp >= '{}'
               AND timestamp < '{}'
             UNION ALL
-            SELECT timestamp as ts,
+            SELECT sip_timestamp as ts,
                    symbol,
                    toUInt8(0) as kind,
-                   bid_price as price,
-                   bid_size as size,
-                   bid_price,
-                   bid_size,
-                   ask_price,
-                   ask_size,
-                   bid_exchange as exchange,
+                   toFloat64(bid_price) as price,
+                   toInt64(bid_size) as size,
+                   toFloat64(bid_price) as bid_price,
+                   toInt64(bid_size) as bid_size,
+                   toFloat64(ask_price) as ask_price,
+                   toInt64(ask_size) as ask_size,
+                   toInt32(bid_exchange) as exchange,
                    '' as conditions,
-                   tape,
-                   bid_exchange as bid_exch,
-                   ask_exchange as ask_exch
+                   toInt32(tape) as tape,
+                   toInt32(bid_exchange) as bid_exch,
+                   toInt32(ask_exchange) as ask_exch
             FROM stock_quotes
             WHERE symbol IN ({})
-              AND timestamp >= '{}'
-              AND timestamp < '{}'
+              AND sip_timestamp >= '{}'
+              AND sip_timestamp < '{}'
         )
         ORDER BY ts ASC, kind ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str);
@@ -199,7 +199,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
     auto end_str = format_timestamp(end_time);
     std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
     std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, price, size, exchange, conditions, tape
+        SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
         FROM stock_trades
         WHERE symbol = '{}'
           AND timestamp >= '{}'
@@ -234,12 +234,12 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
     auto end_str = format_timestamp(end_time);
     std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
     std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, bid_price, bid_size, ask_price, ask_size, bid_exchange, ask_exchange, tape
+        SELECT sip_timestamp, symbol, toFloat64(bid_price), toInt64(bid_size), toFloat64(ask_price), toInt64(ask_size), toInt32(bid_exchange), toInt32(ask_exchange), toInt32(tape)
         FROM stock_quotes
         WHERE symbol = '{}'
-          AND timestamp >= '{}'
-          AND timestamp < '{}'
-        ORDER BY timestamp ASC
+          AND sip_timestamp >= '{}'
+          AND sip_timestamp < '{}'
+        ORDER BY sip_timestamp ASC
         {}
     )", symbol, start_str, end_str, limit_clause);
 
@@ -318,8 +318,9 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // finnhub_company_news: category is LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT datetime, headline, summary, source, url, image, category, related, id
+        SELECT datetime, headline, summary, source_name, url, image, CAST(category AS String), related, id
         FROM finnhub_company_news
         WHERE symbol = '{}'
           AND datetime >= '{}'
@@ -352,9 +353,13 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
 
 std::optional<CompanyProfileRecord> ClickHouseDataSource::get_company_profile(const std::string& symbol) {
     if (!client_) return std::nullopt;
+    // LowCardinality(String) columns need CAST(... AS String) for clickhouse-cpp
     std::string query = fmt::format(R"(
-        SELECT symbol, name, exchange, industry, ipo, market_capitalization, share_outstanding,
-               country, currency, estimate_currency, weburl, logo, phone, raw_json
+        SELECT CAST(symbol AS String), name, exchange, industry, ipo,
+               toFloat64(market_capitalization) as market_cap,
+               toFloat64(share_outstanding) as shares,
+               CAST(country AS String), CAST(currency AS String), CAST(estimate_currency AS String),
+               weburl, logo, phone, raw_json
         FROM finnhub_company_profiles
         WHERE symbol = '{}'
         ORDER BY inserted_at DESC
@@ -391,8 +396,9 @@ std::vector<std::string> ClickHouseDataSource::get_company_peers(const std::stri
                                                                   size_t limit) {
     std::vector<std::string> out;
     if (!client_) return out;
+    // peer is LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT peer
+        SELECT CAST(peer AS String)
         FROM finnhub_company_peers
         WHERE symbol = '{}'
         ORDER BY inserted_at DESC
@@ -414,8 +420,9 @@ std::vector<std::string> ClickHouseDataSource::get_company_peers(const std::stri
 
 std::optional<NewsSentimentRecord> ClickHouseDataSource::get_news_sentiment(const std::string& symbol) {
     if (!client_) return std::nullopt;
+    // symbol is LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT symbol, articles_in_last_week, buzz, weekly_average, company_news_score,
+        SELECT CAST(symbol AS String), articles_in_last_week, buzz, weekly_average, company_news_score,
                sector_average_bullish_percent, sector_average_news_score, bullish_percent,
                bearish_percent, raw_json
         FROM finnhub_news_sentiment
@@ -448,8 +455,9 @@ std::optional<NewsSentimentRecord> ClickHouseDataSource::get_news_sentiment(cons
 
 std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(const std::string& symbol) {
     if (!client_) return std::nullopt;
+    // symbol is LowCardinality(String), market_capitalization is Decimal
     std::string query = fmt::format(R"(
-        SELECT symbol, metric_date, market_capitalization, pe_ttm, forward_pe, pb,
+        SELECT CAST(symbol AS String), metric_date, toFloat64(market_capitalization), pe_ttm, forward_pe, pb,
                dividend_yield_ttm, revenue_per_share_ttm, eps_ttm, free_cash_flow_per_share_ttm,
                beta, fifty_two_week_high, fifty_two_week_low, raw_json
         FROM finnhub_basic_financials
@@ -492,20 +500,21 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // finnhub_dividends: symbol, currency are LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT symbol,
-               toDateTime(date) as dt,
-               amount,
-               adjusted_amount,
-               toDateTime(pay_date) as pay_dt,
+        SELECT CAST(symbol AS String),
+               toDateTime(ex_date) as dt,
+               toFloat64(amount) as amount,
+               toFloat64(amount) as adjusted_amount,
+               toDateTime(payment_date) as pay_dt,
                toDateTime(record_date) as record_dt,
-               toDateTime(declaration_date) as decl_dt,
-               currency
+               toDateTime(declared_date) as decl_dt,
+               CAST(currency AS String)
         FROM finnhub_dividends
         WHERE symbol = '{}'
-          AND date >= toDate('{}')
-          AND date < toDate('{}')
-        ORDER BY date DESC
+          AND ex_date >= toDate('{}')
+          AND ex_date < toDate('{}')
+        ORDER BY ex_date DESC
         {}
     )", symbol, start_str, end_str, limit_clause(limit));
     try {
@@ -538,16 +547,17 @@ std::vector<SplitRecord> ClickHouseDataSource::get_splits(const std::string& sym
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // Use stock_splits table from Polygon data
     std::string query = fmt::format(R"(
-        SELECT symbol,
-               toDateTime(date) as dt,
-               from_factor,
-               to_factor
-        FROM finnhub_splits
-        WHERE symbol = '{}'
-          AND date >= toDate('{}')
-          AND date < toDate('{}')
-        ORDER BY date DESC
+        SELECT ticker,
+               toDateTime(execution_date) as dt,
+               toFloat64(split_from) as from_factor,
+               toFloat64(split_to) as to_factor
+        FROM stock_splits
+        WHERE ticker = '{}'
+          AND execution_date >= toDate('{}')
+          AND execution_date < toDate('{}')
+        ORDER BY execution_date DESC
         {}
     )", symbol, start_str, end_str, limit_clause(limit));
     try {
@@ -576,9 +586,12 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // symbol, hour are LowCardinality(String); eps/revenue are Decimal
     std::string query = fmt::format(R"(
-        SELECT symbol, date, quarter, year, eps_estimate, eps_actual,
-               revenue_estimate, revenue_actual, hour
+        SELECT CAST(symbol AS String), date, quarter, year,
+               toFloat64(eps_estimate), toFloat64(eps_actual),
+               toFloat64(revenue_estimate), toFloat64(revenue_actual),
+               CAST(hour AS String)
         FROM finnhub_earnings_calendar
         WHERE symbol = '{}'
           AND date >= toDate('{}')
@@ -617,8 +630,9 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // symbol is LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT symbol, period, strong_buy, buy, hold, sell, strong_sell
+        SELECT CAST(symbol AS String), period, strong_buy, buy, hold, sell, strong_sell
         FROM finnhub_recommendation_trends
         WHERE symbol = '{}'
           AND period >= toDate('{}')
@@ -649,8 +663,11 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
 
 std::optional<PriceTargetRecord> ClickHouseDataSource::get_price_targets(const std::string& symbol) {
     if (!client_) return std::nullopt;
+    // symbol is LowCardinality(String); target fields are Decimal
     std::string query = fmt::format(R"(
-        SELECT symbol, last_updated, number_analysts, target_high, target_low, target_mean, target_median
+        SELECT CAST(symbol AS String), last_updated, number_analysts,
+               toFloat64(target_high), toFloat64(target_low),
+               toFloat64(target_mean), toFloat64(target_median)
         FROM finnhub_price_targets
         WHERE symbol = '{}'
         ORDER BY inserted_at DESC
@@ -684,8 +701,10 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
+    // symbol, from_grade, to_grade, action are LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT symbol, grade_time, company, from_grade, to_grade, action
+        SELECT CAST(symbol AS String), grade_time, company,
+               CAST(from_grade AS String), CAST(to_grade AS String), CAST(action AS String)
         FROM finnhub_upgrades_downgrades
         WHERE symbol = '{}'
           AND grade_time >= toDateTime('{}')
