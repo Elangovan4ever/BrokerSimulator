@@ -61,8 +61,8 @@ export function Sessions() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newSession, setNewSession] = useState<SessionConfig>({
     symbols: ['AAPL'],
-    start_time: '2024-01-15T09:30:00Z',
-    end_time: '2024-01-15T16:00:00Z',
+    start_time: '2024-01-15T09:30:00',
+    end_time: '2024-01-15T16:00:00',
     initial_capital: 100000,
     speed_factor: 0,
   });
@@ -86,7 +86,14 @@ export function Sessions() {
 
   const handleCreate = async () => {
     try {
-      const session = await createSession(newSession);
+      // Format times without 'Z' suffix and milliseconds for C++ server
+      const formatTime = (iso: string) => iso.replace('Z', '').split('.')[0];
+      const config = {
+        ...newSession,
+        start_time: formatTime(newSession.start_time),
+        end_time: formatTime(newSession.end_time),
+      };
+      const session = await createSession(config);
       toast.success(`Session ${session.id.slice(0, 8)} created`);
       setIsCreateOpen(false);
       selectSession(session.id);
@@ -160,7 +167,7 @@ export function Sessions() {
                       value={newSession.start_time.slice(0, 16)}
                       onChange={(e) => setNewSession({
                         ...newSession,
-                        start_time: new Date(e.target.value).toISOString(),
+                        start_time: e.target.value + ':00',
                       })}
                     />
                   </div>
@@ -172,7 +179,7 @@ export function Sessions() {
                       value={newSession.end_time.slice(0, 16)}
                       onChange={(e) => setNewSession({
                         ...newSession,
-                        end_time: new Date(e.target.value).toISOString(),
+                        end_time: e.target.value + ':00',
                       })}
                     />
                   </div>
