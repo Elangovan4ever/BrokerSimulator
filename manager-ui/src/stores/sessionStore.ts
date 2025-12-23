@@ -1,6 +1,18 @@
 import { create } from 'zustand';
+import { AxiosError } from 'axios';
 import { sessionsApi } from '@/api/sessions';
 import type { Session, SessionConfig } from '@/types';
+
+// Extract error message from axios error or generic error
+function getErrorMessage(error: unknown): string {
+  if (error instanceof AxiosError && error.response?.data?.error) {
+    return error.response.data.error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return 'Unknown error';
+}
 
 interface SessionState {
   sessions: Session[];
@@ -35,7 +47,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const sessions = await sessionsApi.listSessions();
       set({ sessions, isLoading: false });
     } catch (error) {
-      set({ error: (error as Error).message, isLoading: false });
+      set({ error: getErrorMessage(error), isLoading: false });
     }
   },
 
@@ -46,7 +58,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -60,7 +72,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }));
       return session;
     } catch (error) {
-      set({ error: (error as Error).message, isLoading: false });
+      set({ error: getErrorMessage(error), isLoading: false });
       throw error;
     }
   },
@@ -73,7 +85,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         selectedSessionId: state.selectedSessionId === sessionId ? null : state.selectedSessionId,
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -84,7 +96,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -95,7 +107,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -106,7 +118,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -117,7 +129,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -128,7 +140,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 
@@ -139,7 +151,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: (error as Error).message });
+      set({ error: getErrorMessage(error) });
     }
   },
 

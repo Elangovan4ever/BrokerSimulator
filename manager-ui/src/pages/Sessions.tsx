@@ -97,8 +97,9 @@ export function Sessions() {
       toast.success(`Session ${session.id.slice(0, 8)} created`);
       setIsCreateOpen(false);
       selectSession(session.id);
-    } catch {
-      toast.error('Failed to create session');
+    } catch (err) {
+      const message = (err as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Failed to create session';
+      toast.error(message);
     }
   };
 
