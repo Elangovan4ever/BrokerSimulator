@@ -93,8 +93,9 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
             }
         }
         auto session = session_mgr_->create_session(cfg, requested_id);
-        session_mgr_->start_session(session->id);
-        callback(json_resp(json{{"session_id", session->id}}, 201));
+        // Don't auto-start: preload_events blocks on ClickHouse query which can timeout the HTTP request
+        // User should call POST /sessions/{id}/start separately
+        callback(json_resp(json{{"session_id", session->id}, {"status", "created"}}, 201));
     } catch (const std::exception& e) {
         spdlog::error("create_session failed: {}", e.what());
         callback(json_resp(json{{"error", e.what()}}, 400));
