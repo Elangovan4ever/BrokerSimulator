@@ -272,8 +272,8 @@ export function Sessions() {
                         <ChevronRight className="h-4 w-4 text-muted-foreground" />
                       </div>
                       <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>{session.symbols.slice(0, 3).join(', ')}</span>
-                        {session.symbols.length > 3 && <span>+{session.symbols.length - 3}</span>}
+                        <span>{(session.symbols || []).slice(0, 3).join(', ') || 'No symbols'}</span>
+                        {(session.symbols?.length || 0) > 3 && <span>+{session.symbols!.length - 3}</span>}
                       </div>
                     </div>
                   ))
@@ -363,7 +363,7 @@ export function Sessions() {
                     <dl className="space-y-2 text-sm">
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Symbols</dt>
-                        <dd>{selectedSession.symbols.join(', ')}</dd>
+                        <dd>{selectedSession.symbols?.join(', ') || 'No symbols'}</dd>
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Start Time</dt>

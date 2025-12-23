@@ -191,7 +191,7 @@ export function Dashboard() {
                         {session.id.slice(0, 8)}...
                       </p>
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>{session.symbols.join(', ')}</span>
+                        <span>{session.symbols?.join(', ') || 'No symbols'}</span>
                         <span>•</span>
                         <span>{formatTimestamp(session.created_at)}</span>
                       </div>
