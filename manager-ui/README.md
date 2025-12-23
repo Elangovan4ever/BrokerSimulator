@@ -40,7 +40,7 @@ npm install
 npm run dev
 
 # Or use the startup script from project root
-./start_manager.sh
+./start_ui.sh
 ```
 
 ### Production Build
@@ -50,7 +50,7 @@ npm run build
 npm run preview
 
 # Or use the startup script
-./start_manager.sh build
+./start_ui.sh build
 ```
 
 ## Configuration
@@ -125,16 +125,16 @@ From project root:
 
 ```bash
 # Start Manager UI
-./start_manager.sh
+./start_ui.sh
 
 # Start fresh (kill existing processes)
-./start_manager.sh fresh
+./start_ui.sh fresh
 
 # Build and serve production
-./start_manager.sh build
+./start_ui.sh build
 
 # Stop Manager UI
-./stop_manager.sh
+./stop_ui.sh
 ```
 
 ## API Integration
