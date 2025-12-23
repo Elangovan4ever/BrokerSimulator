@@ -141,23 +141,27 @@ export function Sessions() {
             </DialogTrigger>
             <DialogContent className="max-w-md">
               <DialogHeader>
-                <DialogTitle>Create New Session</DialogTitle>
+                <DialogTitle>Create Backtest Session</DialogTitle>
                 <DialogDescription>
-                  Configure a new backtest simulation session
+                  A session replays historical market data for the specified symbols and time range.
+                  Your trading strategy can then execute trades against this data.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <Label htmlFor="symbols">Symbols (comma-separated)</Label>
+                  <Label htmlFor="symbols">Symbols to Trade</Label>
                   <Input
                     id="symbols"
                     value={newSession.symbols.join(', ')}
                     onChange={(e) => setNewSession({
                       ...newSession,
-                      symbols: e.target.value.split(',').map(s => s.trim().toUpperCase()),
+                      symbols: e.target.value.split(',').map(s => s.trim().toUpperCase()).filter(s => s),
                     })}
-                    placeholder="AAPL, MSFT, GOOGL"
+                    placeholder="AAPL, MSFT, GOOGL, AMZN, NVDA"
                   />
+                  <p className="text-xs text-muted-foreground">
+                    Enter multiple symbols separated by commas. Market data will be loaded for all symbols.
+                  </p>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
