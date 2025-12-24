@@ -30,7 +30,8 @@
     "enable_latency": false,
     "fixed_latency_us": 0,
     "enable_slippage": false,
-    "fixed_slippage_bps": 0.0
+    "fixed_slippage_bps": 0.0,
+    "poll_interval_seconds": 60
   },
   "websocket": {
     "queue_size": 1000,
