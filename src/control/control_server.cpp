@@ -354,6 +354,28 @@ void ControlServer::sessionTime(const drogon::HttpRequestPtr& req,
     callback(json_resp(out));
 }
 
+void ControlServer::start(const drogon::HttpRequestPtr& req,
+                          std::function<void (const drogon::HttpResponsePtr &)> &&callback,
+                          std::string session_id) {
+    if (!authorize(req)) { callback(unauthorized()); return; }
+    auto session = session_mgr_->get_session(session_id);
+    if (!session) {
+        callback(json_resp(json{{"error", "session not found"}}, 404));
+        return;
+    }
+    if (session->status != SessionStatus::CREATED) {
+        callback(json_resp(json{{"error", "session already started"}}, 400));
+        return;
+    }
+    try {
+        session_mgr_->start_session(session_id);
+        callback(json_resp(json{{"status", "started"}, {"session_id", session_id}}));
+    } catch (const std::exception& e) {
+        spdlog::error("start_session failed: {}", e.what());
+        callback(json_resp(json{{"error", e.what()}}, 500));
+    }
+}
+
 void ControlServer::pause(const drogon::HttpRequestPtr& req,
                           std::function<void (const drogon::HttpResponsePtr &)> &&callback,
                           std::string session_id) {

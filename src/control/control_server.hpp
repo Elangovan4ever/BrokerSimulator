@@ -34,6 +34,7 @@ public:
     ADD_METHOD_TO(ControlServer::events, "/sessions/{1}/events", drogon::Get);
     ADD_METHOD_TO(ControlServer::performance, "/sessions/{1}/performance", drogon::Get);
     ADD_METHOD_TO(ControlServer::sessionTime, "/sessions/{1}/time", drogon::Get);
+    ADD_METHOD_TO(ControlServer::start, "/sessions/{1}/start", drogon::Post);
     ADD_METHOD_TO(ControlServer::pause, "/sessions/{1}/pause", drogon::Post);
     ADD_METHOD_TO(ControlServer::resume, "/sessions/{1}/resume", drogon::Post);
     ADD_METHOD_TO(ControlServer::stop, "/sessions/{1}/stop", drogon::Post);
@@ -98,6 +99,7 @@ public:
     void events(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
     void performance(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
     void sessionTime(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
+    void start(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
     void pause(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
     void resume(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
     void setSpeed(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr &)> &&callback, std::string session_id);
