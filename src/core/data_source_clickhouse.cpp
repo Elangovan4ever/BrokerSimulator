@@ -147,7 +147,12 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         ORDER BY ts ASC, kind ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str);
 
-    client_->Select(query, [&cb](const clickhouse::Block& block) {
+    // Batch events to avoid blocking TCP read with slow callback processing.
+    // This prevents ClickHouse send timeout from TCP backpressure.
+    std::vector<MarketEvent> batch;
+    batch.reserve(100000);  // Pre-allocate for typical batch size
+
+    client_->Select(query, [&batch](const clickhouse::Block& block) {
         for (size_t row = 0; row < block.GetRowCount(); ++row) {
             MarketEvent ev;
             ev.timestamp = extract_ts(block[0], row);
@@ -184,9 +189,14 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                 ev.quote.ask_exchange = ask_exch;
                 ev.quote.tape = tape;
             }
-            cb(ev);
+            batch.push_back(std::move(ev));
         }
     });
+
+    // Process batched events after query completes (no TCP backpressure)
+    for (const auto& ev : batch) {
+        cb(ev);
+    }
 }
 
 std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& symbol,
