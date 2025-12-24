@@ -23,7 +23,7 @@
   },
   "defaults": {
     "initial_capital": 100000.0,
-    "speed_factor": 0.0,
+    "speed_factor": 1.0,
     "max_sessions": 20
   },
   "execution": {

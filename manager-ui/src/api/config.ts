@@ -48,17 +48,18 @@ export function getBaseUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub'
 }
 
 export function getWsUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub', config = defaultConfig): string {
-  const { host, controlPort, alpacaPort, polygonPort, finnhubPort, wsPort } = config;
+  const { host, controlPort, alpacaPort, polygonPort, finnhubPort } = config;
 
+  // WebSocket paths must match server's WS_PATH_ADD registrations
   switch (service) {
     case 'control':
-      return `ws://${host}:${wsPort}`;
+      return `ws://${host}:${controlPort}/ws`;
     case 'alpaca':
       return `ws://${host}:${alpacaPort}/stream`;
     case 'polygon':
-      return `ws://${host}:${polygonPort}/stocks`;
+      return `ws://${host}:${polygonPort}/polygon/ws`;
     case 'finnhub':
-      return `ws://${host}:${finnhubPort}`;
+      return `ws://${host}:${finnhubPort}/finnhub/ws`;
     default:
       throw new Error(`Unknown service: ${service}`);
   }

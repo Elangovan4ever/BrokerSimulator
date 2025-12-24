@@ -64,7 +64,7 @@ export function Sessions() {
     start_time: '2025-01-13T09:30:00',
     end_time: '2025-01-13T16:00:00',
     initial_capital: 100000,
-    speed_factor: 0,
+    speed_factor: 1.0,
   });
 
   useEffect(() => {

@@ -9,6 +9,7 @@ import {
   Play,
   Filter,
   Download,
+  Link,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -29,9 +30,10 @@ import { Switch } from '@/components/ui/switch';
 import { StatusIndicator } from '@/components/common/StatusIndicator';
 import { JsonViewer } from '@/components/common/JsonViewer';
 import { useWebSocketStore } from '@/stores/websocketStore';
+import { useSessionStore } from '@/stores/sessionStore';
 import { getWsUrl } from '@/api/config';
 import { formatTimestamp, generateId } from '@/lib/utils';
-import type { ApiService, WebSocketConnection, WebSocketMessage } from '@/types';
+import type { ApiService, WebSocketConnection, WebSocketMessage, Session } from '@/types';
 import { toast } from 'sonner';
 
 export function WebSocketMonitor() {
@@ -46,16 +48,37 @@ export function WebSocketMonitor() {
     clearMessages,
   } = useWebSocketStore();
 
+  const { sessions, fetchSessions } = useSessionStore();
+
   const [selectedService, setSelectedService] = useState<ApiService>('alpaca');
   const [customUrl, setCustomUrl] = useState('');
   const [useCustomUrl, setUseCustomUrl] = useState(false);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [messageInput, setMessageInput] = useState('');
   const [subscriptionInput, setSubscriptionInput] = useState('');
-  const [apiKey, setApiKey] = useState('');
   const [isPaused, setIsPaused] = useState(false);
   const [filterText, setFilterText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Fetch sessions on mount
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  // Auto-select first running session
+  useEffect(() => {
+    if (!selectedSessionId && sessions.length > 0) {
+      const runningSession = sessions.find(s => s.status === 'RUNNING');
+      if (runningSession) {
+        setSelectedSessionId(runningSession.id);
+      } else if (sessions.length > 0) {
+        setSelectedSessionId(sessions[0].id);
+      }
+    }
+  }, [sessions, selectedSessionId]);
+
+  const selectedSession = sessions.find(s => s.id === selectedSessionId);
 
   const selectedConnection = connections.find(c => c.id === selectedConnectionId);
 
@@ -67,10 +90,14 @@ export function WebSocketMonitor() {
   }, [messages, isPaused]);
 
   const handleConnect = () => {
-    const url = useCustomUrl ? customUrl : getWsUrl(selectedService);
-    const connectionId = connect(selectedService, useCustomUrl ? customUrl : undefined);
+    let url = useCustomUrl ? customUrl : getWsUrl(selectedService);
+    // Append session_id to URL if a session is selected
+    if (selectedSessionId && !useCustomUrl) {
+      url = `${url}?session_id=${selectedSessionId}`;
+    }
+    const connectionId = connect(selectedService, url);
     setSelectedConnectionId(connectionId);
-    toast.success(`Connecting to ${selectedService}...`);
+    toast.success(`Connecting to ${selectedService}${selectedSessionId ? ' (linked to session)' : ''}...`);
   };
 
   const handleDisconnect = (connectionId: string) => {
@@ -103,11 +130,12 @@ export function WebSocketMonitor() {
     toast.success(`Subscribed to ${channels.join(', ')}`);
   };
 
-  const handleAuthenticate = () => {
-    if (!selectedConnectionId || !apiKey.trim()) return;
+  const handleLinkSession = () => {
+    if (!selectedConnectionId || !selectedSessionId) return;
 
-    authenticate(selectedConnectionId, apiKey);
-    toast.success('Authentication sent');
+    // Send session_id to link the connection
+    send(selectedConnectionId, { session_id: selectedSessionId });
+    toast.success('Linked to session');
   };
 
   const handleExportMessages = () => {
@@ -336,23 +364,41 @@ export function WebSocketMonitor() {
             <CardTitle className="text-lg">Actions</CardTitle>
           </CardHeader>
           <CardContent className="space-y-6">
-            {/* Authentication */}
+            {/* Session Selection */}
             <div className="space-y-2">
-              <Label>Authentication</Label>
-              <Input
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="API Key"
-                type="password"
-              />
-              <Button
-                className="w-full"
-                variant="outline"
-                onClick={handleAuthenticate}
-                disabled={!selectedConnectionId}
-              >
-                Authenticate
-              </Button>
+              <Label>Link to Session</Label>
+              <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a session" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sessions.length === 0 ? (
+                    <SelectItem value="" disabled>No sessions available</SelectItem>
+                  ) : (
+                    sessions.map((session) => (
+                      <SelectItem key={session.id} value={session.id}>
+                        {session.symbols?.join(', ') || 'No symbols'} ({session.status})
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+              {selectedSession && (
+                <div className="text-xs text-muted-foreground">
+                  <p>Symbols: {selectedSession.symbols?.join(', ')}</p>
+                  <p>Status: {selectedSession.status}</p>
+                </div>
+              )}
+              {selectedConnectionId && selectedSessionId && (
+                <Button
+                  className="w-full"
+                  variant="outline"
+                  onClick={handleLinkSession}
+                >
+                  <Link className="h-4 w-4 mr-2" />
+                  Link Connection to Session
+                </Button>
+              )}
             </div>
 
             <Separator />
@@ -399,14 +445,15 @@ export function WebSocketMonitor() {
               </Button>
             </div>
 
-            {/* Quick Actions */}
-            {selectedConnection && (
+            {/* Quick Actions - Show session symbols */}
+            {selectedConnection && selectedSession && selectedSession.symbols && selectedSession.symbols.length > 0 && (
               <>
                 <Separator />
                 <div className="space-y-2">
-                  <Label>Quick Subscribe</Label>
+                  <Label>Session Symbols</Label>
+                  <p className="text-xs text-muted-foreground">Subscribe to symbols from the linked session</p>
                   <div className="grid grid-cols-2 gap-2">
-                    {['AAPL', 'MSFT', 'GOOGL', 'AMZN'].map((symbol) => (
+                    {selectedSession.symbols.map((symbol) => (
                       <Button
                         key={symbol}
                         variant="outline"
@@ -414,11 +461,40 @@ export function WebSocketMonitor() {
                         onClick={() => {
                           const prefix = selectedConnection.service === 'finnhub' ? '' : 'T.';
                           subscribe(selectedConnection.id, [`${prefix}${symbol}`]);
+                          toast.success(`Subscribed to ${prefix}${symbol}`);
                         }}
                       >
                         {symbol}
                       </Button>
                     ))}
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => {
+                        const prefix = selectedConnection.service === 'finnhub' ? '' : 'T.';
+                        const channels = selectedSession.symbols!.map(s => `${prefix}${s}`);
+                        subscribe(selectedConnection.id, channels);
+                        toast.success(`Subscribed to all trades`);
+                      }}
+                    >
+                      All Trades
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => {
+                        const prefix = selectedConnection.service === 'finnhub' ? '' : 'Q.';
+                        const channels = selectedSession.symbols!.map(s => `${prefix}${s}`);
+                        subscribe(selectedConnection.id, channels);
+                        toast.success(`Subscribed to all quotes`);
+                      }}
+                    >
+                      All Quotes
+                    </Button>
                   </div>
                 </div>
               </>
