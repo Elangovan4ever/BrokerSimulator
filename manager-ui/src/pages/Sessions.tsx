@@ -61,8 +61,8 @@ export function Sessions() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newSession, setNewSession] = useState<SessionConfig>({
     symbols: ['AAPL'],
-    start_time: '2024-01-15T09:30:00',
-    end_time: '2024-01-15T16:00:00',
+    start_time: '2025-01-13T09:30:00',
+    end_time: '2025-01-13T16:00:00',
     initial_capital: 100000,
     speed_factor: 0,
   });

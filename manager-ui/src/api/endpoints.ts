@@ -5,7 +5,7 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
   control: [
     // Sessions
     { method: 'GET', path: '/sessions', description: 'List all sessions' },
-    { method: 'POST', path: '/sessions', description: 'Create new session', body: { symbols: ['AAPL'], start_time: '2024-01-15T09:30:00Z', end_time: '2024-01-15T16:00:00Z', initial_capital: 100000 } },
+    { method: 'POST', path: '/sessions', description: 'Create new session', body: { symbols: ['AAPL'], start_time: '2025-01-13T09:30:00', end_time: '2025-01-13T16:00:00', initial_capital: 100000 } },
     { method: 'GET', path: '/sessions/{session_id}', description: 'Get session details', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'DELETE', path: '/sessions/{session_id}', description: 'Delete session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'POST', path: '/sessions/{session_id}/start', description: 'Start session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
@@ -13,7 +13,7 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     { method: 'POST', path: '/sessions/{session_id}/resume', description: 'Resume session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'POST', path: '/sessions/{session_id}/stop', description: 'Stop session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'POST', path: '/sessions/{session_id}/set_speed', description: 'Set replay speed', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { speed_factor: 10.0 } },
-    { method: 'POST', path: '/sessions/{session_id}/jump_to', description: 'Jump to timestamp', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { timestamp: '2024-01-15T10:00:00Z' } },
+    { method: 'POST', path: '/sessions/{session_id}/jump_to', description: 'Jump to timestamp', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { timestamp: '2025-01-13T10:00:00' } },
   ],
 
   alpaca: [
@@ -44,8 +44,8 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
       { name: 'multiplier', type: 'path', required: true, description: 'Size of timespan (e.g., 1)', default: '1' },
       { name: 'timespan', type: 'path', required: true, description: 'Timespan (minute, hour, day)', default: 'minute' },
-      { name: 'from', type: 'path', required: true, description: 'Start date (YYYY-MM-DD)', default: '2024-01-15' },
-      { name: 'to', type: 'path', required: true, description: 'End date (YYYY-MM-DD)', default: '2024-01-15' },
+      { name: 'from', type: 'path', required: true, description: 'Start date (YYYY-MM-DD)', default: '2025-01-13' },
+      { name: 'to', type: 'path', required: true, description: 'End date (YYYY-MM-DD)', default: '2025-01-13' },
     ]},
     { method: 'GET', path: '/v2/aggs/ticker/{symbol}/prev', description: 'Previous day aggregate', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
     // Trades & Quotes
@@ -68,8 +68,8 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     { method: 'GET', path: '/stock/candle', description: 'Get candles/OHLCV', params: [
       { name: 'symbol', type: 'query', required: true, description: 'Stock symbol' },
       { name: 'resolution', type: 'query', required: true, description: 'Resolution (1, 5, 15, 30, 60, D, W, M)', default: '1' },
-      { name: 'from', type: 'query', required: true, description: 'Start timestamp (Unix)', default: '1705312200' },
-      { name: 'to', type: 'query', required: true, description: 'End timestamp (Unix)', default: '1705335600' },
+      { name: 'from', type: 'query', required: true, description: 'Start timestamp (Unix)', default: '1736768400' },
+      { name: 'to', type: 'query', required: true, description: 'End timestamp (Unix)', default: '1736791800' },
     ]},
     // Company Info
     { method: 'GET', path: '/stock/profile2', description: 'Company profile', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
