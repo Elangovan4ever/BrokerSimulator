@@ -107,7 +107,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         SELECT ts, symbol, kind, price, size, bid_price, bid_size, ask_price, ask_size, exchange, conditions, tape, bid_exch, ask_exch
         FROM (
             SELECT timestamp as ts,
-                   symbol,
+                   CAST(symbol AS String) as symbol,
                    toUInt8(1) as kind,
                    toFloat64(price) as price,
                    toInt64(size) as size,
@@ -126,7 +126,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
               AND timestamp < '{}'
             UNION ALL
             SELECT sip_timestamp as ts,
-                   symbol,
+                   CAST(symbol AS String) as symbol,
                    toUInt8(0) as kind,
                    toFloat64(bid_price) as price,
                    toInt64(bid_size) as size,
