@@ -42,6 +42,7 @@ struct DefaultsConfig {
     double initial_capital{100000.0};
     double speed_factor{0.0}; // 0 = max speed
     int max_sessions{20};
+    size_t session_queue_capacity{0};  // 0 = unlimited (for backtest sessions)
 };
 
 struct ExecutionConfig {
@@ -421,6 +422,7 @@ inline void load_config(Config& cfg, const std::string& path) {
         cfg.defaults.initial_capital = d.value("initial_capital", cfg.defaults.initial_capital);
         cfg.defaults.speed_factor = d.value("speed_factor", cfg.defaults.speed_factor);
         cfg.defaults.max_sessions = d.value("max_sessions", cfg.defaults.max_sessions);
+        cfg.defaults.session_queue_capacity = d.value("session_queue_capacity", cfg.defaults.session_queue_capacity);
     }
     if (j.contains("execution")) {
         auto& e = j["execution"];

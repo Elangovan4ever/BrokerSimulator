@@ -62,8 +62,9 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
     if (!authorize(req)) { callback(unauthorized()); return; }
     try {
         SessionConfig cfg;
-        cfg.queue_capacity = cfg_.websocket.queue_size;
-        cfg.overflow_policy = cfg_.websocket.overflow_policy;
+        // Use unlimited queue (0) for sessions to hold all preloaded events
+        cfg.queue_capacity = cfg_.defaults.session_queue_capacity;
+        cfg.overflow_policy = "block";  // Sessions should never drop events
         auto body = req->getBody();
         std::optional<std::string> requested_id;
         if (!body.empty()) {
