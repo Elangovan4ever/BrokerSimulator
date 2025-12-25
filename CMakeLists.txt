@@ -10,6 +10,13 @@ option(BUILD_PERF "Build perf benchmarks" ON)
 option(USE_DROGON "Use Drogon for HTTP/WS (requires libdrogon-dev)" ON)
 option(USE_CLICKHOUSE "Use ClickHouse client if available" ON)
 option(USE_WEBSOCKETPP "Enable websocketpp server" OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+
+if(ENABLE_ASAN)
+  message(STATUS "AddressSanitizer enabled")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address)
+endif()
 
 include(FetchContent)
 
