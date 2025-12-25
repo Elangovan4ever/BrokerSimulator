@@ -36,6 +36,7 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const TradeRecord&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return;
     std::string sym_list = build_symbol_list(symbols);
     auto start_str = format_timestamp(start_time);
@@ -68,6 +69,7 @@ void ClickHouseDataSource::stream_quotes(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const QuoteRecord&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return;
     std::string sym_list = build_symbol_list(symbols);
     auto start_str = format_timestamp(start_time);
@@ -102,6 +104,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const MarketEvent&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     // Reconnect if client is null or stale
     if (!client_) {
         spdlog::info("ClickHouse client not connected, reconnecting...");
@@ -235,6 +238,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
                                                           Timestamp end_time,
                                                           size_t limit) {
     std::vector<TradeRecord> out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
@@ -270,6 +274,7 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
                                                           Timestamp end_time,
                                                           size_t limit) {
     std::vector<QuoteRecord> out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
@@ -309,6 +314,7 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
                                                       const std::string& timespan,
                                                       size_t limit) {
     std::vector<BarRecord> out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);

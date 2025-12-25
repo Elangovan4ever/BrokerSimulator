@@ -4,6 +4,7 @@
 #include <clickhouse/client.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
+#include <mutex>
 
 namespace broker_sim {
 
@@ -112,6 +113,7 @@ private:
 
     ClickHouseConfig cfg_;
     std::unique_ptr<clickhouse::Client> client_;
+    mutable std::mutex client_mutex_;  // Protects client_ from concurrent access
 };
 
 } // namespace broker_sim
