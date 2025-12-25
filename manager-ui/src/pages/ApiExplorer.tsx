@@ -1,19 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Send,
   Clock,
-  ChevronDown,
-  Copy,
-  Check,
   Trash2,
 } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Select,
   SelectContent,
@@ -26,8 +21,9 @@ import { Separator } from '@/components/ui/separator';
 import { JsonViewer } from '@/components/common/JsonViewer';
 import { apiEndpoints } from '@/api/endpoints';
 import { makeRequest } from '@/api/client';
+import { useSessionStore } from '@/stores/sessionStore';
 import { formatDuration } from '@/lib/utils';
-import type { ApiService, HttpMethod, ApiEndpoint, ApiResponse, ApiParam } from '@/types';
+import type { ApiService, HttpMethod, ApiEndpoint, ApiResponse } from '@/types';
 import { toast } from 'sonner';
 
 interface RequestHistory {
@@ -49,27 +45,62 @@ export function ApiExplorer() {
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [history, setHistory] = useState<RequestHistory[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+
+  const { sessions, fetchSessions } = useSessionStore();
+
+  // Fetch sessions on mount
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  // Auto-select first session
+  useEffect(() => {
+    if (!selectedSessionId && sessions.length > 0) {
+      setSelectedSessionId(sessions[0].id);
+    }
+  }, [sessions, selectedSessionId]);
+
+  // Auto-populate session_id in path params when session changes
+  useEffect(() => {
+    if (selectedSessionId && selectedEndpoint?.params?.some(p => p.name === 'session_id')) {
+      setPathParams(prev => ({ ...prev, session_id: selectedSessionId }));
+    }
+  }, [selectedSessionId, selectedEndpoint]);
 
   const endpoints = apiEndpoints[selectedService] || [];
+  const selectedSession = sessions.find(s => s.id === selectedSessionId);
 
   const handleSelectEndpoint = (endpoint: ApiEndpoint) => {
     setSelectedEndpoint(endpoint);
     setMethod(endpoint.method);
     setPath(endpoint.path);
     setBody(endpoint.body ? JSON.stringify(endpoint.body, null, 2) : '');
-    setPathParams({});
-    setQueryParams({});
 
-    // Initialize params with defaults
+    // Reset params
+    const newPathParams: Record<string, string> = {};
+    const newQueryParams: Record<string, string> = {};
+
+    // Initialize params with defaults or session_id
     endpoint.params?.forEach(param => {
-      if (param.default) {
+      if (param.name === 'session_id' && selectedSessionId) {
+        // Auto-fill session_id from selected session
         if (param.type === 'path') {
-          setPathParams(prev => ({ ...prev, [param.name]: param.default! }));
+          newPathParams[param.name] = selectedSessionId;
         } else if (param.type === 'query') {
-          setQueryParams(prev => ({ ...prev, [param.name]: param.default! }));
+          newQueryParams[param.name] = selectedSessionId;
+        }
+      } else if (param.default) {
+        if (param.type === 'path') {
+          newPathParams[param.name] = param.default;
+        } else if (param.type === 'query') {
+          newQueryParams[param.name] = param.default;
         }
       }
     });
+
+    setPathParams(newPathParams);
+    setQueryParams(newQueryParams);
   };
 
   const buildFinalPath = (): string => {
@@ -147,7 +178,7 @@ export function ApiExplorer() {
       <div className="flex-1 flex gap-6 min-h-0">
         {/* Endpoints Sidebar */}
         <Card className="w-80 flex flex-col">
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-2 space-y-3">
             <Select value={selectedService} onValueChange={(v) => setSelectedService(v as ApiService)}>
               <SelectTrigger>
                 <SelectValue />
@@ -159,6 +190,34 @@ export function ApiExplorer() {
                 <SelectItem value="finnhub">Finnhub API (8300)</SelectItem>
               </SelectContent>
             </Select>
+
+            <Separator />
+
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Active Session</Label>
+              <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a session" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sessions.length === 0 ? (
+                    <SelectItem value="" disabled>No sessions available</SelectItem>
+                  ) : (
+                    sessions.map((session) => (
+                      <SelectItem key={session.id} value={session.id}>
+                        {session.symbols?.slice(0, 2).join(', ')}{session.symbols && session.symbols.length > 2 ? '...' : ''} ({session.status})
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+              {selectedSession && (
+                <div className="text-xs text-muted-foreground p-2 bg-muted/50 rounded">
+                  <p className="font-mono truncate">{selectedSessionId.slice(0, 12)}...</p>
+                  <p>Status: <span className={selectedSession.status === 'RUNNING' ? 'text-green-500' : ''}>{selectedSession.status}</span></p>
+                </div>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="flex-1 p-0">
             <ScrollArea className="h-full">
