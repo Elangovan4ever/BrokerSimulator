@@ -137,12 +137,18 @@ export function ApiExplorer() {
       const finalPath = buildFinalPath();
       const bodyData = body ? JSON.parse(body) : undefined;
 
+      // For broker APIs, always include session_id in query params
+      const finalQueryParams = { ...queryParams };
+      if (apiMode === 'broker' && selectedSessionId) {
+        finalQueryParams.session_id = selectedSessionId;
+      }
+
       const result = await makeRequest(
         currentService,
         method,
         finalPath,
         bodyData,
-        Object.keys(queryParams).length > 0 ? queryParams : undefined
+        Object.keys(finalQueryParams).length > 0 ? finalQueryParams : undefined
       );
 
       setResponse(result);
