@@ -48,6 +48,11 @@ void StatusWsController::handleNewMessage(const drogon::WebSocketConnectionPtr& 
         return;
     }
 
+    // Ignore empty messages (heartbeats, keep-alives)
+    if (message.empty()) {
+        return;
+    }
+
     // Parse message
     try {
         auto msg = nlohmann::json::parse(message);
