@@ -552,12 +552,13 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
     // Track event processing for periodic checkpointing
     session->events_processed.fetch_add(1, std::memory_order_relaxed);
 
-    append_event_log(session->id,
-        fmt::format(R"({{"ts_ns":{},"seq":{},"symbol":"{}","type":{}}})",
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
-                    ev.sequence,
-                    ev.symbol,
-                    static_cast<int>(ev.event_type)));
+    // Temporarily disabled for debugging crash
+    // append_event_log(session->id,
+    //     fmt::format(R"({{"ts_ns":{},"seq":{},"symbol":"{}","type":{}}})",
+    //                 std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
+    //                 ev.sequence,
+    //                 ev.symbol,
+    //                 static_cast<int>(ev.event_type)));
     session->last_event_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
                                  std::memory_order_release);
     if (session->wal) {
