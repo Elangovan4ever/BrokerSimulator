@@ -104,38 +104,36 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
     // Build response
     json results = json::array();
 
-    // If we have a session with data source, query it
-    if (session) {
-        auto data_source = session_mgr_->api_data_source();
-        if (data_source) {
-            // Parse from/to timestamps
-            auto from_ts = utils::parse_ts_any(from);
-            auto to_ts = utils::parse_ts_any(to);
+    // Query data source (works with or without a session)
+    auto data_source = session_mgr_->api_data_source();
+    if (data_source) {
+        // Parse from/to timestamps
+        auto from_ts = utils::parse_ts_any(from);
+        auto to_ts = utils::parse_ts_any(to);
 
-            // If 'to' is date-only (YYYY-MM-DD), adjust to end of day
-            // Date-only strings result in midnight, so from==to gives empty range
-            if (to_ts && from_ts && *from_ts == *to_ts) {
-                // Same timestamp means date-only input, add 24 hours to 'to'
-                *to_ts += std::chrono::hours(24);
-            } else if (to_ts && to.size() == 10 && to[4] == '-' && to[7] == '-') {
-                // Date-only format detected (YYYY-MM-DD), add 24 hours
-                *to_ts += std::chrono::hours(24);
-            }
+        // If 'to' is date-only (YYYY-MM-DD), adjust to end of day
+        // Date-only strings result in midnight, so from==to gives empty range
+        if (to_ts && from_ts && *from_ts == *to_ts) {
+            // Same timestamp means date-only input, add 24 hours to 'to'
+            *to_ts += std::chrono::hours(24);
+        } else if (to_ts && to.size() == 10 && to[4] == '-' && to[7] == '-') {
+            // Date-only format detected (YYYY-MM-DD), add 24 hours
+            *to_ts += std::chrono::hours(24);
+        }
 
-            if (from_ts && to_ts) {
-                auto bars = data_source->get_bars(symbol, *from_ts, *to_ts, mult, timespan, limit);
-                for (const auto& bar : bars) {
-                    json bar_item;
-                    bar_item["v"] = bar.volume;
-                    bar_item["vw"] = bar.vwap;
-                    bar_item["o"] = bar.open;
-                    bar_item["c"] = bar.close;
-                    bar_item["h"] = bar.high;
-                    bar_item["l"] = bar.low;
-                    bar_item["t"] = utils::ts_to_ms(bar.timestamp);
-                    bar_item["n"] = bar.trade_count;
-                    results.push_back(bar_item);
-                }
+        if (from_ts && to_ts) {
+            auto bars = data_source->get_bars(symbol, *from_ts, *to_ts, mult, timespan, limit);
+            for (const auto& bar : bars) {
+                json bar_item;
+                bar_item["v"] = bar.volume;
+                bar_item["vw"] = bar.vwap;
+                bar_item["o"] = bar.open;
+                bar_item["c"] = bar.close;
+                bar_item["h"] = bar.high;
+                bar_item["l"] = bar.low;
+                bar_item["t"] = utils::ts_to_ms(bar.timestamp);
+                bar_item["n"] = bar.trade_count;
+                results.push_back(bar_item);
             }
         }
     }
