@@ -16,25 +16,30 @@ using Nanoseconds = std::chrono::nanoseconds;
 /**
  * Controls simulation time for a session.
  * Thread-safe for multi-threaded access.
+ *
+ * Note: Uses atomic<int64_t> for nanoseconds instead of atomic<Timestamp>
+ * because std::chrono::time_point may not be trivially copyable on all
+ * platforms, which can cause atomic operations to fail silently.
  */
 class TimeEngine {
 public:
     using TimeListener = std::function<void(Timestamp)>;
 
-    TimeEngine() = default;
+    TimeEngine() : current_time_ns_(0) {}
     ~TimeEngine() = default;
 
     TimeEngine(const TimeEngine&) = delete;
     TimeEngine& operator=(const TimeEngine&) = delete;
 
     Timestamp current_time() const {
-        return current_time_.load(std::memory_order_acquire);
+        int64_t ns = current_time_ns_.load(std::memory_order_acquire);
+        return Timestamp{} + Nanoseconds(ns);
     }
 
     void set_time(Timestamp ts) {
-        auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count();
+        int64_t ts_ns = std::chrono::duration_cast<Nanoseconds>(ts.time_since_epoch()).count();
         spdlog::info("TimeEngine::set_time called with ts_ns={}", ts_ns);
-        current_time_.store(ts, std::memory_order_release);
+        current_time_ns_.store(ts_ns, std::memory_order_release);
         notify_listeners(ts);
     }
 
@@ -86,24 +91,25 @@ public:
             return false;
         }
 
-        auto current = current_time_.load(std::memory_order_acquire);
-        auto diff = std::chrono::duration_cast<Nanoseconds>(event_time - current);
+        int64_t current_ns = current_time_ns_.load(std::memory_order_acquire);
+        int64_t event_ns = std::chrono::duration_cast<Nanoseconds>(event_time.time_since_epoch()).count();
+        int64_t diff_ns = event_ns - current_ns;
         double speed = speed_factor_.load(std::memory_order_acquire);
 
-        // Log first event timing
+        // Log first few events for debugging
         static std::atomic<int> log_count{0};
-        if (log_count.fetch_add(1) < 3) {
-            auto current_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current.time_since_epoch()).count();
-            auto event_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(event_time.time_since_epoch()).count();
-            auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(diff).count();
-            spdlog::info("TimeEngine: current_ns={}, event_ns={}, diff={}ms, speed={}", current_ns, event_ns, diff_ms, speed);
+        if (log_count.fetch_add(1) < 5) {
+            spdlog::info("TimeEngine: current_ns={}, event_ns={}, diff={}ms, speed={}",
+                         current_ns, event_ns, diff_ns / 1000000, speed);
         }
 
-        if (speed > 0.0 && diff.count() > 0) {
-            auto sleep_time = Nanoseconds(static_cast<int64_t>(diff.count() / speed));
+        if (speed > 0.0 && diff_ns > 0) {
+            auto sleep_time = Nanoseconds(static_cast<int64_t>(diff_ns / speed));
             std::this_thread::sleep_for(sleep_time);
         }
-        advance_to(event_time);
+
+        // Advance time to event_time
+        advance_to(event_ns);
         return true;
     }
 
@@ -113,10 +119,11 @@ public:
     }
 
 private:
-    void advance_to(Timestamp ts) {
-        Timestamp cur = current_time_.load(std::memory_order_acquire);
-        while (ts > cur) {
-            if (current_time_.compare_exchange_weak(cur, ts, std::memory_order_release, std::memory_order_acquire)) {
+    void advance_to(int64_t ts_ns) {
+        int64_t cur_ns = current_time_ns_.load(std::memory_order_acquire);
+        while (ts_ns > cur_ns) {
+            if (current_time_ns_.compare_exchange_weak(cur_ns, ts_ns, std::memory_order_release, std::memory_order_acquire)) {
+                Timestamp ts = Timestamp{} + Nanoseconds(ts_ns);
                 notify_listeners(ts);
                 break;
             }
@@ -128,7 +135,7 @@ private:
         for (auto& l : listeners_) l(ts);
     }
 
-    std::atomic<Timestamp> current_time_{Timestamp{}};
+    std::atomic<int64_t> current_time_ns_;  // Nanoseconds since epoch - guaranteed lock-free
     std::atomic<double> speed_factor_{0.0}; // 0 = max speed
     std::atomic<bool> is_running_{false};
     std::atomic<bool> is_paused_{false};
