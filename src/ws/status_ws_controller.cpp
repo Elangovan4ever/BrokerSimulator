@@ -16,21 +16,25 @@ void StatusWsController::init(std::shared_ptr<SessionManager> session_mgr) {
 
 void StatusWsController::handleNewConnection(const drogon::HttpRequestPtr& req,
                                               const drogon::WebSocketConnectionPtr& conn) {
-    spdlog::info("Status WebSocket client connected from {}", req->getPeerAddr().toIp());
+    try {
+        spdlog::info("Status WebSocket client connected from {}", req->getPeerAddr().toIp());
 
-    {
-        std::lock_guard<std::mutex> lock(conn_mutex_);
-        connections_.insert(conn);
+        {
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            connections_.insert(conn);
+        }
+
+        // Send current state of all sessions to the new client
+        send_initial_state(conn);
+
+        // Send welcome message
+        nlohmann::json welcome;
+        welcome["type"] = "connected";
+        welcome["message"] = "Connected to session status stream";
+        conn->send(welcome.dump());
+    } catch (const std::exception& e) {
+        spdlog::error("StatusWsController handleNewConnection error: {}", e.what());
     }
-
-    // Send current state of all sessions to the new client
-    send_initial_state(conn);
-
-    // Send welcome message
-    nlohmann::json welcome;
-    welcome["type"] = "connected";
-    welcome["message"] = "Connected to session status stream";
-    conn->send(welcome.dump());
 }
 
 void StatusWsController::handleConnectionClosed(const drogon::WebSocketConnectionPtr& conn) {

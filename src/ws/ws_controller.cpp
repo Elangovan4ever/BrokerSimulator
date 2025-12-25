@@ -822,10 +822,11 @@ void WsController::start_worker() {
 }
 
 void WsController::worker_loop() {
-    using namespace std::chrono_literals;
-    auto interval = std::chrono::milliseconds(std::max(1, cfg_.websocket.flush_interval_ms));
+    try {
+        using namespace std::chrono_literals;
+        auto interval = std::chrono::milliseconds(std::max(1, cfg_.websocket.flush_interval_ms));
 
-    while (worker_running_.load()) {
+        while (worker_running_.load()) {
         std::unordered_map<std::string, std::vector<std::string>> to_send;
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -861,6 +862,11 @@ void WsController::worker_loop() {
         for (auto& kv : to_send) {
             send_batch(kv.first, kv.second);
         }
+        }  // end while
+    } catch (const std::exception& e) {
+        spdlog::error("WsController worker_loop exception: {}", e.what());
+    } catch (...) {
+        spdlog::error("WsController worker_loop unknown exception");
     }
 }
 

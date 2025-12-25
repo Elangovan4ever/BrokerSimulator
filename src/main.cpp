@@ -83,5 +83,9 @@ int main(int argc, char* argv[]) {
                  cfg.services.polygon_port,
                  cfg.services.finnhub_port);
     drogon::app().run();
+
+    // Clean shutdown of WebSocket worker threads
+    broker_sim::WsController::shutdown();
+
     return 0;
 }
