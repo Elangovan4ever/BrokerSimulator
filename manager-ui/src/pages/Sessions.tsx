@@ -334,6 +334,12 @@ export function Sessions() {
                       </Button>
                     </>
                   )}
+                  {['STOPPED', 'COMPLETED'].includes(selectedSession.status) && (
+                    <Button onClick={() => startSession(selectedSession.id)}>
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      Restart
+                    </Button>
+                  )}
                   {['RUNNING', 'PAUSED'].includes(selectedSession.status) && (
                     <Select
                       value={String(selectedSession.speed_factor || 0)}

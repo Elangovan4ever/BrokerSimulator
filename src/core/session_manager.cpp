@@ -132,6 +132,19 @@ std::vector<std::shared_ptr<Session>> SessionManager::list_sessions() const {
 void SessionManager::start_session(const std::string& session_id) {
     auto session = get_session(session_id);
     if (!session) return;
+
+    // Reset state for restart if session was previously stopped/completed
+    if (session->status == SessionStatus::STOPPED ||
+        session->status == SessionStatus::COMPLETED) {
+        // Reset event queue to accept new events
+        if (session->event_queue) {
+            session->event_queue->reset();
+            session->event_queue->clear();
+        }
+        // Reset time engine to session start time
+        session->time_engine->set_time(session->config.start_time);
+    }
+
     session->status = SessionStatus::RUNNING;
     session->started_at = std::chrono::system_clock::now();
     session->time_engine->start();
