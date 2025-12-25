@@ -791,8 +791,9 @@ std::string ClickHouseDataSource::format_timestamp(Timestamp ts) {
 
 Timestamp ClickHouseDataSource::extract_ts(const clickhouse::ColumnRef& col, size_t row) {
     auto c = col->As<clickhouse::ColumnDateTime64>();
-    auto micros = c->At(row);
-    return Timestamp{} + std::chrono::microseconds(micros);
+    // DateTime64(9) stores nanoseconds since epoch
+    auto nanos = c->At(row);
+    return Timestamp{} + std::chrono::nanoseconds(nanos);
 }
 
 std::string ClickHouseDataSource::interval_expr(int multiplier, const std::string& timespan) {
@@ -827,8 +828,9 @@ Timestamp ClickHouseDataSource::extract_ts_any(const clickhouse::ColumnRef& col,
         return extract_ts_any(n->Nested(), row);
     }
     if (auto c = col->As<clickhouse::ColumnDateTime64>()) {
-        auto micros = c->At(row);
-        return Timestamp{} + std::chrono::microseconds(micros);
+        // DateTime64(9) stores nanoseconds since epoch
+        auto nanos = c->At(row);
+        return Timestamp{} + std::chrono::nanoseconds(nanos);
     }
     if (auto c = col->As<clickhouse::ColumnDateTime>()) {
         auto secs = c->At(row);
