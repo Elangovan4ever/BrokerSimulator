@@ -87,11 +87,16 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
                              std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                              std::string symbol, std::string multiplier,
                              std::string timespan, std::string from, std::string to) {
+    try {
     if (!authorize(req)) { cb(unauthorized()); return; }
-    auto session = get_session(req);
 
     // Parse parameters
-    int mult = std::stoi(multiplier);
+    int mult = 1;
+    try {
+        mult = std::stoi(multiplier);
+    } catch (...) {
+        mult = 1;
+    }
     bool adjusted = req->getParameter("adjusted") != "false";
     std::string sort = req->getParameter("sort");
     if (sort.empty()) sort = "asc";
@@ -154,6 +159,10 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
     }
 
     cb(json_resp(response));
+    } catch (const std::exception& e) {
+        spdlog::error("aggs error: {}", e.what());
+        cb(error_resp(e.what(), 500));
+    }
 }
 
 void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
