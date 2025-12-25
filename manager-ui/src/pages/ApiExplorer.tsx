@@ -265,33 +265,37 @@ export function ApiExplorer() {
                       <Activity className="h-3 w-3 text-green-500" />
                       Running Session
                     </Label>
-                    <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
-                      <SelectTrigger className={runningSessions.length === 0 ? 'border-destructive' : ''}>
-                        <SelectValue placeholder="Select running session" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {runningSessions.length === 0 ? (
-                          <SelectItem value="" disabled>No running sessions</SelectItem>
-                        ) : (
-                          runningSessions.map((session) => (
-                            <SelectItem key={session.id} value={session.id}>
-                              {session.symbols?.slice(0, 2).join(', ')}{session.symbols && session.symbols.length > 2 ? '...' : ''}
-                            </SelectItem>
-                          ))
+                    {runningSessions.length === 0 ? (
+                      <div className="p-3 border border-destructive/50 bg-destructive/10 rounded-md space-y-2">
+                        <div className="flex items-center gap-2 text-sm text-destructive font-medium">
+                          <AlertCircle className="h-4 w-4" />
+                          No running sessions
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Go to Sessions page and start a session first. Broker APIs require an active session to return market data.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select running session" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {runningSessions.map((session) => (
+                              <SelectItem key={session.id} value={session.id}>
+                                {session.symbols?.slice(0, 2).join(', ')}{session.symbols && session.symbols.length > 2 ? '...' : ''}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {selectedSession && (
+                          <div className="text-xs text-muted-foreground p-2 bg-muted/50 rounded">
+                            <p className="font-mono truncate">{selectedSessionId.slice(0, 12)}...</p>
+                            <p>Symbols: {selectedSession.symbols?.join(', ')}</p>
+                          </div>
                         )}
-                      </SelectContent>
-                    </Select>
-                    {runningSessions.length === 0 && (
-                      <div className="flex items-center gap-1 text-xs text-destructive">
-                        <AlertCircle className="h-3 w-3" />
-                        Start a session first
-                      </div>
-                    )}
-                    {selectedSession && (
-                      <div className="text-xs text-muted-foreground p-2 bg-muted/50 rounded">
-                        <p className="font-mono truncate">{selectedSessionId.slice(0, 12)}...</p>
-                        <p>Symbols: {selectedSession.symbols?.join(', ')}</p>
-                      </div>
+                      </>
                     )}
                   </div>
 
