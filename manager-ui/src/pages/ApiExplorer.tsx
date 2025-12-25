@@ -3,12 +3,16 @@ import {
   Send,
   Clock,
   Trash2,
+  Server,
+  Activity,
+  AlertCircle,
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Select,
   SelectContent,
@@ -34,8 +38,12 @@ interface RequestHistory {
   response: ApiResponse;
 }
 
+type ApiMode = 'session' | 'broker';
+type BrokerService = 'alpaca' | 'polygon' | 'finnhub';
+
 export function ApiExplorer() {
-  const [selectedService, setSelectedService] = useState<ApiService>('control');
+  const [apiMode, setApiMode] = useState<ApiMode>('session');
+  const [brokerService, setBrokerService] = useState<BrokerService>('alpaca');
   const [selectedEndpoint, setSelectedEndpoint] = useState<ApiEndpoint | null>(null);
   const [method, setMethod] = useState<HttpMethod>('GET');
   const [path, setPath] = useState('');
@@ -49,26 +57,33 @@ export function ApiExplorer() {
 
   const { sessions, fetchSessions } = useSessionStore();
 
-  // Fetch sessions on mount
+  // Fetch sessions on mount and periodically
   useEffect(() => {
     fetchSessions();
+    const interval = setInterval(fetchSessions, 5000);
+    return () => clearInterval(interval);
   }, [fetchSessions]);
 
-  // Auto-select first session
-  useEffect(() => {
-    if (!selectedSessionId && sessions.length > 0) {
-      setSelectedSessionId(sessions[0].id);
-    }
-  }, [sessions, selectedSessionId]);
+  // Filter running sessions for broker APIs
+  const runningSessions = sessions.filter(s => s.status === 'RUNNING');
 
-  // Auto-populate session_id in path params when session changes
+  // Auto-select first running session when switching to broker mode
   useEffect(() => {
-    if (selectedSessionId && selectedEndpoint?.params?.some(p => p.name === 'session_id')) {
-      setPathParams(prev => ({ ...prev, session_id: selectedSessionId }));
+    if (apiMode === 'broker' && !selectedSessionId && runningSessions.length > 0) {
+      setSelectedSessionId(runningSessions[0].id);
     }
-  }, [selectedSessionId, selectedEndpoint]);
+  }, [apiMode, runningSessions, selectedSessionId]);
 
-  const endpoints = apiEndpoints[selectedService] || [];
+  // Clear selected endpoint when switching modes
+  useEffect(() => {
+    setSelectedEndpoint(null);
+    setPath('');
+    setResponse(null);
+  }, [apiMode, brokerService]);
+
+  // Get current service based on mode
+  const currentService: ApiService = apiMode === 'session' ? 'control' : brokerService;
+  const endpoints = apiEndpoints[currentService] || [];
   const selectedSession = sessions.find(s => s.id === selectedSessionId);
 
   const handleSelectEndpoint = (endpoint: ApiEndpoint) => {
@@ -84,7 +99,6 @@ export function ApiExplorer() {
     // Initialize params with defaults or session_id
     endpoint.params?.forEach(param => {
       if (param.name === 'session_id' && selectedSessionId) {
-        // Auto-fill session_id from selected session
         if (param.type === 'path') {
           newPathParams[param.name] = selectedSessionId;
         } else if (param.type === 'query') {
@@ -112,13 +126,19 @@ export function ApiExplorer() {
   };
 
   const handleSend = async () => {
+    // For broker APIs, require a running session
+    if (apiMode === 'broker' && !selectedSessionId) {
+      toast.error('Please select a running session first');
+      return;
+    }
+
     setIsLoading(true);
     try {
       const finalPath = buildFinalPath();
       const bodyData = body ? JSON.parse(body) : undefined;
 
       const result = await makeRequest(
-        selectedService,
+        currentService,
         method,
         finalPath,
         bodyData,
@@ -130,7 +150,7 @@ export function ApiExplorer() {
       // Add to history
       const historyEntry: RequestHistory = {
         id: Date.now().toString(),
-        service: selectedService,
+        service: currentService,
         method,
         path: finalPath,
         response: result,
@@ -167,6 +187,31 @@ export function ApiExplorer() {
     return 'text-muted-foreground';
   };
 
+  // Render the endpoint list
+  const renderEndpointList = () => (
+    <ScrollArea className="h-full">
+      <div className="p-4 space-y-1">
+        {endpoints.map((endpoint, idx) => (
+          <button
+            key={idx}
+            className={`w-full text-left p-2 rounded-md text-sm hover:bg-muted/50 transition-colors ${
+              selectedEndpoint === endpoint ? 'bg-muted' : ''
+            }`}
+            onClick={() => handleSelectEndpoint(endpoint)}
+          >
+            <div className="flex items-center gap-2">
+              <span className={`font-mono text-xs font-semibold ${getMethodColor(endpoint.method)}`}>
+                {endpoint.method}
+              </span>
+              <span className="font-mono text-xs truncate">{endpoint.path}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">{endpoint.description}</p>
+          </button>
+        ))}
+      </div>
+    </ScrollArea>
+  );
+
   return (
     <div className="p-6 h-full flex flex-col">
       {/* Header */}
@@ -176,72 +221,97 @@ export function ApiExplorer() {
       </div>
 
       <div className="flex-1 flex gap-6 min-h-0">
-        {/* Endpoints Sidebar */}
+        {/* Endpoints Sidebar with Tabs */}
         <Card className="w-80 flex flex-col">
-          <CardHeader className="pb-2 space-y-3">
-            <Select value={selectedService} onValueChange={(v) => setSelectedService(v as ApiService)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="control">Control API (8000)</SelectItem>
-                <SelectItem value="alpaca">Alpaca API (8100)</SelectItem>
-                <SelectItem value="polygon">Polygon API (8200)</SelectItem>
-                <SelectItem value="finnhub">Finnhub API (8300)</SelectItem>
-              </SelectContent>
-            </Select>
+          <Tabs value={apiMode} onValueChange={(v) => setApiMode(v as ApiMode)} className="flex flex-col h-full">
+            <CardHeader className="pb-2">
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="session" className="flex items-center gap-1">
+                  <Server className="h-3 w-3" />
+                  Session APIs
+                </TabsTrigger>
+                <TabsTrigger value="broker" className="flex items-center gap-1">
+                  <Activity className="h-3 w-3" />
+                  Broker APIs
+                </TabsTrigger>
+              </TabsList>
+            </CardHeader>
 
-            <Separator />
-
-            <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Active Session</Label>
-              <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a session" />
-                </SelectTrigger>
-                <SelectContent>
-                  {sessions.length === 0 ? (
-                    <SelectItem value="" disabled>No sessions available</SelectItem>
-                  ) : (
-                    sessions.map((session) => (
-                      <SelectItem key={session.id} value={session.id}>
-                        {session.symbols?.slice(0, 2).join(', ')}{session.symbols && session.symbols.length > 2 ? '...' : ''} ({session.status})
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-              {selectedSession && (
-                <div className="text-xs text-muted-foreground p-2 bg-muted/50 rounded">
-                  <p className="font-mono truncate">{selectedSessionId.slice(0, 12)}...</p>
-                  <p>Status: <span className={selectedSession.status === 'RUNNING' ? 'text-green-500' : ''}>{selectedSession.status}</span></p>
+            <CardContent className="flex-1 p-0 flex flex-col min-h-0">
+              {/* Session APIs Tab */}
+              <TabsContent value="session" className="flex-1 m-0 flex flex-col min-h-0">
+                <div className="px-4 py-2 border-b">
+                  <p className="text-xs text-muted-foreground">
+                    Control API (Port 8000) - Manage simulation sessions
+                  </p>
                 </div>
-              )}
-            </div>
-          </CardHeader>
-          <CardContent className="flex-1 p-0">
-            <ScrollArea className="h-full">
-              <div className="p-4 space-y-1">
-                {endpoints.map((endpoint, idx) => (
-                  <button
-                    key={idx}
-                    className={`w-full text-left p-2 rounded-md text-sm hover:bg-muted/50 transition-colors ${
-                      selectedEndpoint === endpoint ? 'bg-muted' : ''
-                    }`}
-                    onClick={() => handleSelectEndpoint(endpoint)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`font-mono text-xs font-semibold ${getMethodColor(endpoint.method)}`}>
-                        {endpoint.method}
-                      </span>
-                      <span className="font-mono text-xs truncate">{endpoint.path}</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">{endpoint.description}</p>
-                  </button>
-                ))}
-              </div>
-            </ScrollArea>
-          </CardContent>
+                <div className="flex-1 min-h-0">
+                  {renderEndpointList()}
+                </div>
+              </TabsContent>
+
+              {/* Broker APIs Tab */}
+              <TabsContent value="broker" className="flex-1 m-0 flex flex-col min-h-0">
+                <div className="px-4 py-3 border-b space-y-3">
+                  {/* Running Session Selector */}
+                  <div className="space-y-2">
+                    <Label className="text-xs font-medium flex items-center gap-1">
+                      <Activity className="h-3 w-3 text-green-500" />
+                      Running Session
+                    </Label>
+                    <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
+                      <SelectTrigger className={runningSessions.length === 0 ? 'border-destructive' : ''}>
+                        <SelectValue placeholder="Select running session" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {runningSessions.length === 0 ? (
+                          <SelectItem value="" disabled>No running sessions</SelectItem>
+                        ) : (
+                          runningSessions.map((session) => (
+                            <SelectItem key={session.id} value={session.id}>
+                              {session.symbols?.slice(0, 2).join(', ')}{session.symbols && session.symbols.length > 2 ? '...' : ''}
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+                    {runningSessions.length === 0 && (
+                      <div className="flex items-center gap-1 text-xs text-destructive">
+                        <AlertCircle className="h-3 w-3" />
+                        Start a session first
+                      </div>
+                    )}
+                    {selectedSession && (
+                      <div className="text-xs text-muted-foreground p-2 bg-muted/50 rounded">
+                        <p className="font-mono truncate">{selectedSessionId.slice(0, 12)}...</p>
+                        <p>Symbols: {selectedSession.symbols?.join(', ')}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <Separator />
+
+                  {/* Broker Service Selector */}
+                  <div className="space-y-2">
+                    <Label className="text-xs font-medium">Broker API</Label>
+                    <Select value={brokerService} onValueChange={(v) => setBrokerService(v as BrokerService)}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="alpaca">Alpaca API (8100)</SelectItem>
+                        <SelectItem value="polygon">Polygon API (8200)</SelectItem>
+                        <SelectItem value="finnhub">Finnhub API (8300)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-0">
+                  {renderEndpointList()}
+                </div>
+              </TabsContent>
+            </CardContent>
+          </Tabs>
         </Card>
 
         {/* Request Builder */}
@@ -272,7 +342,10 @@ export function ApiExplorer() {
                   placeholder="/v2/account"
                   className="flex-1 font-mono"
                 />
-                <Button onClick={handleSend} disabled={isLoading || !path}>
+                <Button
+                  onClick={handleSend}
+                  disabled={isLoading || !path || (apiMode === 'broker' && !selectedSessionId)}
+                >
                   <Send className="h-4 w-4 mr-2" />
                   Send
                 </Button>
@@ -353,7 +426,10 @@ export function ApiExplorer() {
                 <JsonViewer data={response.data} maxHeight="100%" />
               ) : (
                 <div className="h-full flex items-center justify-center text-muted-foreground">
-                  Send a request to see the response
+                  {apiMode === 'broker' && !selectedSessionId
+                    ? 'Select a running session to test broker APIs'
+                    : 'Send a request to see the response'
+                  }
                 </div>
               )}
             </CardContent>
@@ -390,7 +466,13 @@ export function ApiExplorer() {
                       key={item.id}
                       className="w-full text-left p-2 rounded-md text-xs hover:bg-muted/50 transition-colors"
                       onClick={() => {
-                        setSelectedService(item.service);
+                        // Restore from history
+                        if (item.service === 'control') {
+                          setApiMode('session');
+                        } else {
+                          setApiMode('broker');
+                          setBrokerService(item.service as BrokerService);
+                        }
                         setMethod(item.method);
                         setPath(item.path);
                         setResponse(item.response);
