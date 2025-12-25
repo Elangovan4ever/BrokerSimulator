@@ -93,6 +93,8 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
                 cfg.end_time = std::chrono::system_clock::from_time_t(timegm(&tm));
             }
         }
+        auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cfg.start_time.time_since_epoch()).count();
+        spdlog::info("createSession: parsed start_time_ns={}", start_ns);
         auto session = session_mgr_->create_session(cfg, requested_id);
         // Don't auto-start: preload_events blocks on ClickHouse query which can timeout the HTTP request
         // User should call POST /sessions/{id}/start separately

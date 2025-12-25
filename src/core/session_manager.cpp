@@ -19,6 +19,8 @@ Session::Session(const std::string& session_id, const SessionConfig& cfg)
     , equity(cfg.initial_capital)
     , events_processed(0)
     , last_checkpoint_events(0) {
+    auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cfg.start_time.time_since_epoch()).count();
+    spdlog::info("Session {} created: start_time_ns={}, speed={}", session_id, start_ns, cfg.speed_factor);
     time_engine->set_time(cfg.start_time);
     time_engine->set_speed(cfg.speed_factor);
     perf->record(cfg.start_time, cfg.initial_capital);

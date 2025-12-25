@@ -243,22 +243,22 @@ export function ApiExplorer() {
               </TabsList>
             </CardHeader>
 
-            <CardContent className="flex-1 p-0 flex flex-col min-h-0">
+            <CardContent className="flex-1 p-0 flex flex-col min-h-0 overflow-hidden">
               {/* Session APIs Tab */}
-              <TabsContent value="session" className="flex-1 m-0 flex flex-col min-h-0">
-                <div className="px-4 py-2 border-b">
+              <TabsContent value="session" className="flex-1 m-0 flex flex-col min-h-0 data-[state=inactive]:hidden">
+                <div className="px-4 py-2 border-b shrink-0">
                   <p className="text-xs text-muted-foreground">
                     Control API (Port 8000) - Manage simulation sessions
                   </p>
                 </div>
-                <div className="flex-1 min-h-0">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   {renderEndpointList()}
                 </div>
               </TabsContent>
 
               {/* Broker APIs Tab */}
-              <TabsContent value="broker" className="flex-1 m-0 flex flex-col min-h-0">
-                <div className="px-4 py-3 border-b space-y-3">
+              <TabsContent value="broker" className="flex-1 m-0 flex flex-col min-h-0 data-[state=inactive]:hidden">
+                <div className="px-4 py-3 border-b space-y-3 shrink-0">
                   {/* Running Session Selector */}
                   <div className="space-y-2">
                     <Label className="text-xs font-medium flex items-center gap-1">
@@ -312,7 +312,7 @@ export function ApiExplorer() {
                     </Select>
                   </div>
                 </div>
-                <div className="flex-1 min-h-0">
+                <div className="flex-1 min-h-0 overflow-hidden">
                   {renderEndpointList()}
                 </div>
               </TabsContent>
