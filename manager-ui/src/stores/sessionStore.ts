@@ -58,7 +58,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.map(s => s.id === sessionId ? session : s),
       }));
     } catch (error) {
-      set({ error: getErrorMessage(error) });
+      // If session not found (404), remove it from the list silently
+      if (error instanceof AxiosError && error.response?.status === 404) {
+        set(state => ({
+          sessions: state.sessions.filter(s => s.id !== sessionId),
+          selectedSessionId: state.selectedSessionId === sessionId ? null : state.selectedSessionId,
+        }));
+      } else {
+        set({ error: getErrorMessage(error) });
+      }
     }
   },
 

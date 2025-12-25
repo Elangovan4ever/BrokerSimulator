@@ -70,10 +70,12 @@ export function Sessions() {
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(() => {
-      sessions.filter(s => s.status === 'RUNNING').forEach(s => fetchSession(s.id));
+      // Use getState() to get fresh sessions data, avoiding stale closure
+      const currentSessions = useSessionStore.getState().sessions;
+      currentSessions.filter(s => s.status === 'RUNNING').forEach(s => fetchSession(s.id));
     }, 2000);
     return () => clearInterval(interval);
-  }, [fetchSessions]);
+  }, [fetchSessions, fetchSession]);
 
   useEffect(() => {
     if (error) {
