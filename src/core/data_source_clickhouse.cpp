@@ -240,34 +240,45 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
                                                           Timestamp end_time,
                                                           size_t limit) {
     std::vector<TradeRecord> out;
-    std::lock_guard<std::mutex> lock(client_mutex_);
-    if (!client_) return out;
-    auto start_str = format_timestamp(start_time);
-    auto end_str = format_timestamp(end_time);
-    std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
-    std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
-        FROM stock_trades
-        WHERE symbol = '{}'
-          AND timestamp >= '{}'
-          AND timestamp < '{}'
-        ORDER BY timestamp ASC
-        {}
-    )", symbol, start_str, end_str, limit_clause);
+    // Create a new connection for API requests to avoid sharing client with session loop
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
 
-    client_->Select(query, [&out](const clickhouse::Block& block) {
-        for (size_t row = 0; row < block.GetRowCount(); ++row) {
-            TradeRecord tr;
-            tr.timestamp = extract_ts(block[0], row);
-            tr.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
-            tr.price = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
-            tr.size = block[3]->As<clickhouse::ColumnInt64>()->At(row);
-            tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
-            tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
-            tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
-            out.push_back(std::move(tr));
-        }
-    });
+        auto start_str = format_timestamp(start_time);
+        auto end_str = format_timestamp(end_time);
+        std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
+        std::string query = fmt::format(R"(
+            SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
+            FROM stock_trades
+            WHERE symbol = '{}'
+              AND timestamp >= '{}'
+              AND timestamp < '{}'
+            ORDER BY timestamp ASC
+            {}
+        )", symbol, start_str, end_str, limit_clause);
+
+        client.Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                TradeRecord tr;
+                tr.timestamp = extract_ts(block[0], row);
+                tr.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                tr.price = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
+                tr.size = block[3]->As<clickhouse::ColumnInt64>()->At(row);
+                tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
+                tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
+                tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+                out.push_back(std::move(tr));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("get_trades failed: {}", e.what());
+    }
     return out;
 }
 
@@ -276,36 +287,47 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
                                                           Timestamp end_time,
                                                           size_t limit) {
     std::vector<QuoteRecord> out;
-    std::lock_guard<std::mutex> lock(client_mutex_);
-    if (!client_) return out;
-    auto start_str = format_timestamp(start_time);
-    auto end_str = format_timestamp(end_time);
-    std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
-    std::string query = fmt::format(R"(
-        SELECT sip_timestamp, symbol, toFloat64(bid_price), toInt64(bid_size), toFloat64(ask_price), toInt64(ask_size), toInt32(bid_exchange), toInt32(ask_exchange), toInt32(tape)
-        FROM stock_quotes
-        WHERE symbol = '{}'
-          AND sip_timestamp >= '{}'
-          AND sip_timestamp < '{}'
-        ORDER BY sip_timestamp ASC
-        {}
-    )", symbol, start_str, end_str, limit_clause);
+    // Create a new connection for API requests to avoid sharing client with session loop
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
 
-    client_->Select(query, [&out](const clickhouse::Block& block) {
-        for (size_t row = 0; row < block.GetRowCount(); ++row) {
-            QuoteRecord q;
-            q.timestamp = extract_ts(block[0], row);
-            q.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
-            q.bid_price = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
-            q.bid_size = block[3]->As<clickhouse::ColumnInt64>()->At(row);
-            q.ask_price = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
-            q.ask_size = block[5]->As<clickhouse::ColumnInt64>()->At(row);
-            q.bid_exchange = block[6]->As<clickhouse::ColumnInt32>()->At(row);
-            q.ask_exchange = block[7]->As<clickhouse::ColumnInt32>()->At(row);
-            q.tape = block[8]->As<clickhouse::ColumnInt32>()->At(row);
-            out.push_back(std::move(q));
-        }
-    });
+        auto start_str = format_timestamp(start_time);
+        auto end_str = format_timestamp(end_time);
+        std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
+        std::string query = fmt::format(R"(
+            SELECT sip_timestamp, symbol, toFloat64(bid_price), toInt64(bid_size), toFloat64(ask_price), toInt64(ask_size), toInt32(bid_exchange), toInt32(ask_exchange), toInt32(tape)
+            FROM stock_quotes
+            WHERE symbol = '{}'
+              AND sip_timestamp >= '{}'
+              AND sip_timestamp < '{}'
+            ORDER BY sip_timestamp ASC
+            {}
+        )", symbol, start_str, end_str, limit_clause);
+
+        client.Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                QuoteRecord q;
+                q.timestamp = extract_ts(block[0], row);
+                q.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                q.bid_price = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
+                q.bid_size = block[3]->As<clickhouse::ColumnInt64>()->At(row);
+                q.ask_price = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
+                q.ask_size = block[5]->As<clickhouse::ColumnInt64>()->At(row);
+                q.bid_exchange = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+                q.ask_exchange = block[7]->As<clickhouse::ColumnInt32>()->At(row);
+                q.tape = block[8]->As<clickhouse::ColumnInt32>()->At(row);
+                out.push_back(std::move(q));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("get_quotes failed: {}", e.what());
+    }
     return out;
 }
 
