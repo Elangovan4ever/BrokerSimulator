@@ -49,9 +49,25 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     ]},
     { method: 'GET', path: '/v2/aggs/ticker/{symbol}/prev', description: 'Previous day aggregate', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
     // Trades & Quotes
-    { method: 'GET', path: '/v3/trades/{symbol}', description: 'Get trades', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v3/trades/{symbol}', description: 'Get trades', params: [
+      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
+      { name: 'timestamp', type: 'query', required: false, description: 'Query by timestamp (YYYY-MM-DD or nanoseconds)' },
+      { name: 'timestamp.gte', type: 'query', required: false, description: 'Timestamp greater than or equal to' },
+      { name: 'timestamp.lte', type: 'query', required: false, description: 'Timestamp less than or equal to' },
+      { name: 'order', type: 'query', required: false, description: 'Order results (asc or desc)', default: 'asc' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
+      { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
+    ]},
     { method: 'GET', path: '/v2/last/trade/{symbol}', description: 'Last trade', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/v3/quotes/{symbol}', description: 'Get quotes', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v3/quotes/{symbol}', description: 'Get quotes', params: [
+      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
+      { name: 'timestamp', type: 'query', required: false, description: 'Query by timestamp (YYYY-MM-DD or nanoseconds)' },
+      { name: 'timestamp.gte', type: 'query', required: false, description: 'Timestamp greater than or equal to' },
+      { name: 'timestamp.lte', type: 'query', required: false, description: 'Timestamp less than or equal to' },
+      { name: 'order', type: 'query', required: false, description: 'Order results (asc or desc)', default: 'asc' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
+      { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
+    ]},
     { method: 'GET', path: '/v2/last/nbbo/{symbol}', description: 'Last NBBO quote', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
     // Snapshots
     { method: 'GET', path: '/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}', description: 'Get ticker snapshot', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
