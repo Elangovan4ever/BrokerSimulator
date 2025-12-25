@@ -102,7 +102,11 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const MarketEvent&)>& cb) {
-    if (!client_) return;
+    // Reconnect if client is null or stale
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected, reconnecting...");
+        connect();
+    }
     std::string sym_list = build_symbol_list(symbols);
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
@@ -159,46 +163,58 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
     spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
     auto query_start = std::chrono::steady_clock::now();
 
-    client_->Select(query, [&batch](const clickhouse::Block& block) {
-        for (size_t row = 0; row < block.GetRowCount(); ++row) {
-            MarketEvent ev;
-            ev.timestamp = extract_ts(block[0], row);
-            ev.trade.timestamp = ev.timestamp;
-            ev.quote.timestamp = ev.timestamp;
-            ev.trade.symbol = ev.quote.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
-            auto kind = block[2]->As<clickhouse::ColumnUInt8>()->At(row);
-            ev.type = (kind == 0) ? MarketEventType::QUOTE : MarketEventType::TRADE;
-            double price = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
-            int64_t size = block[4]->As<clickhouse::ColumnInt64>()->At(row);
-            double bid_price = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
-            int64_t bid_size = block[6]->As<clickhouse::ColumnInt64>()->At(row);
-            double ask_price = block[7]->As<clickhouse::ColumnFloat64>()->At(row);
-            int64_t ask_size = block[8]->As<clickhouse::ColumnInt64>()->At(row);
-            int exchange = block[9]->As<clickhouse::ColumnInt32>()->At(row);
-            auto cond_sv = block[10]->As<clickhouse::ColumnString>()->At(row);
-            std::string conditions(cond_sv.data(), cond_sv.size());
-            int tape = block[11]->As<clickhouse::ColumnInt32>()->At(row);
-            int bid_exch = block[12]->As<clickhouse::ColumnInt32>()->At(row);
-            int ask_exch = block[13]->As<clickhouse::ColumnInt32>()->At(row);
+    // Execute query with auto-reconnect on network errors
+    auto execute_query = [&]() {
+        client_->Select(query, [&batch](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                MarketEvent ev;
+                ev.timestamp = extract_ts(block[0], row);
+                ev.trade.timestamp = ev.timestamp;
+                ev.quote.timestamp = ev.timestamp;
+                ev.trade.symbol = ev.quote.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                auto kind = block[2]->As<clickhouse::ColumnUInt8>()->At(row);
+                ev.type = (kind == 0) ? MarketEventType::QUOTE : MarketEventType::TRADE;
+                double price = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
+                int64_t size = block[4]->As<clickhouse::ColumnInt64>()->At(row);
+                double bid_price = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
+                int64_t bid_size = block[6]->As<clickhouse::ColumnInt64>()->At(row);
+                double ask_price = block[7]->As<clickhouse::ColumnFloat64>()->At(row);
+                int64_t ask_size = block[8]->As<clickhouse::ColumnInt64>()->At(row);
+                int exchange = block[9]->As<clickhouse::ColumnInt32>()->At(row);
+                auto cond_sv = block[10]->As<clickhouse::ColumnString>()->At(row);
+                std::string conditions(cond_sv.data(), cond_sv.size());
+                int tape = block[11]->As<clickhouse::ColumnInt32>()->At(row);
+                int bid_exch = block[12]->As<clickhouse::ColumnInt32>()->At(row);
+                int ask_exch = block[13]->As<clickhouse::ColumnInt32>()->At(row);
 
-            if (ev.type == MarketEventType::TRADE) {
-                ev.trade.price = price;
-                ev.trade.size = size;
-                ev.trade.exchange = exchange;
-                ev.trade.conditions = conditions;
-                ev.trade.tape = tape;
-            } else {
-                ev.quote.bid_price = bid_price;
-                ev.quote.bid_size = bid_size;
-                ev.quote.ask_price = ask_price;
-                ev.quote.ask_size = ask_size;
-                ev.quote.bid_exchange = bid_exch;
-                ev.quote.ask_exchange = ask_exch;
-                ev.quote.tape = tape;
+                if (ev.type == MarketEventType::TRADE) {
+                    ev.trade.price = price;
+                    ev.trade.size = size;
+                    ev.trade.exchange = exchange;
+                    ev.trade.conditions = conditions;
+                    ev.trade.tape = tape;
+                } else {
+                    ev.quote.bid_price = bid_price;
+                    ev.quote.bid_size = bid_size;
+                    ev.quote.ask_price = ask_price;
+                    ev.quote.ask_size = ask_size;
+                    ev.quote.bid_exchange = bid_exch;
+                    ev.quote.ask_exchange = ask_exch;
+                    ev.quote.tape = tape;
+                }
+                batch.push_back(std::move(ev));
             }
-            batch.push_back(std::move(ev));
-        }
-    });
+        });
+    };
+
+    try {
+        execute_query();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse query failed: {}, reconnecting and retrying...", e.what());
+        batch.clear();
+        connect();  // Reconnect
+        execute_query();  // Retry once
+    }
 
     auto query_end = std::chrono::steady_clock::now();
     auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
