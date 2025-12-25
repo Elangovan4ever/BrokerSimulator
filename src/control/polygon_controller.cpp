@@ -217,7 +217,7 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
     json results = json::array();
 
     // Query data source for trades
-    if (session) {
+    if (session && session->time_engine) {
         auto data_source = session_mgr_->data_source();
         if (data_source) {
             auto timestamp_param = req->getParameter("timestamp");
@@ -227,13 +227,14 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
             auto timestamp_lt = req->getParameter("timestamp.lt");
 
             Timestamp from_ts, to_ts;
+            Timestamp current_time = session->time_engine->current_time();
 
             // Determine time range based on parameters
             // If no params provided, use session start to current time
             if (timestamp_gte.empty() && timestamp_gt.empty() &&
                 timestamp_lte.empty() && timestamp_lt.empty() && timestamp_param.empty()) {
                 from_ts = session->config.start_time;
-                to_ts = session->time_engine->current_time();
+                to_ts = current_time;
             } else {
                 // Handle timestamp.gte / timestamp.gt
                 if (!timestamp_gte.empty()) {
@@ -258,7 +259,7 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
                     if (auto ts = utils::parse_ts_any(timestamp_lt))
                         to_ts = *ts - std::chrono::nanoseconds(1);
                 } else if (to_ts == Timestamp{}) {
-                    to_ts = session->time_engine->current_time();
+                    to_ts = current_time;
                 }
             }
 
@@ -359,7 +360,7 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
     json results = json::array();
 
     // Query data source for quotes
-    if (session) {
+    if (session && session->time_engine) {
         auto data_source = session_mgr_->data_source();
         if (data_source) {
             auto timestamp_param = req->getParameter("timestamp");
@@ -369,13 +370,14 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
             auto timestamp_lt = req->getParameter("timestamp.lt");
 
             Timestamp from_ts, to_ts;
+            Timestamp current_time = session->time_engine->current_time();
 
             // Determine time range based on parameters
             // If no params provided, use session start to current time
             if (timestamp_gte.empty() && timestamp_gt.empty() &&
                 timestamp_lte.empty() && timestamp_lt.empty() && timestamp_param.empty()) {
                 from_ts = session->config.start_time;
-                to_ts = session->time_engine->current_time();
+                to_ts = current_time;
             } else {
                 // Handle timestamp.gte / timestamp.gt
                 if (!timestamp_gte.empty()) {
@@ -400,7 +402,7 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
                     if (auto ts = utils::parse_ts_any(timestamp_lt))
                         to_ts = *ts - std::chrono::nanoseconds(1);
                 } else if (to_ts == Timestamp{}) {
-                    to_ts = session->time_engine->current_time();
+                    to_ts = current_time;
                 }
             }
 
