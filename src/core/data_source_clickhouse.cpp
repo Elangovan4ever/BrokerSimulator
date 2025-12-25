@@ -20,6 +20,10 @@ void ClickHouseDataSource::connect() {
     opts.SetDefaultDatabase(cfg_.database);
     opts.SetUser(cfg_.user);
     opts.SetPassword(cfg_.password);
+    // Set longer timeouts for large result sets
+    opts.SetSendRetries(3);
+    opts.SetRetryTimeout(std::chrono::seconds(30));
+    opts.SetCompressionMethod(clickhouse::CompressionMethod::LZ4);
     client_ = std::make_unique<clickhouse::Client>(opts);
     spdlog::info("Connected to ClickHouse {}:{} db={}", cfg_.host, cfg_.port, cfg_.database);
 }
@@ -150,7 +154,10 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
     // Batch events to avoid blocking TCP read with slow callback processing.
     // This prevents ClickHouse send timeout from TCP backpressure.
     std::vector<MarketEvent> batch;
-    batch.reserve(100000);  // Pre-allocate for typical batch size
+    batch.reserve(1000000);  // Pre-allocate for large result sets (1M events)
+
+    spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
+    auto query_start = std::chrono::steady_clock::now();
 
     client_->Select(query, [&batch](const clickhouse::Block& block) {
         for (size_t row = 0; row < block.GetRowCount(); ++row) {
@@ -193,10 +200,18 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         }
     });
 
+    auto query_end = std::chrono::steady_clock::now();
+    auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+    spdlog::info("ClickHouse query completed: {} events in {}ms", batch.size(), query_ms);
+
     // Process batched events after query completes (no TCP backpressure)
+    auto process_start = std::chrono::steady_clock::now();
     for (const auto& ev : batch) {
         cb(ev);
     }
+    auto process_end = std::chrono::steady_clock::now();
+    auto process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(process_end - process_start).count();
+    spdlog::info("Event processing completed: {} events in {}ms", batch.size(), process_ms);
 }
 
 std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& symbol,
