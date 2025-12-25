@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <condition_variable>
+#include <spdlog/spdlog.h>
 
 namespace broker_sim {
 
@@ -67,7 +68,10 @@ public:
 
     // Wait until event_time, applying speed factor; returns false if stopped.
     bool wait_for_next_event(Timestamp event_time) {
-        if (!is_running()) return false;
+        if (!is_running()) {
+            spdlog::warn("TimeEngine: not running, returning false");
+            return false;
+        }
 
         {
             std::unique_lock<std::mutex> lock(pause_mutex_);
@@ -75,11 +79,22 @@ public:
                 return !is_paused_.load(std::memory_order_acquire) || !is_running_.load(std::memory_order_acquire);
             });
         }
-        if (!is_running()) return false;
+        if (!is_running()) {
+            spdlog::warn("TimeEngine: stopped after pause wait, returning false");
+            return false;
+        }
 
         auto current = current_time_.load(std::memory_order_acquire);
         auto diff = std::chrono::duration_cast<Nanoseconds>(event_time - current);
         double speed = speed_factor_.load(std::memory_order_acquire);
+
+        // Log first event timing
+        static std::atomic<int> log_count{0};
+        if (log_count.fetch_add(1) < 3) {
+            auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(diff).count();
+            spdlog::info("TimeEngine: event_time diff={}ms, speed={}", diff_ms, speed);
+        }
+
         if (speed > 0.0 && diff.count() > 0) {
             auto sleep_time = Nanoseconds(static_cast<int64_t>(diff.count() / speed));
             std::this_thread::sleep_for(sleep_time);
