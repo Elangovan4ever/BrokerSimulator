@@ -509,14 +509,27 @@ void SessionManager::add_event_callback(EventCallback cb) {
 }
 
 void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
+    spdlog::info("Session {} loop starting, queue_size={}", session->id, session->event_queue->size());
     try {
+        size_t processed = 0;
         while (!session->should_stop.load()) {
             auto ev_opt = session->event_queue->wait_and_pop();
-            if (!ev_opt) break;
+            if (!ev_opt) {
+                spdlog::info("Session {} loop: wait_and_pop returned empty", session->id);
+                break;
+            }
             const Event& ev = *ev_opt;
-            if (!session->time_engine->wait_for_next_event(ev.timestamp)) break;
+            if (!session->time_engine->wait_for_next_event(ev.timestamp)) {
+                spdlog::info("Session {} loop: wait_for_next_event returned false", session->id);
+                break;
+            }
             process_event(session, ev, true);
+            processed++;
+            if (processed == 1 || processed % 10000 == 0) {
+                spdlog::info("Session {} processed {} events", session->id, processed);
+            }
         }
+        spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
         if (!session->should_stop.load()) {
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
