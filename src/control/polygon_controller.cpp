@@ -87,7 +87,6 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
                              std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                              std::string symbol, std::string multiplier,
                              std::string timespan, std::string from, std::string to) {
-    try {
     if (!authorize(req)) { cb(unauthorized()); return; }
 
     // Parse parameters
@@ -103,13 +102,15 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
     int limit = 5000;
     auto limit_param = req->getParameter("limit");
     if (!limit_param.empty()) {
-        limit = std::min(50000, std::stoi(limit_param));
+        try {
+            limit = std::min(50000, std::stoi(limit_param));
+        } catch (...) {}
     }
 
     // Build response
     json results = json::array();
 
-    // Query data source (works with or without a session)
+    // Query data source
     auto data_source = session_mgr_->api_data_source();
     if (data_source) {
         // Parse from/to timestamps
@@ -159,10 +160,6 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
     }
 
     cb(json_resp(response));
-    } catch (const std::exception& e) {
-        spdlog::error("aggs error: {}", e.what());
-        cb(error_resp(e.what(), 500));
-    }
 }
 
 void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
