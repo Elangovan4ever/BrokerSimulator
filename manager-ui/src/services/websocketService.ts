@@ -66,6 +66,18 @@ class WebSocketService {
           data = event.data;
         }
 
+        // Check for session link confirmation
+        if (state && typeof data === 'object' && data !== null) {
+          const resp = data as Record<string, unknown>;
+          if (resp.status === 'session_set' && resp.session_id) {
+            state.linkedSessionId = resp.session_id as string;
+            this.notifyConnectionChange(state);
+          } else if (resp.status === 'session_unlinked') {
+            state.linkedSessionId = undefined;
+            this.notifyConnectionChange(state);
+          }
+        }
+
         const message: WebSocketMessage = {
           id: generateId(),
           connectionId,
@@ -237,6 +249,39 @@ class WebSocketService {
     }
 
     return this.send(connectionId, authMessage);
+  }
+
+  // Link connection to a session
+  linkSession(connectionId: string, sessionId: string): boolean {
+    const state = this.connectionStates.get(connectionId);
+    if (!state) return false;
+
+    // Send set_session action to link
+    return this.send(connectionId, { action: 'set_session', session_id: sessionId });
+  }
+
+  // Unlink connection from session
+  unlinkSession(connectionId: string): boolean {
+    const state = this.connectionStates.get(connectionId);
+    if (!state) return false;
+
+    // Clear local state immediately
+    state.linkedSessionId = undefined;
+    this.notifyConnectionChange(state);
+
+    // Send unlink message
+    return this.send(connectionId, { action: 'unset_session' });
+  }
+
+  // Check if connection is linked to a session
+  isLinkedToSession(connectionId: string): boolean {
+    const state = this.connectionStates.get(connectionId);
+    return !!state?.linkedSessionId;
+  }
+
+  // Get linked session ID
+  getLinkedSessionId(connectionId: string): string | undefined {
+    return this.connectionStates.get(connectionId)?.linkedSessionId;
   }
 
   // Disconnect

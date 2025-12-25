@@ -110,6 +110,7 @@ export interface WebSocketConnection {
   subscriptions: string[];
   messageCount: number;
   connectedAt?: string;
+  linkedSessionId?: string;  // Session ID this connection is linked to
 }
 
 export interface WebSocketMessage {

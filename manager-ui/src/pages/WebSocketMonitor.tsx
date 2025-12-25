@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  Radio,
   Plus,
   X,
   Send,
@@ -10,6 +9,7 @@ import {
   Filter,
   Download,
   Link,
+  Unlink,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -28,12 +28,10 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { StatusIndicator } from '@/components/common/StatusIndicator';
-import { JsonViewer } from '@/components/common/JsonViewer';
 import { useWebSocketStore } from '@/stores/websocketStore';
 import { useSessionStore } from '@/stores/sessionStore';
 import { getWsUrl } from '@/api/config';
-import { formatTimestamp, generateId } from '@/lib/utils';
-import type { ApiService, WebSocketConnection, WebSocketMessage, Session } from '@/types';
+import type { ApiService } from '@/types';
 import { toast } from 'sonner';
 
 export function WebSocketMonitor() {
@@ -44,7 +42,8 @@ export function WebSocketMonitor() {
     disconnect,
     send,
     subscribe,
-    authenticate,
+    linkSession,
+    unlinkSession,
     clearMessages,
   } = useWebSocketStore();
 
@@ -133,10 +132,20 @@ export function WebSocketMonitor() {
   const handleLinkSession = () => {
     if (!selectedConnectionId || !selectedSessionId) return;
 
-    // Send session_id to link the connection
-    send(selectedConnectionId, { session_id: selectedSessionId });
-    toast.success('Linked to session');
+    // Use the proper linkSession method
+    linkSession(selectedConnectionId, selectedSessionId);
+    toast.success('Linking to session...');
   };
+
+  const handleUnlinkSession = () => {
+    if (!selectedConnectionId) return;
+
+    unlinkSession(selectedConnectionId);
+    toast.success('Unlinked from session');
+  };
+
+  // Check if selected connection is linked to a session
+  const isLinked = selectedConnection?.linkedSessionId != null;
 
   const handleExportMessages = () => {
     const data = JSON.stringify(
@@ -270,6 +279,12 @@ export function WebSocketMonitor() {
                     <div className="mt-1 text-xs text-muted-foreground">
                       <p className="truncate">{conn.url}</p>
                       <p className="mt-1">{conn.messageCount} messages</p>
+                      {conn.linkedSessionId && (
+                        <p className="mt-1 text-green-500 flex items-center gap-1">
+                          <Link className="h-3 w-3" />
+                          Linked: {conn.linkedSessionId.slice(0, 8)}...
+                        </p>
+                      )}
                     </div>
                     {conn.subscriptions.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
@@ -389,15 +404,35 @@ export function WebSocketMonitor() {
                   <p>Status: {selectedSession.status}</p>
                 </div>
               )}
-              {selectedConnectionId && selectedSessionId && (
-                <Button
-                  className="w-full"
-                  variant="outline"
-                  onClick={handleLinkSession}
-                >
-                  <Link className="h-4 w-4 mr-2" />
-                  Link Connection to Session
-                </Button>
+              {isLinked && (
+                <div className="mt-2 p-2 rounded bg-green-500/10 border border-green-500/30">
+                  <p className="text-xs text-green-500 flex items-center gap-1">
+                    <Link className="h-3 w-3" />
+                    Connected to session: {selectedConnection?.linkedSessionId?.slice(0, 8)}...
+                  </p>
+                </div>
+              )}
+              {selectedConnectionId && (
+                isLinked ? (
+                  <Button
+                    className="w-full"
+                    variant="destructive"
+                    onClick={handleUnlinkSession}
+                  >
+                    <Unlink className="h-4 w-4 mr-2" />
+                    Unlink from Session
+                  </Button>
+                ) : (
+                  <Button
+                    className="w-full"
+                    variant="outline"
+                    onClick={handleLinkSession}
+                    disabled={!selectedSessionId}
+                  >
+                    <Link className="h-4 w-4 mr-2" />
+                    Link Connection to Session
+                  </Button>
+                )
               )}
             </div>
 

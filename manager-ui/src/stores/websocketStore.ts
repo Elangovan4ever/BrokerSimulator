@@ -15,6 +15,8 @@ interface WebSocketState {
   subscribe: (connectionId: string, channels: string[]) => boolean;
   unsubscribe: (connectionId: string, channels: string[]) => boolean;
   authenticate: (connectionId: string, apiKey: string, apiSecret?: string) => boolean;
+  linkSession: (connectionId: string, sessionId: string) => boolean;
+  unlinkSession: (connectionId: string) => boolean;
   clearMessages: (connectionId?: string) => void;
   setMaxMessages: (max: number) => void;
 }
@@ -80,6 +82,14 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => {
 
     authenticate: (connectionId: string, apiKey: string, apiSecret?: string) => {
       return wsService.authenticate(connectionId, apiKey, apiSecret);
+    },
+
+    linkSession: (connectionId: string, sessionId: string) => {
+      return wsService.linkSession(connectionId, sessionId);
+    },
+
+    unlinkSession: (connectionId: string) => {
+      return wsService.unlinkSession(connectionId);
     },
 
     clearMessages: (connectionId?: string) => {
