@@ -32,6 +32,8 @@ public:
     }
 
     void set_time(Timestamp ts) {
+        auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count();
+        spdlog::info("TimeEngine::set_time called with ts_ns={}", ts_ns);
         current_time_.store(ts, std::memory_order_release);
         notify_listeners(ts);
     }
@@ -91,8 +93,10 @@ public:
         // Log first event timing
         static std::atomic<int> log_count{0};
         if (log_count.fetch_add(1) < 3) {
+            auto current_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(current.time_since_epoch()).count();
+            auto event_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(event_time.time_since_epoch()).count();
             auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(diff).count();
-            spdlog::info("TimeEngine: event_time diff={}ms, speed={}", diff_ms, speed);
+            spdlog::info("TimeEngine: current_ns={}, event_ns={}, diff={}ms, speed={}", current_ns, event_ns, diff_ms, speed);
         }
 
         if (speed > 0.0 && diff.count() > 0) {
