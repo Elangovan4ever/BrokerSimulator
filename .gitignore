@@ -12,6 +12,7 @@ cmake-build-*/
 # Logs and data
 logs/
 *.log
+*.pid
 
 # Environment files
 .env
