@@ -3,6 +3,7 @@
 #include <spdlog/fmt/fmt.h>
 #include "data_source_stub.hpp"
 #include "checkpoint.hpp"
+#include "../ws/status_ws_controller.hpp"
 
 namespace broker_sim {
 
@@ -549,11 +550,34 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
             if (processed == 1 || processed % 10000 == 0) {
                 spdlog::info("Session {} processed {} events", session->id, processed);
             }
+            // Broadcast status update every 100 events for real-time UI updates
+            if (processed % 100 == 0) {
+                auto current_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    session->time_engine->current_time().time_since_epoch()).count();
+                StatusWsController::broadcast_session_status(
+                    session->id,
+                    "RUNNING",
+                    current_ns,
+                    session->events_processed.load(std::memory_order_relaxed),
+                    session->config.speed_factor);
+            }
         }
         spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
+        // Broadcast final status when loop ends
+        auto final_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            session->time_engine->current_time().time_since_epoch()).count();
         if (!session->should_stop.load()) {
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
+            StatusWsController::broadcast_session_status(
+                session->id, "COMPLETED", final_ns,
+                session->events_processed.load(std::memory_order_relaxed),
+                session->config.speed_factor);
+        } else {
+            StatusWsController::broadcast_session_status(
+                session->id, "STOPPED", final_ns,
+                session->events_processed.load(std::memory_order_relaxed),
+                session->config.speed_factor);
         }
     } catch (const std::exception& e) {
         session->status = SessionStatus::ERROR;

@@ -14,6 +14,15 @@ function getErrorMessage(error: unknown): string {
   return 'Unknown error';
 }
 
+// WebSocket session status update payload
+interface WsSessionStatus {
+  session_id: string;
+  status: string;
+  current_time_ns: number;
+  events_processed: number;
+  speed_factor: number;
+}
+
 interface SessionState {
   sessions: Session[];
   selectedSessionId: string | null;
@@ -33,6 +42,7 @@ interface SessionState {
   jumpToTime: (sessionId: string, timestamp: string) => Promise<void>;
   selectSession: (sessionId: string | null) => void;
   clearError: () => void;
+  updateSessionFromWs: (data: WsSessionStatus) => void;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -169,5 +179,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   clearError: () => {
     set({ error: null });
+  },
+
+  updateSessionFromWs: (data: WsSessionStatus) => {
+    // Convert nanoseconds to ISO date string
+    const currentTimeMs = data.current_time_ns / 1_000_000;
+    const currentTime = new Date(currentTimeMs).toISOString();
+
+    set(state => ({
+      sessions: state.sessions.map(s =>
+        s.id === data.session_id
+          ? {
+              ...s,
+              status: data.status,
+              current_time: currentTime,
+              events_processed: data.events_processed,
+              speed_factor: data.speed_factor,
+            }
+          : s
+      ),
+    }));
   },
 }));

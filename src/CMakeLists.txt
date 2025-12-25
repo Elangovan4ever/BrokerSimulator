@@ -9,6 +9,7 @@ set(CORE_FILES
     control/polygon_controller.cpp
     control/finnhub_controller.cpp
     ws/ws_controller.cpp
+    ws/status_ws_controller.cpp
 )
 set(APP_FILES
     main.cpp

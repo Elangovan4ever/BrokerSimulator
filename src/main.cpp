@@ -10,6 +10,7 @@
 #include "control/alpaca_controller.hpp"
 #include "control/polygon_controller.hpp"
 #include "control/finnhub_controller.hpp"
+#include "ws/status_ws_controller.hpp"
 #if USE_WEBSOCKETPP
 #include "ws/ws_server.hpp"
 #endif
@@ -59,6 +60,7 @@ int main(int argc, char* argv[]) {
 
     auto session_mgr = std::make_shared<broker_sim::SessionManager>(data_source, cfg.execution, cfg.fees, api_data_source);
     broker_sim::WsController::init(session_mgr, cfg);
+    broker_sim::StatusWsController::init(session_mgr);
     // Register Drogon controller for API/WS
     auto api_ctrl = std::make_shared<broker_sim::ControlServer>(session_mgr, cfg);
     auto alpaca_ctrl = std::make_shared<broker_sim::AlpacaController>(session_mgr, cfg);
@@ -73,6 +75,7 @@ int main(int argc, char* argv[]) {
     drogon::app().registerController(polygon_ctrl);
     drogon::app().registerController(finnhub_ctrl);
     drogon::app().registerController(std::make_shared<broker_sim::WsController>());
+    drogon::app().registerController(std::make_shared<broker_sim::StatusWsController>());
     spdlog::info("Starting Drogon listeners on {}:{} (control) / {} (alpaca) / {} (polygon) / {} (finnhub)",
                  cfg.services.bind_address,
                  cfg.services.control_port,

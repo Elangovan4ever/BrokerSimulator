@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
-import { Clock, Play, Pause, FastForward } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import { Clock, Play, Pause, FastForward, Wifi, WifiOff } from 'lucide-react';
 import { useSessionStore } from '@/stores/sessionStore';
+import { getStatusWsUrl } from '@/api/config';
 import { StatusIndicator } from './StatusIndicator';
 import { cn } from '@/lib/utils';
 
@@ -34,27 +35,85 @@ function formatSimDate(isoString: string | undefined): string {
 }
 
 export function SessionStatusBar() {
-  const { sessions, fetchSession, fetchSessions } = useSessionStore();
+  const { sessions, fetchSessions, updateSessionFromWs } = useSessionStore();
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isConnectedRef = useRef(false);
 
   // Filter for active sessions (running or paused)
   const activeSessions = sessions.filter(
     s => s.status === 'RUNNING' || s.status === 'PAUSED'
   );
 
-  // Poll running sessions for updates
+  // WebSocket connection for real-time updates
   useEffect(() => {
-    // Initial fetch
+    // Initial fetch to get session list
     fetchSessions();
 
-    const interval = setInterval(() => {
-      const currentSessions = useSessionStore.getState().sessions;
-      currentSessions
-        .filter(s => s.status === 'RUNNING')
-        .forEach(s => fetchSession(s.id));
-    }, 1000); // Update every second for smooth timestamp display
+    const connect = () => {
+      const wsUrl = getStatusWsUrl();
+      const ws = new WebSocket(wsUrl);
 
-    return () => clearInterval(interval);
-  }, [fetchSession, fetchSessions]);
+      ws.onopen = () => {
+        isConnectedRef.current = true;
+        // Clear any pending reconnect
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'session_status') {
+            // Update session with real-time data
+            updateSessionFromWs({
+              session_id: data.session_id,
+              status: data.status,
+              current_time_ns: data.current_time_ns,
+              events_processed: data.events_processed,
+              speed_factor: data.speed_factor,
+            });
+          } else if (data.type === 'session_created' || data.type === 'session_deleted') {
+            // Refetch sessions list when sessions are added/removed
+            fetchSessions();
+          }
+        } catch (err) {
+          console.warn('Failed to parse WebSocket message:', err);
+        }
+      };
+
+      ws.onclose = () => {
+        isConnectedRef.current = false;
+        wsRef.current = null;
+
+        // Attempt to reconnect after 2 seconds
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, 2000);
+      };
+
+      ws.onerror = () => {
+        // Error handling - close will trigger reconnect
+        ws.close();
+      };
+
+      wsRef.current = ws;
+    };
+
+    connect();
+
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [fetchSessions, updateSessionFromWs]);
 
   if (activeSessions.length === 0) {
     return null;
