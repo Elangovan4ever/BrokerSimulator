@@ -211,6 +211,9 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
         limit = std::min(50000, std::stoi(limit_param));
     }
 
+    std::string order = req->getParameter("order");
+    if (order.empty()) order = "asc";
+
     json results = json::array();
 
     // Query data source for trades
@@ -219,18 +222,54 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
         if (data_source) {
             auto timestamp_param = req->getParameter("timestamp");
             auto timestamp_gte = req->getParameter("timestamp.gte");
+            auto timestamp_gt = req->getParameter("timestamp.gt");
             auto timestamp_lte = req->getParameter("timestamp.lte");
+            auto timestamp_lt = req->getParameter("timestamp.lt");
 
             Timestamp from_ts, to_ts;
-            if (!timestamp_gte.empty()) {
-                if (auto ts = utils::parse_ts_any(timestamp_gte)) from_ts = *ts;
-            }
-            if (!timestamp_lte.empty()) {
-                if (auto ts = utils::parse_ts_any(timestamp_lte)) to_ts = *ts;
+
+            // Determine time range based on parameters
+            // If no params provided, use session start to current time
+            if (timestamp_gte.empty() && timestamp_gt.empty() &&
+                timestamp_lte.empty() && timestamp_lt.empty() && timestamp_param.empty()) {
+                from_ts = session->config.start_time;
+                to_ts = session->time_engine->current_time();
+            } else {
+                // Handle timestamp.gte / timestamp.gt
+                if (!timestamp_gte.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_gte)) from_ts = *ts;
+                } else if (!timestamp_gt.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_gt))
+                        from_ts = *ts + std::chrono::nanoseconds(1);
+                } else if (!timestamp_param.empty()) {
+                    // Exact timestamp - query a small window around it
+                    if (auto ts = utils::parse_ts_any(timestamp_param)) {
+                        from_ts = *ts;
+                        to_ts = *ts + std::chrono::seconds(1);
+                    }
+                } else {
+                    from_ts = session->config.start_time;
+                }
+
+                // Handle timestamp.lte / timestamp.lt
+                if (!timestamp_lte.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_lte)) to_ts = *ts;
+                } else if (!timestamp_lt.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_lt))
+                        to_ts = *ts - std::chrono::nanoseconds(1);
+                } else if (to_ts == Timestamp{}) {
+                    to_ts = session->time_engine->current_time();
+                }
             }
 
-            if (from_ts != Timestamp{} && to_ts != Timestamp{}) {
+            if (from_ts != Timestamp{} && to_ts != Timestamp{} && from_ts <= to_ts) {
                 auto trades = data_source->get_trades(symbol, from_ts, to_ts, limit);
+
+                // Apply order (default is asc, reverse for desc)
+                if (order == "desc") {
+                    std::reverse(trades.begin(), trades.end());
+                }
+
                 for (const auto& t : trades) {
                     json trade_item;
                     trade_item["conditions"] = json::array();
@@ -314,25 +353,65 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
         limit = std::min(50000, std::stoi(limit_param));
     }
 
+    std::string order = req->getParameter("order");
+    if (order.empty()) order = "asc";
+
     json results = json::array();
 
     // Query data source for quotes
     if (session) {
         auto data_source = session_mgr_->data_source();
         if (data_source) {
+            auto timestamp_param = req->getParameter("timestamp");
             auto timestamp_gte = req->getParameter("timestamp.gte");
+            auto timestamp_gt = req->getParameter("timestamp.gt");
             auto timestamp_lte = req->getParameter("timestamp.lte");
+            auto timestamp_lt = req->getParameter("timestamp.lt");
 
             Timestamp from_ts, to_ts;
-            if (!timestamp_gte.empty()) {
-                if (auto ts = utils::parse_ts_any(timestamp_gte)) from_ts = *ts;
-            }
-            if (!timestamp_lte.empty()) {
-                if (auto ts = utils::parse_ts_any(timestamp_lte)) to_ts = *ts;
+
+            // Determine time range based on parameters
+            // If no params provided, use session start to current time
+            if (timestamp_gte.empty() && timestamp_gt.empty() &&
+                timestamp_lte.empty() && timestamp_lt.empty() && timestamp_param.empty()) {
+                from_ts = session->config.start_time;
+                to_ts = session->time_engine->current_time();
+            } else {
+                // Handle timestamp.gte / timestamp.gt
+                if (!timestamp_gte.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_gte)) from_ts = *ts;
+                } else if (!timestamp_gt.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_gt))
+                        from_ts = *ts + std::chrono::nanoseconds(1);
+                } else if (!timestamp_param.empty()) {
+                    // Exact timestamp - query a small window around it
+                    if (auto ts = utils::parse_ts_any(timestamp_param)) {
+                        from_ts = *ts;
+                        to_ts = *ts + std::chrono::seconds(1);
+                    }
+                } else {
+                    from_ts = session->config.start_time;
+                }
+
+                // Handle timestamp.lte / timestamp.lt
+                if (!timestamp_lte.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_lte)) to_ts = *ts;
+                } else if (!timestamp_lt.empty()) {
+                    if (auto ts = utils::parse_ts_any(timestamp_lt))
+                        to_ts = *ts - std::chrono::nanoseconds(1);
+                } else if (to_ts == Timestamp{}) {
+                    to_ts = session->time_engine->current_time();
+                }
             }
 
-            if (from_ts != Timestamp{} && to_ts != Timestamp{}) {
+            if (from_ts != Timestamp{} && to_ts != Timestamp{} && from_ts <= to_ts) {
                 auto quotes = data_source->get_quotes(symbol, from_ts, to_ts, limit);
+
+                // Apply order (default is asc, reverse for desc)
+                if (order == "desc") {
+                    std::reverse(quotes.begin(), quotes.end());
+                }
+
                 for (const auto& q : quotes) {
                     json quote_item;
                     quote_item["ask_exchange"] = q.ask_exchange;
