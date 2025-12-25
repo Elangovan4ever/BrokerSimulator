@@ -104,7 +104,9 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const MarketEvent&)>& cb) {
-    std::lock_guard<std::mutex> lock(client_mutex_);
+    // Note: No mutex lock here - stream_events is called once at session start
+    // and batches all events locally before returning. The session loop doesn't
+    // call this concurrently with other methods.
     // Reconnect if client is null or stale
     if (!client_) {
         spdlog::info("ClickHouse client not connected, reconnecting...");
