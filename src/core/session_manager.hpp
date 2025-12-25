@@ -92,7 +92,8 @@ public:
 
     explicit SessionManager(std::shared_ptr<DataSource> data_source = nullptr,
                             ExecutionConfig exec_cfg = {},
-                            FeeConfig fee_cfg = {});
+                            FeeConfig fee_cfg = {},
+                            std::shared_ptr<DataSource> api_data_source = nullptr);
     ~SessionManager();
 
     std::shared_ptr<Session> create_session(const SessionConfig& config,
@@ -113,6 +114,7 @@ public:
     void fast_forward(const std::string& session_id, Timestamp ts);
     std::optional<int64_t> watermark_ns(const std::string& session_id) const;
     std::shared_ptr<DataSource> data_source() const { return data_source_; }
+    std::shared_ptr<DataSource> api_data_source() const { return api_data_source_; }
     bool apply_dividend(const std::string& session_id, const std::string& symbol, double amount_per_share);
     bool apply_split(const std::string& session_id, const std::string& symbol, double split_ratio);
 
@@ -146,7 +148,8 @@ private:
 
     ExecutionConfig exec_cfg_;
     FeeConfig fee_cfg_;
-    std::shared_ptr<DataSource> data_source_;
+    std::shared_ptr<DataSource> data_source_;      // For session streaming (stream_events)
+    std::shared_ptr<DataSource> api_data_source_;  // For API queries (get_quotes, get_trades, etc.)
     std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::ofstream> session_logs_;

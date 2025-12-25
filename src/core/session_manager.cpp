@@ -47,12 +47,18 @@ void Session::stop() {
 
 SessionManager::SessionManager(std::shared_ptr<DataSource> data_source,
                                ExecutionConfig exec_cfg,
-                               FeeConfig fee_cfg)
+                               FeeConfig fee_cfg,
+                               std::shared_ptr<DataSource> api_data_source)
     : exec_cfg_(exec_cfg)
     , fee_cfg_(fee_cfg)
-    , data_source_(std::move(data_source)) {
+    , data_source_(std::move(data_source))
+    , api_data_source_(std::move(api_data_source)) {
     if (!data_source_) {
         data_source_ = std::make_shared<StubDataSource>();
+    }
+    // If no separate API data source provided, use the main one (less safe but compatible)
+    if (!api_data_source_) {
+        api_data_source_ = data_source_;
     }
 }
 

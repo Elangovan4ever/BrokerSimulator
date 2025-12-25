@@ -287,16 +287,11 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
                                                           Timestamp end_time,
                                                           size_t limit) {
     std::vector<QuoteRecord> out;
-    // Create a new connection for API requests to avoid sharing client with session loop
+    // Note: This method is now called on a separate ClickHouseDataSource instance
+    // dedicated to API queries, so we can use the shared client safely.
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) return out;
     try {
-        clickhouse::ClientOptions opts;
-        opts.SetHost(cfg_.host);
-        opts.SetPort(cfg_.port);
-        opts.SetDefaultDatabase(cfg_.database);
-        opts.SetUser(cfg_.user);
-        opts.SetPassword(cfg_.password);
-        clickhouse::Client client(opts);
-
         auto start_str = format_timestamp(start_time);
         auto end_str = format_timestamp(end_time);
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
@@ -310,7 +305,7 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
             {}
         )", symbol, start_str, end_str, limit_clause);
 
-        client.Select(query, [&out](const clickhouse::Block& block) {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 QuoteRecord q;
                 q.timestamp = extract_ts(block[0], row);

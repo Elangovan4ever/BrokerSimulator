@@ -774,7 +774,7 @@ void ControlServer::alpacaBars(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     Timestamp start, end;
     resolve_time_range(req, *session, start, end);
@@ -900,7 +900,7 @@ void ControlServer::polygonAggs(const drogon::HttpRequestPtr& req,
     if (!authorize(req)) { callback(unauthorized()); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     Timestamp start = session->config.start_time;
     Timestamp end = session->config.end_time;
@@ -957,7 +957,7 @@ void ControlServer::polygonTrades(const drogon::HttpRequestPtr& req,
     if (!authorize(req)) { callback(unauthorized()); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     Timestamp start, end;
     resolve_time_range(req, *session, start, end);
@@ -996,7 +996,7 @@ void ControlServer::polygonQuotes(const drogon::HttpRequestPtr& req,
     if (!authorize(req)) { callback(unauthorized()); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     Timestamp start, end;
     resolve_time_range(req, *session, start, end);
@@ -1086,7 +1086,7 @@ void ControlServer::finnhubTrades(const drogon::HttpRequestPtr& req,
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
     auto symbol = resolve_symbol_from_param(req);
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     Timestamp start, end;
     resolve_time_range(req, *session, start, end);
@@ -1117,7 +1117,7 @@ void ControlServer::finnhubCandles(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto res = req->getParameter("resolution");
     auto from = req->getParameter("from");
@@ -1180,7 +1180,7 @@ void ControlServer::finnhubProfile(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto profile = ds->get_company_profile(symbol);
     if (!profile) {
@@ -1226,7 +1226,7 @@ void ControlServer::finnhubPeers(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json::array())); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json::array())); return; }
     size_t limit = 50;
     auto lim = req->getParameter("limit");
@@ -1242,7 +1242,7 @@ void ControlServer::finnhubCompanyNews(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json::array())); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");
@@ -1278,7 +1278,7 @@ void ControlServer::finnhubNewsSentiment(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto sentiment = ds->get_news_sentiment(symbol);
     if (!sentiment) {
@@ -1315,7 +1315,7 @@ void ControlServer::finnhubMetric(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto basics = ds->get_basic_financials(symbol);
     if (!basics) {
@@ -1354,7 +1354,7 @@ void ControlServer::finnhubEarningsCalendar(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");
@@ -1390,7 +1390,7 @@ void ControlServer::finnhubRecommendation(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");
@@ -1424,7 +1424,7 @@ void ControlServer::finnhubPriceTarget(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto row = ds->get_price_targets(symbol);
     if (!row) { callback(json_resp(json::object())); return; }
@@ -1447,7 +1447,7 @@ void ControlServer::finnhubUpgradeDowngrade(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json{{"error","data source unavailable"}},500)); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");
@@ -1480,7 +1480,7 @@ void ControlServer::finnhubDividend(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json::array())); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");
@@ -1515,7 +1515,7 @@ void ControlServer::finnhubSplit(const drogon::HttpRequestPtr& req,
     if (symbol.empty()) { callback(json_resp(json{{"error","symbol required"}},400)); return; }
     auto session = resolve_session_from_param(req);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    auto ds = session_mgr_->data_source();
+    auto ds = session_mgr_->api_data_source();
     if (!ds) { callback(json_resp(json::array())); return; }
     auto from = req->getParameter("from");
     auto to = req->getParameter("to");

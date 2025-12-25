@@ -106,7 +106,7 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
 
     // If we have a session with data source, query it
     if (session) {
-        auto data_source = session_mgr_->data_source();
+        auto data_source = session_mgr_->api_data_source();
         if (data_source) {
             // Parse from/to timestamps
             auto from_ts = utils::parse_ts_any(from);
@@ -218,7 +218,7 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
 
     // Query data source for trades
     if (session && session->time_engine) {
-        auto data_source = session_mgr_->data_source();
+        auto data_source = session_mgr_->api_data_source();
         if (data_source) {
             auto timestamp_param = req->getParameter("timestamp");
             auto timestamp_gte = req->getParameter("timestamp.gte");
@@ -361,7 +361,7 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
 
     // Query data source for quotes
     if (session && session->time_engine) {
-        auto data_source = session_mgr_->data_source();
+        auto data_source = session_mgr_->api_data_source();
         if (data_source) {
             auto timestamp_param = req->getParameter("timestamp");
             auto timestamp_gte = req->getParameter("timestamp.gte");

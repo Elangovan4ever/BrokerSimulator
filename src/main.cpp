@@ -28,6 +28,7 @@ int main(int argc, char* argv[]) {
                  cfg.services.control_port, cfg.services.bind_address);
 
     std::shared_ptr<broker_sim::DataSource> data_source;
+    std::shared_ptr<broker_sim::DataSource> api_data_source;  // Separate connection for API queries
 #ifdef USE_CLICKHOUSE
     try {
         broker_sim::ClickHouseConfig ch_cfg;
@@ -39,6 +40,11 @@ int main(int argc, char* argv[]) {
         auto ch = std::make_shared<broker_sim::ClickHouseDataSource>(ch_cfg);
         ch->connect();
         data_source = ch;
+        // Create a separate ClickHouse connection for API queries to avoid
+        // race conditions with session's stream_events calls
+        auto ch_api = std::make_shared<broker_sim::ClickHouseDataSource>(ch_cfg);
+        ch_api->connect();
+        api_data_source = ch_api;
         spdlog::info("Using ClickHouse data source");
     } catch (const std::exception& e) {
         spdlog::warn("Falling back to stub data source: {}", e.what());
@@ -47,14 +53,17 @@ int main(int argc, char* argv[]) {
     if (!data_source) {
         data_source = std::make_shared<broker_sim::StubDataSource>();
     }
+    if (!api_data_source) {
+        api_data_source = data_source;  // Fallback to sharing if no separate source
+    }
 
-    auto session_mgr = std::make_shared<broker_sim::SessionManager>(data_source, cfg.execution, cfg.fees);
+    auto session_mgr = std::make_shared<broker_sim::SessionManager>(data_source, cfg.execution, cfg.fees, api_data_source);
     broker_sim::WsController::init(session_mgr, cfg);
     // Register Drogon controller for API/WS
     auto api_ctrl = std::make_shared<broker_sim::ControlServer>(session_mgr, cfg);
     auto alpaca_ctrl = std::make_shared<broker_sim::AlpacaController>(session_mgr, cfg);
     auto polygon_ctrl = std::make_shared<broker_sim::PolygonController>(session_mgr, cfg);
-    auto finnhub_ctrl = std::make_shared<broker_sim::FinnhubController>(session_mgr, data_source, cfg);
+    auto finnhub_ctrl = std::make_shared<broker_sim::FinnhubController>(session_mgr, api_data_source, cfg);
     drogon::app().addListener(cfg.services.bind_address, cfg.services.control_port);
     drogon::app().addListener(cfg.services.bind_address, cfg.services.alpaca_port);
     drogon::app().addListener(cfg.services.bind_address, cfg.services.polygon_port);
