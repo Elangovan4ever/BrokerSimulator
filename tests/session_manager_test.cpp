@@ -88,6 +88,34 @@ public:
         return {};
     }
 
+    std::vector<StockSplitRecord> get_stock_splits(const StockSplitsQuery&) override {
+        return {};
+    }
+
+    std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery&) override {
+        return {};
+    }
+
+    std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>&) override {
+        return {};
+    }
+
+    std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery&) override {
+        return {};
+    }
+
+    std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery&) override {
+        return {};
+    }
+
+    std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery&) override {
+        return {};
+    }
+
+    std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery&) override {
+        return {};
+    }
+
     std::vector<SplitRecord> get_splits(const std::string&,
                                         Timestamp,
                                         Timestamp,

@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <nlohmann/json.hpp>
 
 namespace broker_sim {
 
@@ -638,112 +639,118 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
 
 std::vector<DividendRecord> ClickHouseDataSource::get_stock_dividends(const StockDividendsQuery& query) {
     std::vector<DividendRecord> out;
-    if (!client_) return out;
-
-    std::vector<std::string> where;
-    auto add_str = [&where](const std::string& col, const std::optional<std::string>& value, const char* op) {
-        if (!value || value->empty()) return;
-        where.push_back(fmt::format("{} {} '{}'", col, op, *value));
-    };
-    auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
-        if (!value) return;
-        auto ts = format_timestamp(*value);
-        where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
-    };
-    auto add_double = [&where](const std::string& col, const std::optional<double>& value, const char* op) {
-        if (!value) return;
-        where.push_back(fmt::format("toFloat64({}) {} {}", col, op, *value));
-    };
-
-    add_str("ticker", query.ticker, "=");
-    add_str("ticker", query.ticker_gt, ">");
-    add_str("ticker", query.ticker_gte, ">=");
-    add_str("ticker", query.ticker_lt, "<");
-    add_str("ticker", query.ticker_lte, "<=");
-
-    add_date("ex_dividend_date", query.ex_dividend_date, "=");
-    add_date("ex_dividend_date", query.ex_dividend_date_gt, ">");
-    add_date("ex_dividend_date", query.ex_dividend_date_gte, ">=");
-    add_date("ex_dividend_date", query.ex_dividend_date_lt, "<");
-    add_date("ex_dividend_date", query.ex_dividend_date_lte, "<=");
-
-    add_date("record_date", query.record_date, "=");
-    add_date("record_date", query.record_date_gt, ">");
-    add_date("record_date", query.record_date_gte, ">=");
-    add_date("record_date", query.record_date_lt, "<");
-    add_date("record_date", query.record_date_lte, "<=");
-
-    add_date("declaration_date", query.declaration_date, "=");
-    add_date("declaration_date", query.declaration_date_gt, ">");
-    add_date("declaration_date", query.declaration_date_gte, ">=");
-    add_date("declaration_date", query.declaration_date_lt, "<");
-    add_date("declaration_date", query.declaration_date_lte, "<=");
-
-    add_date("pay_date", query.pay_date, "=");
-    add_date("pay_date", query.pay_date_gt, ">");
-    add_date("pay_date", query.pay_date_gte, ">=");
-    add_date("pay_date", query.pay_date_lt, "<");
-    add_date("pay_date", query.pay_date_lte, "<=");
-
-    add_double("cash_amount", query.cash_amount, "=");
-    add_double("cash_amount", query.cash_amount_gt, ">");
-    add_double("cash_amount", query.cash_amount_gte, ">=");
-    add_double("cash_amount", query.cash_amount_lt, "<");
-    add_double("cash_amount", query.cash_amount_lte, "<=");
-
-    if (query.frequency) {
-        where.push_back(fmt::format("frequency = {}", *query.frequency));
-    }
-    if (query.dividend_type && !query.dividend_type->empty()) {
-        where.push_back(fmt::format("dividend_type = '{}'", *query.dividend_type));
-    }
-    if (query.max_ex_dividend_date) {
-        auto ts = format_timestamp(*query.max_ex_dividend_date);
-        where.push_back(fmt::format("ex_dividend_date <= toDate('{}')", ts));
-    }
-
-    std::string where_clause;
-    if (!where.empty()) {
-        where_clause = "WHERE ";
-        for (size_t i = 0; i < where.size(); ++i) {
-            if (i > 0) where_clause += " AND ";
-            where_clause += where[i];
-        }
-    }
-
-    std::string sort_col = "ex_dividend_date";
-    if (query.sort == "pay_date") sort_col = "pay_date";
-    else if (query.sort == "declaration_date") sort_col = "declaration_date";
-    else if (query.sort == "record_date") sort_col = "record_date";
-    else if (query.sort == "cash_amount") sort_col = "cash_amount";
-    else if (query.sort == "ticker") sort_col = "ticker";
-
-    std::string order = (query.order == "asc") ? "ASC" : "DESC";
-
-    std::string limit_clause;
-    if (query.limit > 0) {
-        limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
-    }
-
-    std::string sql = fmt::format(R"(
-        SELECT CAST(id AS String),
-               CAST(ticker AS String),
-               cash_amount,
-               CAST(currency AS String),
-               CAST(dividend_type AS String),
-               frequency,
-               ex_dividend_date,
-               declaration_date,
-               record_date,
-               pay_date
-        FROM stock_dividends
-        {}
-        ORDER BY {} {}
-        {}
-    )", where_clause, sort_col, order, limit_clause);
-
     try {
-        client_->Select(sql, [&out](const clickhouse::Block& block) {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value, const char* op) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} {} '{}'", col, op, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+        auto add_double = [&where](const std::string& col, const std::optional<double>& value, const char* op) {
+            if (!value) return;
+            where.push_back(fmt::format("toFloat64({}) {} {}", col, op, *value));
+        };
+
+        add_str("ticker", query.ticker, "=");
+        add_str("ticker", query.ticker_gt, ">");
+        add_str("ticker", query.ticker_gte, ">=");
+        add_str("ticker", query.ticker_lt, "<");
+        add_str("ticker", query.ticker_lte, "<=");
+
+        add_date("ex_dividend_date", query.ex_dividend_date, "=");
+        add_date("ex_dividend_date", query.ex_dividend_date_gt, ">");
+        add_date("ex_dividend_date", query.ex_dividend_date_gte, ">=");
+        add_date("ex_dividend_date", query.ex_dividend_date_lt, "<");
+        add_date("ex_dividend_date", query.ex_dividend_date_lte, "<=");
+
+        add_date("record_date", query.record_date, "=");
+        add_date("record_date", query.record_date_gt, ">");
+        add_date("record_date", query.record_date_gte, ">=");
+        add_date("record_date", query.record_date_lt, "<");
+        add_date("record_date", query.record_date_lte, "<=");
+
+        add_date("declaration_date", query.declaration_date, "=");
+        add_date("declaration_date", query.declaration_date_gt, ">");
+        add_date("declaration_date", query.declaration_date_gte, ">=");
+        add_date("declaration_date", query.declaration_date_lt, "<");
+        add_date("declaration_date", query.declaration_date_lte, "<=");
+
+        add_date("pay_date", query.pay_date, "=");
+        add_date("pay_date", query.pay_date_gt, ">");
+        add_date("pay_date", query.pay_date_gte, ">=");
+        add_date("pay_date", query.pay_date_lt, "<");
+        add_date("pay_date", query.pay_date_lte, "<=");
+
+        add_double("cash_amount", query.cash_amount, "=");
+        add_double("cash_amount", query.cash_amount_gt, ">");
+        add_double("cash_amount", query.cash_amount_gte, ">=");
+        add_double("cash_amount", query.cash_amount_lt, "<");
+        add_double("cash_amount", query.cash_amount_lte, "<=");
+
+        if (query.frequency) {
+            where.push_back(fmt::format("frequency = {}", *query.frequency));
+        }
+        if (query.dividend_type && !query.dividend_type->empty()) {
+            where.push_back(fmt::format("dividend_type = '{}'", *query.dividend_type));
+        }
+        if (query.max_ex_dividend_date) {
+            auto ts = format_timestamp(*query.max_ex_dividend_date);
+            where.push_back(fmt::format("ex_dividend_date <= toDate('{}')", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "ex_dividend_date";
+        if (query.sort == "pay_date") sort_col = "pay_date";
+        else if (query.sort == "declaration_date") sort_col = "declaration_date";
+        else if (query.sort == "record_date") sort_col = "record_date";
+        else if (query.sort == "cash_amount") sort_col = "cash_amount";
+        else if (query.sort == "ticker") sort_col = "ticker";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(id AS String),
+                   CAST(ticker AS String),
+                   cash_amount,
+                   CAST(currency AS String),
+                   CAST(dividend_type AS String),
+                   frequency,
+                   toDateTime(ex_dividend_date) AS ex_dividend_date,
+                   toDateTime(declaration_date) AS declaration_date,
+                   toDateTime(record_date) AS record_date,
+                   toDateTime(pay_date) AS pay_date
+            FROM stock_dividends
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 DividendRecord d;
                 d.id = block[0]->As<clickhouse::ColumnString>()->At(row);
@@ -767,6 +774,908 @@ std::vector<DividendRecord> ClickHouseDataSource::get_stock_dividends(const Stoc
         out.clear();
     }
 
+    return out;
+}
+
+std::vector<StockSplitRecord> ClickHouseDataSource::get_stock_splits(const StockSplitsQuery& query) {
+    std::vector<StockSplitRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value, const char* op) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} {} '{}'", col, op, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+
+        add_str("ticker", query.ticker, "=");
+        add_str("ticker", query.ticker_gt, ">");
+        add_str("ticker", query.ticker_gte, ">=");
+        add_str("ticker", query.ticker_lt, "<");
+        add_str("ticker", query.ticker_lte, "<=");
+
+        add_date("execution_date", query.execution_date, "=");
+        add_date("execution_date", query.execution_date_gt, ">");
+        add_date("execution_date", query.execution_date_gte, ">=");
+        add_date("execution_date", query.execution_date_lt, "<");
+        add_date("execution_date", query.execution_date_lte, "<=");
+
+        if (query.max_execution_date) {
+            auto ts = format_timestamp(*query.max_execution_date);
+            where.push_back(fmt::format("execution_date <= toDate('{}')", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "execution_date";
+        if (query.sort == "ticker") sort_col = "ticker";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(id AS String),
+                   CAST(ticker AS String),
+                   toDateTime(execution_date) AS execution_date,
+                   split_from,
+                   split_to
+            FROM stock_splits
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockSplitRecord s;
+                s.id = block[0]->As<clickhouse::ColumnString>()->At(row);
+                s.ticker = block[1]->As<clickhouse::ColumnString>()->At(row);
+                s.execution_date = extract_ts_any(block[2], row);
+                if (auto v = get_nullable_float(block[3], row)) s.split_from = *v;
+                if (auto v = get_nullable_float(block[4], row)) s.split_to = *v;
+                out.push_back(std::move(s));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_splits failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNewsQuery& query) {
+    std::vector<StockNewsRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_ts = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDateTime64('{}', 3)", col, op, ts));
+        };
+
+        if (query.ticker && !query.ticker->empty()) {
+            where.push_back(fmt::format("has(tickers, '{}')", *query.ticker));
+        }
+
+        add_ts("published_utc", query.published_utc, "=");
+        add_ts("published_utc", query.published_utc_gt, ">");
+        add_ts("published_utc", query.published_utc_gte, ">=");
+        add_ts("published_utc", query.published_utc_lt, "<");
+        add_ts("published_utc", query.published_utc_lte, "<=");
+
+        if (query.max_published_utc) {
+            auto ts = format_timestamp(*query.max_published_utc);
+            where.push_back(fmt::format("published_utc <= toDateTime64('{}', 3)", ts));
+        }
+
+        if (query.cursor_published_utc) {
+            auto ts = format_timestamp(*query.cursor_published_utc);
+            if (query.order == "ascending") {
+                if (query.cursor_id && !query.cursor_id->empty()) {
+                    where.push_back(fmt::format("(published_utc > toDateTime64('{}', 3) OR (published_utc = toDateTime64('{}', 3) AND id > '{}'))",
+                                                ts, ts, *query.cursor_id));
+                } else {
+                    where.push_back(fmt::format("published_utc > toDateTime64('{}', 3)", ts));
+                }
+            } else {
+                if (query.cursor_id && !query.cursor_id->empty()) {
+                    where.push_back(fmt::format("(published_utc < toDateTime64('{}', 3) OR (published_utc = toDateTime64('{}', 3) AND id < '{}'))",
+                                                ts, ts, *query.cursor_id));
+                } else {
+                    where.push_back(fmt::format("published_utc < toDateTime64('{}', 3)", ts));
+                }
+            }
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string order = (query.order == "ascending") ? "ASC" : "DESC";
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {}", query.limit);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(id AS String),
+                   published_utc,
+                   updated_utc,
+                   CAST(publisher_name AS String),
+                   publisher_homepage_url,
+                   publisher_logo_url,
+                   publisher_favicon_url,
+                   title,
+                   author,
+                   article_url,
+                   amp_url,
+                   image_url,
+                   description,
+                   CAST(tickers AS Array(String)) AS tickers,
+                   CAST(keywords AS Array(String)) AS keywords
+            FROM stock_news
+            {}
+            ORDER BY published_utc {} , id {}
+            {}
+        )", where_clause, order, order, limit_clause);
+
+        auto read_array = [](const clickhouse::ColumnRef& col, size_t row) {
+            std::vector<std::string> out;
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return out;
+            const auto& offsets = arr->GetOffsets();
+            size_t start = row == 0 ? 0 : offsets[row - 1];
+            size_t end = offsets[row];
+            auto data = arr->GetData();
+            auto str_col = data->As<clickhouse::ColumnString>();
+            if (!str_col) return out;
+            out.reserve(end - start);
+            for (size_t i = start; i < end; ++i) {
+                auto sv = str_col->At(i);
+                out.emplace_back(sv.data(), sv.size());
+            }
+            return out;
+        };
+
+        client.Select(sql, [&out, &read_array](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockNewsRecord n;
+                n.id = block[0]->As<clickhouse::ColumnString>()->At(row);
+                n.published_utc = extract_ts_any(block[1], row);
+                n.updated_utc = extract_ts_any(block[2], row);
+                n.publisher_name = block[3]->As<clickhouse::ColumnString>()->At(row);
+                n.publisher_homepage_url = block[4]->As<clickhouse::ColumnString>()->At(row);
+                n.publisher_logo_url = block[5]->As<clickhouse::ColumnString>()->At(row);
+                n.publisher_favicon_url = block[6]->As<clickhouse::ColumnString>()->At(row);
+                n.title = block[7]->As<clickhouse::ColumnString>()->At(row);
+                n.author = block[8]->As<clickhouse::ColumnString>()->At(row);
+                n.article_url = block[9]->As<clickhouse::ColumnString>()->At(row);
+                n.amp_url = block[10]->As<clickhouse::ColumnString>()->At(row);
+                n.image_url = block[11]->As<clickhouse::ColumnString>()->At(row);
+                n.description = block[12]->As<clickhouse::ColumnString>()->At(row);
+                n.tickers = read_array(block[13], row);
+                n.keywords = read_array(block[14], row);
+                out.push_back(std::move(n));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_news failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<StockNewsInsightRecord> ClickHouseDataSource::get_stock_news_insights(const std::vector<std::string>& article_ids) {
+    std::vector<StockNewsInsightRecord> out;
+    if (article_ids.empty()) return out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::string id_list;
+        for (size_t i = 0; i < article_ids.size(); ++i) {
+            if (i > 0) id_list += ", ";
+            id_list += "'" + article_ids[i] + "'";
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(article_id AS String),
+                   published_utc,
+                   CAST(ticker AS String),
+                   CAST(sentiment AS String),
+                   sentiment_reasoning,
+                   sentiment_score,
+                   relevance_score
+            FROM stock_news_insights
+            WHERE article_id IN ({})
+            ORDER BY published_utc DESC
+        )", id_list);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockNewsInsightRecord ins;
+                ins.article_id = block[0]->As<clickhouse::ColumnString>()->At(row);
+                ins.published_utc = extract_ts_any(block[1], row);
+                ins.ticker = block[2]->As<clickhouse::ColumnString>()->At(row);
+                ins.sentiment = block[3]->As<clickhouse::ColumnString>()->At(row);
+                ins.sentiment_reasoning = block[4]->As<clickhouse::ColumnString>()->At(row);
+                if (auto v = get_nullable_float(block[5], row)) ins.sentiment_score = *v;
+                if (auto v = get_nullable_float(block[6], row)) ins.relevance_score = *v;
+                out.push_back(std::move(ins));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_news_insights failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<StockIpoRecord> ClickHouseDataSource::get_stock_ipos(const StockIposQuery& query) {
+    std::vector<StockIpoRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} = '{}'", col, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+
+        add_str("ticker", query.ticker);
+        add_str("ipo_status", query.ipo_status);
+
+        add_date("announced_date", query.announced_date, "=");
+        add_date("announced_date", query.announced_date_gt, ">");
+        add_date("announced_date", query.announced_date_gte, ">=");
+        add_date("announced_date", query.announced_date_lt, "<");
+        add_date("announced_date", query.announced_date_lte, "<=");
+
+        add_date("listing_date", query.listing_date, "=");
+        add_date("listing_date", query.listing_date_gt, ">");
+        add_date("listing_date", query.listing_date_gte, ">=");
+        add_date("listing_date", query.listing_date_lt, "<");
+        add_date("listing_date", query.listing_date_lte, "<=");
+
+        add_date("issue_start_date", query.issue_start_date, "=");
+        add_date("issue_start_date", query.issue_start_date_gt, ">");
+        add_date("issue_start_date", query.issue_start_date_gte, ">=");
+        add_date("issue_start_date", query.issue_start_date_lt, "<");
+        add_date("issue_start_date", query.issue_start_date_lte, "<=");
+
+        add_date("issue_end_date", query.issue_end_date, "=");
+        add_date("issue_end_date", query.issue_end_date_gt, ">");
+        add_date("issue_end_date", query.issue_end_date_gte, ">=");
+        add_date("issue_end_date", query.issue_end_date_lt, "<");
+        add_date("issue_end_date", query.issue_end_date_lte, "<=");
+
+        add_date("last_updated", query.last_updated, "=");
+        add_date("last_updated", query.last_updated_gt, ">");
+        add_date("last_updated", query.last_updated_gte, ">=");
+        add_date("last_updated", query.last_updated_lt, "<");
+        add_date("last_updated", query.last_updated_lte, "<=");
+
+        if (query.max_date) {
+            auto ts = format_timestamp(*query.max_date);
+            where.push_back(fmt::format(R"(
+                (
+                    (last_updated IS NOT NULL AND last_updated <= toDate('{0}')) OR
+                    (last_updated IS NULL AND announced_date IS NOT NULL AND announced_date <= toDate('{0}')) OR
+                    (last_updated IS NULL AND announced_date IS NULL AND listing_date IS NOT NULL AND listing_date <= toDate('{0}')) OR
+                    (last_updated IS NULL AND announced_date IS NULL AND listing_date IS NULL)
+                )
+            )", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "listing_date";
+        if (query.sort == "announced_date") sort_col = "announced_date";
+        else if (query.sort == "issue_start_date") sort_col = "issue_start_date";
+        else if (query.sort == "issue_end_date") sort_col = "issue_end_date";
+        else if (query.sort == "last_updated") sort_col = "last_updated";
+        else if (query.sort == "ticker") sort_col = "ticker";
+        else if (query.sort == "ipo_status") sort_col = "ipo_status";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(ticker AS String),
+                   announced_date,
+                   listing_date,
+                   issue_start_date,
+                   issue_end_date,
+                   last_updated,
+                   CAST(ipo_status AS String),
+                   raw_json
+            FROM stock_ipos
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockIpoRecord r;
+                r.ticker = block[0]->As<clickhouse::ColumnString>()->At(row);
+                auto announced_ts = extract_ts_any(block[1], row);
+                if (announced_ts.time_since_epoch().count() != 0) r.announced_date = announced_ts;
+                auto listing_ts = extract_ts_any(block[2], row);
+                if (listing_ts.time_since_epoch().count() != 0) r.listing_date = listing_ts;
+                auto issue_start_ts = extract_ts_any(block[3], row);
+                if (issue_start_ts.time_since_epoch().count() != 0) r.issue_start_date = issue_start_ts;
+                auto issue_end_ts = extract_ts_any(block[4], row);
+                if (issue_end_ts.time_since_epoch().count() != 0) r.issue_end_date = issue_end_ts;
+                auto last_updated_ts = extract_ts_any(block[5], row);
+                if (last_updated_ts.time_since_epoch().count() != 0) r.last_updated = last_updated_ts;
+                r.ipo_status = block[6]->As<clickhouse::ColumnString>()->At(row);
+                r.raw_json = block[7]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_ipos failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<StockShortInterestRecord> ClickHouseDataSource::get_stock_short_interest(const StockShortInterestQuery& query) {
+    std::vector<StockShortInterestRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} = '{}'", col, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+
+        add_str("ticker", query.ticker);
+        add_date("settlement_date", query.settlement_date, "=");
+        add_date("settlement_date", query.settlement_date_gt, ">");
+        add_date("settlement_date", query.settlement_date_gte, ">=");
+        add_date("settlement_date", query.settlement_date_lt, "<");
+        add_date("settlement_date", query.settlement_date_lte, "<=");
+
+        if (query.max_settlement_date) {
+            auto ts = format_timestamp(*query.max_settlement_date);
+            where.push_back(fmt::format("settlement_date <= toDate('{}')", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "settlement_date";
+        if (query.sort == "ticker") sort_col = "ticker";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(ticker AS String),
+                   settlement_date,
+                   short_interest,
+                   days_to_cover,
+                   raw_json
+            FROM stock_short_interest
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockShortInterestRecord r;
+                r.ticker = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.settlement_date = extract_ts_any(block[1], row);
+                if (auto v = get_nullable_float(block[2], row)) r.short_interest = *v;
+                if (auto v = get_nullable_float(block[3], row)) r.days_to_cover = *v;
+                r.raw_json = block[4]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_short_interest failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume(const StockShortVolumeQuery& query) {
+    std::vector<StockShortVolumeRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} = '{}'", col, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+
+        add_str("ticker", query.ticker);
+        add_date("trade_date", query.trade_date, "=");
+        add_date("trade_date", query.trade_date_gt, ">");
+        add_date("trade_date", query.trade_date_gte, ">=");
+        add_date("trade_date", query.trade_date_lt, "<");
+        add_date("trade_date", query.trade_date_lte, "<=");
+
+        if (query.max_trade_date) {
+            auto ts = format_timestamp(*query.max_trade_date);
+            where.push_back(fmt::format("trade_date <= toDate('{}')", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "trade_date";
+        if (query.sort == "ticker") sort_col = "ticker";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(ticker AS String),
+                   trade_date,
+                   raw_json
+            FROM stock_short_volume
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockShortVolumeRecord r;
+                r.ticker = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.trade_date = extract_ts_any(block[1], row);
+                r.raw_json = block[2]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_short_volume failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const FinancialsQuery& query) {
+    std::vector<FinancialsRecord> out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        auto add_str = [&where](const std::string& col, const std::optional<std::string>& value) {
+            if (!value || value->empty()) return;
+            where.push_back(fmt::format("{} = '{}'", col, *value));
+        };
+        auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+            if (!value) return;
+            auto ts = format_timestamp(*value);
+            where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+        };
+        auto add_int = [&where](const std::string& col, const std::optional<int>& value) {
+            if (!value) return;
+            where.push_back(fmt::format("{} = {}", col, *value));
+        };
+
+        add_str("bs.ticker", query.ticker);
+        add_str("bs.cik", query.cik);
+        add_str("bs.timeframe", query.timeframe);
+        add_str("bs.fiscal_period", query.fiscal_period);
+        add_int("bs.fiscal_year", query.fiscal_year);
+
+        add_date("bs.period_of_report", query.period_of_report_date, "=");
+        add_date("bs.period_of_report", query.period_of_report_date_gt, ">");
+        add_date("bs.period_of_report", query.period_of_report_date_gte, ">=");
+        add_date("bs.period_of_report", query.period_of_report_date_lt, "<");
+        add_date("bs.period_of_report", query.period_of_report_date_lte, "<=");
+
+        add_date("bs.filing_date", query.filing_date, "=");
+        add_date("bs.filing_date", query.filing_date_gt, ">");
+        add_date("bs.filing_date", query.filing_date_gte, ">=");
+        add_date("bs.filing_date", query.filing_date_lt, "<");
+        add_date("bs.filing_date", query.filing_date_lte, "<=");
+
+        if (query.max_period_of_report_date) {
+            auto ts = format_timestamp(*query.max_period_of_report_date);
+            where.push_back(fmt::format("bs.period_of_report <= toDate('{}')", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "bs.period_of_report";
+        if (query.sort == "filing_date") sort_col = "bs.filing_date";
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+        std::string limit_clause;
+        if (query.limit > 0) {
+            limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT CAST(bs.ticker AS String),
+                   bs.cik,
+                   bs.company_name,
+                   bs.start_date,
+                   bs.end_date,
+                   bs.filing_date,
+                   bs.acceptance_datetime,
+                   CAST(bs.timeframe AS String),
+                   CAST(bs.fiscal_period AS String),
+                   bs.fiscal_year,
+                   bs.source_filing_url,
+                   CAST(bs.form AS String),
+                   CAST(bs.currency AS String),
+                   bs.period_of_report,
+                   bs.assets,
+                   bs.current_assets,
+                   bs.noncurrent_assets,
+                   bs.inventory,
+                   bs.accounts_receivable,
+                   bs.liabilities,
+                   bs.current_liabilities,
+                   bs.noncurrent_liabilities,
+                   bs.accounts_payable,
+                   bs.long_term_debt,
+                   bs.equity,
+                   bs.intangible_assets,
+                   bs.property_plant_and_equipment,
+                   inc.revenues,
+                   inc.cost_of_revenue,
+                   inc.gross_profit,
+                   inc.operating_income_loss,
+                   inc.net_income_loss,
+                   inc.net_income_loss_attributable_to_parent,
+                   inc.research_and_development,
+                   inc.selling_general_and_administrative,
+                   inc.income_tax_expense_benefit,
+                   inc.basic_earnings_per_share,
+                   inc.diluted_earnings_per_share,
+                   inc.basic_average_shares,
+                   inc.diluted_average_shares,
+                   cf.net_cash_flow,
+                   cf.net_cash_flow_from_operating_activities,
+                   cf.net_cash_flow_from_investing_activities,
+                   cf.net_cash_flow_from_financing_activities,
+                   bs.raw_json,
+                   inc.raw_json,
+                   cf.raw_json
+            FROM stock_balance_sheets AS bs
+            LEFT JOIN stock_income_statements AS inc
+              ON inc.ticker = bs.ticker
+             AND inc.period_of_report = bs.period_of_report
+             AND inc.timeframe = bs.timeframe
+             AND inc.fiscal_period = bs.fiscal_period
+             AND inc.fiscal_year = bs.fiscal_year
+            LEFT JOIN stock_cash_flow_statements AS cf
+              ON cf.ticker = bs.ticker
+             AND cf.period_of_report = bs.period_of_report
+             AND cf.timeframe = bs.timeframe
+             AND cf.fiscal_period = bs.fiscal_period
+             AND cf.fiscal_year = bs.fiscal_year
+            {}
+            ORDER BY {} {}
+            {}
+        )", where_clause, sort_col, order, limit_clause);
+
+        auto set_val = [](std::unordered_map<std::string, double>& dest,
+                          const std::string& key,
+                          const clickhouse::ColumnRef& col,
+                          size_t row) {
+            if (auto v = get_nullable_float(col, row)) {
+                dest[key] = *v;
+            }
+        };
+
+        auto parse_json = [](const clickhouse::ColumnRef& col, size_t row) {
+            auto raw = col->As<clickhouse::ColumnString>()->At(row);
+            if (raw.empty()) return nlohmann::json::object();
+            try {
+                return nlohmann::json::parse(raw);
+            } catch (...) {
+                return nlohmann::json::object();
+            }
+        };
+
+        auto json_number = [](const nlohmann::json& obj, const char* key) -> std::optional<double> {
+            auto it = obj.find(key);
+            if (it == obj.end()) return std::nullopt;
+            if (it->is_number_float() || it->is_number_integer() || it->is_number_unsigned()) {
+                return it->get<double>();
+            }
+            return std::nullopt;
+        };
+
+        client.Select(sql, [&out, &set_val, &parse_json, &json_number](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinancialsRecord r;
+                r.ticker = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.cik = block[1]->As<clickhouse::ColumnString>()->At(row);
+                r.company_name = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.start_date = extract_ts_any(block[3], row);
+                r.end_date = extract_ts_any(block[4], row);
+                r.filing_date = extract_ts_any(block[5], row);
+                r.acceptance_datetime = extract_ts_any(block[6], row);
+                r.timeframe = block[7]->As<clickhouse::ColumnString>()->At(row);
+                r.fiscal_period = block[8]->As<clickhouse::ColumnString>()->At(row);
+                if (auto v = get_nullable_uint16(block[9], row)) r.fiscal_year = std::to_string(*v);
+                r.source_filing_url = block[10]->As<clickhouse::ColumnString>()->At(row);
+                r.form = block[11]->As<clickhouse::ColumnString>()->At(row);
+                r.currency = block[12]->As<clickhouse::ColumnString>()->At(row);
+                r.period_of_report = extract_ts_any(block[13], row);
+
+                set_val(r.balance_sheet, "assets", block[14], row);
+                set_val(r.balance_sheet, "current_assets", block[15], row);
+                set_val(r.balance_sheet, "noncurrent_assets", block[16], row);
+                set_val(r.balance_sheet, "inventory", block[17], row);
+                set_val(r.balance_sheet, "accounts_receivable", block[18], row);
+                set_val(r.balance_sheet, "liabilities", block[19], row);
+                set_val(r.balance_sheet, "current_liabilities", block[20], row);
+                set_val(r.balance_sheet, "noncurrent_liabilities", block[21], row);
+                set_val(r.balance_sheet, "accounts_payable", block[22], row);
+                set_val(r.balance_sheet, "long_term_debt", block[23], row);
+                set_val(r.balance_sheet, "equity", block[24], row);
+                set_val(r.balance_sheet, "intangible_assets", block[25], row);
+                if (auto v = get_nullable_float(block[26], row)) {
+                    r.balance_sheet["fixed_assets"] = *v;
+                }
+
+                auto it_liab = r.balance_sheet.find("liabilities");
+                auto it_equity = r.balance_sheet.find("equity");
+                if (it_liab != r.balance_sheet.end() && it_equity != r.balance_sheet.end()) {
+                    r.balance_sheet["liabilities_and_equity"] = it_liab->second + it_equity->second;
+                }
+
+                set_val(r.income_statement, "revenues", block[27], row);
+                set_val(r.income_statement, "cost_of_revenue", block[28], row);
+                set_val(r.income_statement, "gross_profit", block[29], row);
+                set_val(r.income_statement, "operating_income_loss", block[30], row);
+                set_val(r.income_statement, "net_income_loss", block[31], row);
+                set_val(r.income_statement, "net_income_loss_attributable_to_parent", block[32], row);
+                set_val(r.income_statement, "research_and_development", block[33], row);
+                set_val(r.income_statement, "selling_general_and_administrative_expenses", block[34], row);
+                set_val(r.income_statement, "income_tax_expense_benefit", block[35], row);
+                set_val(r.income_statement, "basic_earnings_per_share", block[36], row);
+                set_val(r.income_statement, "diluted_earnings_per_share", block[37], row);
+                set_val(r.income_statement, "basic_average_shares", block[38], row);
+                set_val(r.income_statement, "diluted_average_shares", block[39], row);
+
+                set_val(r.cash_flow_statement, "net_cash_flow", block[40], row);
+                set_val(r.cash_flow_statement, "net_cash_flow_from_operating_activities", block[41], row);
+                set_val(r.cash_flow_statement, "net_cash_flow_from_investing_activities", block[42], row);
+                set_val(r.cash_flow_statement, "net_cash_flow_from_financing_activities", block[43], row);
+
+                auto bs_json = parse_json(block[44], row);
+                auto inc_json = parse_json(block[45], row);
+                auto cf_json = parse_json(block[46], row);
+
+                auto set_json = [&json_number](std::unordered_map<std::string, double>& dest,
+                                               const std::string& key,
+                                               const nlohmann::json& obj,
+                                               const char* json_key) {
+                    if (auto v = json_number(obj, json_key)) {
+                        dest[key] = *v;
+                    }
+                };
+
+                set_json(r.balance_sheet, "assets", bs_json, "total_assets");
+                set_json(r.balance_sheet, "current_assets", bs_json, "total_current_assets");
+                set_json(r.balance_sheet, "liabilities", bs_json, "total_liabilities");
+                set_json(r.balance_sheet, "current_liabilities", bs_json, "total_current_liabilities");
+                set_json(r.balance_sheet, "equity", bs_json, "total_equity");
+                set_json(r.balance_sheet, "equity_attributable_to_parent", bs_json, "total_equity_attributable_to_parent");
+                set_json(r.balance_sheet, "liabilities_and_equity", bs_json, "total_liabilities_and_equity");
+                set_json(r.balance_sheet, "fixed_assets", bs_json, "property_plant_equipment_net");
+                set_json(r.balance_sheet, "inventory", bs_json, "inventories");
+                set_json(r.balance_sheet, "accounts_payable", bs_json, "accounts_payable");
+                set_json(r.balance_sheet, "long_term_debt", bs_json, "long_term_debt_and_capital_lease_obligations");
+                set_json(r.balance_sheet, "other_current_assets", bs_json, "other_current_assets");
+                set_json(r.balance_sheet, "other_current_liabilities", bs_json, "accrued_and_other_current_liabilities");
+                set_json(r.balance_sheet, "other_noncurrent_assets", bs_json, "other_assets");
+                set_json(r.balance_sheet, "other_noncurrent_liabilities", bs_json, "other_noncurrent_liabilities");
+
+                auto assets_it = r.balance_sheet.find("assets");
+                auto current_assets_it = r.balance_sheet.find("current_assets");
+                if (assets_it != r.balance_sheet.end() && current_assets_it != r.balance_sheet.end()) {
+                    r.balance_sheet["noncurrent_assets"] = assets_it->second - current_assets_it->second;
+                }
+
+                auto liabilities_it = r.balance_sheet.find("liabilities");
+                auto current_liab_it = r.balance_sheet.find("current_liabilities");
+                if (liabilities_it != r.balance_sheet.end() && current_liab_it != r.balance_sheet.end()) {
+                    r.balance_sheet["noncurrent_liabilities"] = liabilities_it->second - current_liab_it->second;
+                }
+
+                auto equity_it = r.balance_sheet.find("equity");
+                auto equity_parent_it = r.balance_sheet.find("equity_attributable_to_parent");
+                if (equity_it != r.balance_sheet.end() && equity_parent_it != r.balance_sheet.end()) {
+                    r.balance_sheet["equity_attributable_to_noncontrolling_interest"] =
+                        equity_it->second - equity_parent_it->second;
+                }
+
+                set_json(r.income_statement, "revenues", inc_json, "revenue");
+                set_json(r.income_statement, "cost_of_revenue", inc_json, "cost_of_revenue");
+                set_json(r.income_statement, "gross_profit", inc_json, "gross_profit");
+                set_json(r.income_statement, "operating_income_loss", inc_json, "operating_income");
+                set_json(r.income_statement, "net_income_loss", inc_json, "consolidated_net_income_loss");
+                set_json(r.income_statement, "net_income_loss_attributable_to_parent", inc_json, "net_income_loss_attributable_common_shareholders");
+                set_json(r.income_statement, "research_and_development", inc_json, "research_development");
+                set_json(r.income_statement, "selling_general_and_administrative_expenses", inc_json, "selling_general_administrative");
+                set_json(r.income_statement, "income_tax_expense_benefit", inc_json, "income_taxes");
+                set_json(r.income_statement, "income_loss_from_continuing_operations_before_tax", inc_json, "income_before_income_taxes");
+                set_json(r.income_statement, "operating_expenses", inc_json, "total_operating_expenses");
+                set_json(r.income_statement, "nonoperating_income_loss", inc_json, "total_other_income_expense");
+                if (r.income_statement.find("nonoperating_income_loss") == r.income_statement.end()) {
+                    set_json(r.income_statement, "nonoperating_income_loss", inc_json, "other_income_expense");
+                }
+                set_json(r.income_statement, "basic_earnings_per_share", inc_json, "basic_earnings_per_share");
+                set_json(r.income_statement, "diluted_earnings_per_share", inc_json, "diluted_earnings_per_share");
+                set_json(r.income_statement, "basic_average_shares", inc_json, "basic_shares_outstanding");
+                set_json(r.income_statement, "diluted_average_shares", inc_json, "diluted_shares_outstanding");
+
+                auto cost_it = r.income_statement.find("cost_of_revenue");
+                auto op_exp_it = r.income_statement.find("operating_expenses");
+                if (cost_it != r.income_statement.end() && op_exp_it != r.income_statement.end()) {
+                    auto total = cost_it->second + op_exp_it->second;
+                    r.income_statement["benefits_costs_expenses"] = total;
+                    r.income_statement["costs_and_expenses"] = total;
+                }
+
+                auto pretax_it = r.income_statement.find("income_loss_from_continuing_operations_before_tax");
+                auto tax_it = r.income_statement.find("income_tax_expense_benefit");
+                if (pretax_it != r.income_statement.end() && tax_it != r.income_statement.end()) {
+                    r.income_statement["income_loss_from_continuing_operations_after_tax"] =
+                        pretax_it->second - tax_it->second;
+                }
+
+                auto net_it = r.income_statement.find("net_income_loss");
+                auto net_parent_it = r.income_statement.find("net_income_loss_attributable_to_parent");
+                if (net_it != r.income_statement.end() && net_parent_it != r.income_statement.end()) {
+                    r.income_statement["net_income_loss_attributable_to_noncontrolling_interest"] =
+                        net_it->second - net_parent_it->second;
+                }
+                if (net_parent_it != r.income_statement.end()) {
+                    r.income_statement["net_income_loss_available_to_common_stockholders_basic"] =
+                        net_parent_it->second;
+                }
+
+                set_json(r.cash_flow_statement, "net_cash_flow_from_operating_activities", cf_json, "net_cash_from_operating_activities");
+                set_json(r.cash_flow_statement, "net_cash_flow_from_operating_activities_continuing", cf_json, "net_cash_from_operating_activities_continuing_operations");
+                set_json(r.cash_flow_statement, "net_cash_flow_from_investing_activities", cf_json, "net_cash_from_investing_activities");
+                set_json(r.cash_flow_statement, "net_cash_flow_from_investing_activities_continuing", cf_json, "net_cash_from_investing_activities_continuing_operations");
+                set_json(r.cash_flow_statement, "net_cash_flow_from_financing_activities", cf_json, "net_cash_from_financing_activities");
+                set_json(r.cash_flow_statement, "net_cash_flow_from_financing_activities_continuing", cf_json, "net_cash_from_financing_activities_continuing_operations");
+                set_json(r.cash_flow_statement, "net_cash_flow", cf_json, "change_in_cash_and_equivalents");
+
+                auto net_cash_it = r.cash_flow_statement.find("net_cash_flow");
+                if (net_cash_it != r.cash_flow_statement.end()) {
+                    r.cash_flow_statement["net_cash_flow_continuing"] = net_cash_it->second;
+                }
+
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_financials failed: {}", e.what());
+        out.clear();
+    }
     return out;
 }
 

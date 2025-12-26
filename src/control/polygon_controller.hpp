@@ -42,6 +42,7 @@ public:
 
     // Corporate Actions
     ADD_METHOD_TO(PolygonController::dividends, "/v3/reference/dividends", drogon::Get);
+    ADD_METHOD_TO(PolygonController::splits, "/v3/reference/splits", drogon::Get);
 
     // Snapshots
     ADD_METHOD_TO(PolygonController::snapshotAll, "/v2/snapshot/locale/us/markets/stocks/tickers", drogon::Get);
@@ -64,6 +65,13 @@ public:
     // Market Status
     ADD_METHOD_TO(PolygonController::marketStatus, "/v1/marketstatus/now", drogon::Get);
     ADD_METHOD_TO(PolygonController::marketHolidays, "/v1/marketstatus/upcoming", drogon::Get);
+
+    // Reference & News
+    ADD_METHOD_TO(PolygonController::news, "/v2/reference/news", drogon::Get);
+    ADD_METHOD_TO(PolygonController::ipos, "/vX/reference/ipos", drogon::Get);
+    ADD_METHOD_TO(PolygonController::shortInterest, "/stocks/v1/short-interest", drogon::Get);
+    ADD_METHOD_TO(PolygonController::shortVolume, "/stocks/v1/short-volume", drogon::Get);
+    ADD_METHOD_TO(PolygonController::financials, "/vX/reference/financials", drogon::Get);
     METHOD_LIST_END
 
     PolygonController(std::shared_ptr<SessionManager> session_mgr, const Config& cfg);
@@ -105,6 +113,8 @@ public:
     // Corporate Actions
     void dividends(const drogon::HttpRequestPtr& req,
                    std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void splits(const drogon::HttpRequestPtr& req,
+                std::function<void(const drogon::HttpResponsePtr&)>&& cb);
 
     // Snapshots
     void snapshotAll(const drogon::HttpRequestPtr& req,
@@ -147,6 +157,18 @@ public:
                       std::function<void(const drogon::HttpResponsePtr&)>&& cb);
     void marketHolidays(const drogon::HttpRequestPtr& req,
                         std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+
+    // Reference & News
+    void news(const drogon::HttpRequestPtr& req,
+              std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void ipos(const drogon::HttpRequestPtr& req,
+              std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void shortInterest(const drogon::HttpRequestPtr& req,
+                       std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void shortVolume(const drogon::HttpRequestPtr& req,
+                     std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void financials(const drogon::HttpRequestPtr& req,
+                    std::function<void(const drogon::HttpResponsePtr&)>&& cb);
 
 private:
     drogon::HttpResponsePtr json_resp(nlohmann::json body, int code = 200);

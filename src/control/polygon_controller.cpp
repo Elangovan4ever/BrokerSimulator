@@ -49,6 +49,15 @@ bool has_timestamp(Timestamp ts) {
     return ts.time_since_epoch().count() != 0;
 }
 
+std::optional<Timestamp> parse_ts_param(const std::string& value) {
+    if (value.empty()) return std::nullopt;
+    std::string trimmed = value;
+    if (!trimmed.empty() && trimmed.back() == 'Z') {
+        trimmed.pop_back();
+    }
+    return utils::parse_ts_any(trimmed);
+}
+
 json parse_conditions(const std::string& raw) {
     json out = json::array();
     std::string s = trim_copy(raw);
@@ -1113,6 +1122,1365 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
         std::string base = host.empty()
             ? "/v3/reference/dividends?cursor="
             : proto + "://" + host + "/v3/reference/dividends?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::splits(const drogon::HttpRequestPtr& req,
+                               std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockSplitsQuery query;
+    query.max_execution_date = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "execution_date";
+    if (sort != "execution_date" && sort != "ticker") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    query.sort = sort;
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
+    }
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+
+    auto ticker_gte = get_param("ticker.gte");
+    if (!ticker_gte.empty()) {
+        query.ticker_gte = ticker_gte;
+        if (!has_cursor) param_values["ticker.gte"] = ticker_gte;
+    }
+    auto ticker_gt = get_param("ticker.gt");
+    if (!ticker_gt.empty()) {
+        query.ticker_gt = ticker_gt;
+        if (!has_cursor) param_values["ticker.gt"] = ticker_gt;
+    }
+    auto ticker_lte = get_param("ticker.lte");
+    if (!ticker_lte.empty()) {
+        query.ticker_lte = ticker_lte;
+        if (!has_cursor) param_values["ticker.lte"] = ticker_lte;
+    }
+    auto ticker_lt = get_param("ticker.lt");
+    if (!ticker_lt.empty()) {
+        query.ticker_lt = ticker_lt;
+        if (!has_cursor) param_values["ticker.lt"] = ticker_lt;
+    }
+
+    parse_date_param("execution_date", query.execution_date);
+    parse_date_param("execution_date.gte", query.execution_date_gte);
+    parse_date_param("execution_date.gt", query.execution_date_gt);
+    parse_date_param("execution_date.lte", query.execution_date_lte);
+    parse_date_param("execution_date.lt", query.execution_date_lt);
+
+    if (has_error) return;
+
+    StockSplitsQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_splits(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    json results = json::array();
+    for (const auto& s : rows) {
+        if (s.ticker.empty() || !has_timestamp(s.execution_date)) continue;
+        json item;
+        item["ticker"] = s.ticker;
+        item["execution_date"] = format_date(s.execution_date);
+        item["split_from"] = s.split_from;
+        item["split_to"] = s.split_to;
+        item["id"] = s.id.empty() ? utils::generate_id() : s.id;
+        results.push_back(item);
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker", "ticker.gte", "ticker.gt", "ticker.lte", "ticker.lt",
+            "execution_date", "execution_date.gte", "execution_date.gt",
+            "execution_date.lte", "execution_date.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/v3/reference/splits?cursor="
+            : proto + "://" + host + "/v3/reference/splits?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::news(const drogon::HttpRequestPtr& req,
+                             std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"count", 0}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"count", 0}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_ts_filter = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = parse_ts_param(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockNewsQuery query;
+    query.max_published_utc = session->time_engine->current_time();
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "descending";
+    if (order == "asc") order = "ascending";
+    if (order == "desc") order = "descending";
+    if (order != "ascending" && order != "descending") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor) param_values["order"] = order;
+
+    std::string sort = get_param("sort");
+    if (!sort.empty() && sort != "published_utc") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+
+    parse_ts_filter("published_utc", query.published_utc);
+    parse_ts_filter("published_utc.gte", query.published_utc_gte);
+    parse_ts_filter("published_utc.gt", query.published_utc_gt);
+    parse_ts_filter("published_utc.lte", query.published_utc_lte);
+    parse_ts_filter("published_utc.lt", query.published_utc_lt);
+
+    if (has_cursor) {
+        auto ap = get_param("ap");
+        if (!ap.empty()) {
+            auto ts = parse_ts_param(ap);
+            if (!ts) {
+                cb(error_resp("Invalid value for cursor parameter.", 400));
+                return;
+            }
+            query.cursor_published_utc = ts;
+        }
+        auto as = get_param("as");
+        if (!as.empty()) query.cursor_id = as;
+    }
+
+    if (has_error) return;
+
+    StockNewsQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_news(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    std::vector<std::string> article_ids;
+    article_ids.reserve(rows.size());
+    for (const auto& n : rows) {
+        if (!n.id.empty()) article_ids.push_back(n.id);
+    }
+
+    auto insight_rows = data_source->get_stock_news_insights(article_ids);
+    std::unordered_map<std::string, std::vector<StockNewsInsightRecord>> insights_by_article;
+    for (auto& ins : insight_rows) {
+        insights_by_article[ins.article_id].push_back(std::move(ins));
+    }
+
+    json results = json::array();
+    for (const auto& n : rows) {
+        if (n.id.empty() || !has_timestamp(n.published_utc)) continue;
+        json item;
+        item["id"] = n.id;
+        item["title"] = n.title;
+        item["author"] = n.author;
+        item["article_url"] = n.article_url;
+        if (!n.amp_url.empty()) item["amp_url"] = n.amp_url;
+        item["image_url"] = n.image_url;
+        item["description"] = n.description;
+        item["tickers"] = n.tickers;
+        item["keywords"] = n.keywords;
+        item["published_utc"] = utils::ts_to_iso(n.published_utc);
+        item["publisher"] = {
+            {"name", n.publisher_name},
+            {"homepage_url", n.publisher_homepage_url},
+            {"logo_url", n.publisher_logo_url},
+            {"favicon_url", n.publisher_favicon_url}
+        };
+
+        json insights = json::array();
+        auto it = insights_by_article.find(n.id);
+        if (it != insights_by_article.end()) {
+            for (const auto& ins : it->second) {
+                json ins_item;
+                ins_item["ticker"] = ins.ticker;
+                ins_item["sentiment"] = ins.sentiment;
+                ins_item["sentiment_reasoning"] = ins.sentiment_reasoning;
+                insights.push_back(std::move(ins_item));
+            }
+        }
+        item["insights"] = insights;
+        results.push_back(item);
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()},
+        {"count", results.size()}
+    };
+
+    if (has_more && !rows.empty()) {
+        const auto& last = rows.back();
+        param_values["ap"] = utils::ts_to_iso(last.published_utc);
+        param_values["as"] = last.id;
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker",
+            "published_utc", "published_utc.gte", "published_utc.gt",
+            "published_utc.lte", "published_utc.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty()) continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/v2/reference/news?cursor="
+            : proto + "://" + host + "/v2/reference/news?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::ipos(const drogon::HttpRequestPtr& req,
+                             std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockIposQuery query;
+    query.max_date = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "listing_date";
+    if (sort != "listing_date" && sort != "announced_date" &&
+        sort != "issue_start_date" && sort != "issue_end_date" &&
+        sort != "last_updated" && sort != "ticker" && sort != "ipo_status") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    query.sort = sort;
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
+    }
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+    auto ipo_status = get_param("ipo_status");
+    if (!ipo_status.empty()) {
+        query.ipo_status = ipo_status;
+        if (!has_cursor) param_values["ipo_status"] = ipo_status;
+    }
+
+    parse_date_param("announced_date", query.announced_date);
+    parse_date_param("announced_date.gte", query.announced_date_gte);
+    parse_date_param("announced_date.gt", query.announced_date_gt);
+    parse_date_param("announced_date.lte", query.announced_date_lte);
+    parse_date_param("announced_date.lt", query.announced_date_lt);
+
+    parse_date_param("listing_date", query.listing_date);
+    parse_date_param("listing_date.gte", query.listing_date_gte);
+    parse_date_param("listing_date.gt", query.listing_date_gt);
+    parse_date_param("listing_date.lte", query.listing_date_lte);
+    parse_date_param("listing_date.lt", query.listing_date_lt);
+
+    parse_date_param("issue_start_date", query.issue_start_date);
+    parse_date_param("issue_start_date.gte", query.issue_start_date_gte);
+    parse_date_param("issue_start_date.gt", query.issue_start_date_gt);
+    parse_date_param("issue_start_date.lte", query.issue_start_date_lte);
+    parse_date_param("issue_start_date.lt", query.issue_start_date_lt);
+
+    parse_date_param("issue_end_date", query.issue_end_date);
+    parse_date_param("issue_end_date.gte", query.issue_end_date_gte);
+    parse_date_param("issue_end_date.gt", query.issue_end_date_gt);
+    parse_date_param("issue_end_date.lte", query.issue_end_date_lte);
+    parse_date_param("issue_end_date.lt", query.issue_end_date_lt);
+
+    parse_date_param("last_updated", query.last_updated);
+    parse_date_param("last_updated.gte", query.last_updated_gte);
+    parse_date_param("last_updated.gt", query.last_updated_gt);
+    parse_date_param("last_updated.lte", query.last_updated_lte);
+    parse_date_param("last_updated.lt", query.last_updated_lt);
+
+    if (has_error) return;
+
+    StockIposQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_ipos(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    json results = json::array();
+    for (const auto& r : rows) {
+        json item = json::object();
+        if (!r.raw_json.empty()) {
+            try {
+                item = json::parse(r.raw_json);
+            } catch (...) {
+                item = json::object();
+            }
+        }
+
+        if (!r.ticker.empty()) item["ticker"] = r.ticker;
+        if (!r.ipo_status.empty()) item["ipo_status"] = r.ipo_status;
+        if (r.announced_date && has_timestamp(*r.announced_date)) {
+            item["announced_date"] = format_date(*r.announced_date);
+        }
+        if (r.listing_date && has_timestamp(*r.listing_date)) {
+            item["listing_date"] = format_date(*r.listing_date);
+        }
+        if (r.issue_start_date && has_timestamp(*r.issue_start_date)) {
+            item["issue_start_date"] = format_date(*r.issue_start_date);
+        }
+        if (r.issue_end_date && has_timestamp(*r.issue_end_date)) {
+            item["issue_end_date"] = format_date(*r.issue_end_date);
+        }
+        if (r.last_updated && has_timestamp(*r.last_updated)) {
+            item["last_updated"] = format_date(*r.last_updated);
+        }
+        results.push_back(std::move(item));
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker", "ipo_status",
+            "announced_date", "announced_date.gte", "announced_date.gt",
+            "announced_date.lte", "announced_date.lt",
+            "listing_date", "listing_date.gte", "listing_date.gt",
+            "listing_date.lte", "listing_date.lt",
+            "issue_start_date", "issue_start_date.gte", "issue_start_date.gt",
+            "issue_start_date.lte", "issue_start_date.lt",
+            "issue_end_date", "issue_end_date.gte", "issue_end_date.gt",
+            "issue_end_date.lte", "issue_end_date.lt",
+            "last_updated", "last_updated.gte", "last_updated.gt",
+            "last_updated.lte", "last_updated.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/vX/reference/ipos?cursor="
+            : proto + "://" + host + "/vX/reference/ipos?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::shortInterest(const drogon::HttpRequestPtr& req,
+                                      std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockShortInterestQuery query;
+    query.max_settlement_date = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "settlement_date";
+    if (sort != "settlement_date" && sort != "ticker") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    query.sort = sort;
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 50000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
+    }
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+
+    parse_date_param("settlement_date", query.settlement_date);
+    parse_date_param("settlement_date.gte", query.settlement_date_gte);
+    parse_date_param("settlement_date.gt", query.settlement_date_gt);
+    parse_date_param("settlement_date.lte", query.settlement_date_lte);
+    parse_date_param("settlement_date.lt", query.settlement_date_lt);
+
+    if (has_error) return;
+
+    StockShortInterestQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_short_interest(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    json results = json::array();
+    for (const auto& r : rows) {
+        json item = json::object();
+        if (!r.raw_json.empty()) {
+            try {
+                item = json::parse(r.raw_json);
+            } catch (...) {
+                item = json::object();
+            }
+        }
+        if (!r.ticker.empty()) item["ticker"] = r.ticker;
+        if (has_timestamp(r.settlement_date)) {
+            item["settlement_date"] = format_date(r.settlement_date);
+        }
+        if (r.short_interest) item["short_interest"] = *r.short_interest;
+        if (r.avg_daily_volume) item["avg_daily_volume"] = *r.avg_daily_volume;
+        if (r.days_to_cover) item["days_to_cover"] = *r.days_to_cover;
+        results.push_back(std::move(item));
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker",
+            "settlement_date", "settlement_date.gte", "settlement_date.gt",
+            "settlement_date.lte", "settlement_date.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/stocks/v1/short-interest?cursor="
+            : proto + "://" + host + "/stocks/v1/short-interest?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::shortVolume(const drogon::HttpRequestPtr& req,
+                                    std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockShortVolumeQuery query;
+    query.max_trade_date = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "date";
+    if (sort != "date" && sort != "ticker") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    query.sort = (sort == "date") ? "trade_date" : "ticker";
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 50000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
+    }
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+
+    parse_date_param("date", query.trade_date);
+    parse_date_param("date.gte", query.trade_date_gte);
+    parse_date_param("date.gt", query.trade_date_gt);
+    parse_date_param("date.lte", query.trade_date_lte);
+    parse_date_param("date.lt", query.trade_date_lt);
+
+    if (has_error) return;
+
+    StockShortVolumeQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_short_volume(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    json results = json::array();
+    for (const auto& r : rows) {
+        json item = json::object();
+        if (!r.raw_json.empty()) {
+            try {
+                item = json::parse(r.raw_json);
+            } catch (...) {
+                item = json::object();
+            }
+        }
+        if (!r.ticker.empty()) item["ticker"] = r.ticker;
+        if (has_timestamp(r.trade_date)) {
+            item["date"] = format_date(r.trade_date);
+        }
+        results.push_back(std::move(item));
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker",
+            "date", "date.gte", "date.gt",
+            "date.lte", "date.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/stocks/v1/short-volume?cursor="
+            : proto + "://" + host + "/stocks/v1/short-volume?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::financials(const drogon::HttpRequestPtr& req,
+                                   std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
+    }
+
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
+
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
+        }
+    };
+
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    FinancialsQuery query;
+    query.max_period_of_report_date = session->time_engine->current_time();
+    query.filing_date_lte = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "period_of_report_date";
+    if (sort != "period_of_report_date" && sort != "filing_date") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
+        return;
+    }
+    query.sort = sort;
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
+
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
+
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (has_error) return;
+    if (limit_param) limit = *limit_param;
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
+    }
+
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+    auto cik = get_param("cik");
+    if (!cik.empty()) {
+        query.cik = cik;
+        if (!has_cursor) param_values["cik"] = cik;
+    }
+    auto timeframe = get_param("timeframe");
+    if (!timeframe.empty()) {
+        query.timeframe = timeframe;
+        if (!has_cursor) param_values["timeframe"] = timeframe;
+    }
+    auto fiscal_period = get_param("fiscal_period");
+    if (!fiscal_period.empty()) {
+        query.fiscal_period = fiscal_period;
+        if (!has_cursor) param_values["fiscal_period"] = fiscal_period;
+    }
+    std::optional<int> fiscal_year;
+    parse_int_param("fiscal_year", fiscal_year);
+    if (has_error) return;
+    if (fiscal_year) query.fiscal_year = *fiscal_year;
+
+    parse_date_param("period_of_report_date", query.period_of_report_date);
+    parse_date_param("period_of_report_date.gte", query.period_of_report_date_gte);
+    parse_date_param("period_of_report_date.gt", query.period_of_report_date_gt);
+    parse_date_param("period_of_report_date.lte", query.period_of_report_date_lte);
+    parse_date_param("period_of_report_date.lt", query.period_of_report_date_lt);
+
+    parse_date_param("filing_date", query.filing_date);
+    parse_date_param("filing_date.gte", query.filing_date_gte);
+    parse_date_param("filing_date.gt", query.filing_date_gt);
+    parse_date_param("filing_date.lte", query.filing_date_lte);
+    parse_date_param("filing_date.lt", query.filing_date_lt);
+
+    if (has_error) return;
+
+    FinancialsQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_financials(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
+    struct FieldMeta {
+        const char* label;
+        int order;
+        const char* unit;
+    };
+
+    static const std::unordered_map<std::string, FieldMeta> kBalanceSheetMeta = {
+        {"other_current_liabilities", {"Other Current Liabilities", 740, "USD"}},
+        {"other_noncurrent_liabilities", {"Other Non-current Liabilities", 820, "USD"}},
+        {"assets", {"Assets", 100, "USD"}},
+        {"equity_attributable_to_noncontrolling_interest", {"Equity Attributable To Noncontrolling Interest", 1500, "USD"}},
+        {"noncurrent_liabilities", {"Noncurrent Liabilities", 800, "USD"}},
+        {"other_current_assets", {"Other Current Assets", 250, "USD"}},
+        {"accounts_payable", {"Accounts Payable", 710, "USD"}},
+        {"long_term_debt", {"Long-term Debt", 810, "USD"}},
+        {"fixed_assets", {"Fixed Assets", 320, "USD"}},
+        {"equity", {"Equity", 1400, "USD"}},
+        {"current_assets", {"Current Assets", 200, "USD"}},
+        {"equity_attributable_to_parent", {"Equity Attributable To Parent", 1600, "USD"}},
+        {"current_liabilities", {"Current Liabilities", 700, "USD"}},
+        {"noncurrent_assets", {"Noncurrent Assets", 300, "USD"}},
+        {"liabilities_and_equity", {"Liabilities And Equity", 1900, "USD"}},
+        {"inventory", {"Inventory", 230, "USD"}},
+        {"liabilities", {"Liabilities", 600, "USD"}},
+        {"other_noncurrent_assets", {"Other Non-current Assets", 350, "USD"}},
+    };
+
+    static const std::unordered_map<std::string, FieldMeta> kIncomeStatementMeta = {
+        {"net_income_loss_available_to_common_stockholders_basic", {"Net Income/Loss Available To Common Stockholders, Basic", 3700, "USD"}},
+        {"operating_expenses", {"Operating Expenses", 1000, "USD"}},
+        {"cost_of_revenue", {"Cost Of Revenue", 300, "USD"}},
+        {"net_income_loss_attributable_to_parent", {"Net Income/Loss Attributable To Parent", 3500, "USD"}},
+        {"income_loss_from_continuing_operations_before_tax", {"Income/Loss From Continuing Operations Before Tax", 1500, "USD"}},
+        {"gross_profit", {"Gross Profit", 800, "USD"}},
+        {"research_and_development", {"Research and Development", 1030, "USD"}},
+        {"net_income_loss", {"Net Income/Loss", 3200, "USD"}},
+        {"nonoperating_income_loss", {"Nonoperating Income/Loss", 900, "USD"}},
+        {"basic_earnings_per_share", {"Basic Earnings Per Share", 4200, "USD / shares"}},
+        {"diluted_earnings_per_share", {"Diluted Earnings Per Share", 4300, "USD / shares"}},
+        {"revenues", {"Revenues", 100, "USD"}},
+        {"income_loss_from_continuing_operations_after_tax", {"Income/Loss From Continuing Operations After Tax", 1400, "USD"}},
+        {"income_tax_expense_benefit", {"Income Tax Expense/Benefit", 2200, "USD"}},
+        {"operating_income_loss", {"Operating Income/Loss", 1100, "USD"}},
+        {"selling_general_and_administrative_expenses", {"Selling, General, and Administrative Expenses", 1010, "USD"}},
+        {"net_income_loss_attributable_to_noncontrolling_interest", {"Net Income/Loss Attributable To Noncontrolling Interest", 3300, "USD"}},
+        {"costs_and_expenses", {"Costs And Expenses", 600, "USD"}},
+        {"participating_securities_distributed_and_undistributed_earnings_loss_basic", {"Participating Securities, Distributed And Undistributed Earnings/Loss, Basic", 3800, "USD"}},
+        {"diluted_average_shares", {"Diluted Average Shares", 4500, "shares"}},
+        {"basic_average_shares", {"Basic Average Shares", 4400, "shares"}},
+        {"benefits_costs_expenses", {"Benefits Costs and Expenses", 200, "USD"}},
+        {"preferred_stock_dividends_and_other_adjustments", {"Preferred Stock Dividends And Other Adjustments", 3900, "USD"}},
+    };
+
+    static const std::unordered_map<std::string, FieldMeta> kCashFlowMeta = {
+        {"net_cash_flow_from_operating_activities_continuing", {"Net Cash Flow From Operating Activities, Continuing", 200, "USD"}},
+        {"net_cash_flow_from_investing_activities", {"Net Cash Flow From Investing Activities", 400, "USD"}},
+        {"net_cash_flow_from_financing_activities", {"Net Cash Flow From Financing Activities", 700, "USD"}},
+        {"net_cash_flow_from_investing_activities_continuing", {"Net Cash Flow From Investing Activities, Continuing", 500, "USD"}},
+        {"net_cash_flow", {"Net Cash Flow", 1100, "USD"}},
+        {"net_cash_flow_from_operating_activities", {"Net Cash Flow From Operating Activities", 100, "USD"}},
+        {"net_cash_flow_from_financing_activities_continuing", {"Net Cash Flow From Financing Activities, Continuing", 800, "USD"}},
+        {"net_cash_flow_continuing", {"Net Cash Flow, Continuing", 1200, "USD"}},
+    };
+
+    static const std::unordered_map<std::string, FieldMeta> kComprehensiveMeta = {
+        {"comprehensive_income_loss_attributable_to_noncontrolling_interest", {"Comprehensive Income/Loss Attributable To Noncontrolling Interest", 200, "USD"}},
+        {"other_comprehensive_income_loss_attributable_to_parent", {"Other Comprehensive Income/Loss Attributable To Parent", 600, "USD"}},
+        {"other_comprehensive_income_loss", {"Other Comprehensive Income/Loss", 400, "USD"}},
+        {"comprehensive_income_loss_attributable_to_parent", {"Comprehensive Income/Loss Attributable To Parent", 300, "USD"}},
+        {"comprehensive_income_loss", {"Comprehensive Income/Loss", 100, "USD"}},
+    };
+
+    auto build_section = [](const std::unordered_map<std::string, double>& values,
+                            const std::unordered_map<std::string, FieldMeta>& meta) {
+        json section = json::object();
+        for (const auto& [key, info] : meta) {
+            auto it = values.find(key);
+            if (it == values.end()) continue;
+            section[key] = {
+                {"value", it->second},
+                {"unit", info.unit},
+                {"label", info.label},
+                {"order", info.order}
+            };
+        }
+        return section;
+    };
+
+    json results = json::array();
+    for (const auto& r : rows) {
+        json item;
+        if (!r.cik.empty()) item["cik"] = r.cik;
+        if (!r.company_name.empty()) item["company_name"] = r.company_name;
+        if (has_timestamp(r.start_date)) item["start_date"] = format_date(r.start_date);
+        if (has_timestamp(r.end_date)) item["end_date"] = format_date(r.end_date);
+        if (has_timestamp(r.filing_date)) item["filing_date"] = format_date(r.filing_date);
+        if (has_timestamp(r.acceptance_datetime)) item["acceptance_datetime"] = utils::ts_to_iso(r.acceptance_datetime);
+        if (!r.timeframe.empty()) item["timeframe"] = r.timeframe;
+        if (!r.fiscal_period.empty()) item["fiscal_period"] = r.fiscal_period;
+        if (!r.fiscal_year.empty()) item["fiscal_year"] = r.fiscal_year;
+        if (!r.source_filing_url.empty()) item["source_filing_url"] = r.source_filing_url;
+        if (!r.ticker.empty()) item["tickers"] = json::array({r.ticker});
+
+        json financials = json::object();
+        financials["balance_sheet"] = build_section(r.balance_sheet, kBalanceSheetMeta);
+        financials["income_statement"] = build_section(r.income_statement, kIncomeStatementMeta);
+        financials["cash_flow_statement"] = build_section(r.cash_flow_statement, kCashFlowMeta);
+        financials["comprehensive_income"] = build_section(r.comprehensive_income, kComprehensiveMeta);
+        item["financials"] = financials;
+
+        results.push_back(std::move(item));
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker", "cik", "timeframe", "fiscal_period", "fiscal_year",
+            "period_of_report_date", "period_of_report_date.gte", "period_of_report_date.gt",
+            "period_of_report_date.lte", "period_of_report_date.lt",
+            "filing_date", "filing_date.gte", "filing_date.gt",
+            "filing_date.lte", "filing_date.lt",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/vX/reference/financials?cursor="
+            : proto + "://" + host + "/vX/reference/financials?cursor=";
         response["next_url"] = base + next_cursor;
     }
 

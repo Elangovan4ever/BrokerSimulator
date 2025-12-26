@@ -76,6 +76,13 @@ public:
                                               Timestamp end_time,
                                               size_t limit) override;
     std::vector<DividendRecord> get_stock_dividends(const StockDividendsQuery& query) override;
+    std::vector<StockSplitRecord> get_stock_splits(const StockSplitsQuery& query) override;
+    std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery& query) override;
+    std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>& article_ids) override;
+    std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) override;
+    std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) override;
+    std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) override;
+    std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery& query) override;
 
     std::vector<SplitRecord> get_splits(const std::string& symbol,
                                         Timestamp start_time,

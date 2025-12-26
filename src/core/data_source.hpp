@@ -5,6 +5,7 @@
 #include <functional>
 #include <chrono>
 #include <optional>
+#include <unordered_map>
 #include "event_queue.hpp"
 
 namespace broker_sim {
@@ -158,6 +159,221 @@ struct StockDividendsQuery {
     std::optional<Timestamp> max_ex_dividend_date;
 };
 
+struct StockSplitsQuery {
+    std::optional<std::string> ticker;
+    std::optional<std::string> ticker_gt;
+    std::optional<std::string> ticker_gte;
+    std::optional<std::string> ticker_lt;
+    std::optional<std::string> ticker_lte;
+    std::optional<Timestamp> execution_date;
+    std::optional<Timestamp> execution_date_gt;
+    std::optional<Timestamp> execution_date_gte;
+    std::optional<Timestamp> execution_date_lt;
+    std::optional<Timestamp> execution_date_lte;
+    std::string sort{"execution_date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_execution_date;
+};
+
+struct StockNewsQuery {
+    std::optional<std::string> ticker;
+    std::optional<Timestamp> published_utc;
+    std::optional<Timestamp> published_utc_gt;
+    std::optional<Timestamp> published_utc_gte;
+    std::optional<Timestamp> published_utc_lt;
+    std::optional<Timestamp> published_utc_lte;
+    std::optional<Timestamp> cursor_published_utc;
+    std::optional<std::string> cursor_id;
+    std::string sort{"published_utc"};
+    std::string order{"descending"};
+    size_t limit{10};
+    std::optional<Timestamp> max_published_utc;
+};
+
+struct StockIposQuery {
+    std::optional<std::string> ticker;
+    std::optional<std::string> ipo_status;
+    std::optional<Timestamp> announced_date;
+    std::optional<Timestamp> announced_date_gt;
+    std::optional<Timestamp> announced_date_gte;
+    std::optional<Timestamp> announced_date_lt;
+    std::optional<Timestamp> announced_date_lte;
+    std::optional<Timestamp> listing_date;
+    std::optional<Timestamp> listing_date_gt;
+    std::optional<Timestamp> listing_date_gte;
+    std::optional<Timestamp> listing_date_lt;
+    std::optional<Timestamp> listing_date_lte;
+    std::optional<Timestamp> issue_start_date;
+    std::optional<Timestamp> issue_start_date_gt;
+    std::optional<Timestamp> issue_start_date_gte;
+    std::optional<Timestamp> issue_start_date_lt;
+    std::optional<Timestamp> issue_start_date_lte;
+    std::optional<Timestamp> issue_end_date;
+    std::optional<Timestamp> issue_end_date_gt;
+    std::optional<Timestamp> issue_end_date_gte;
+    std::optional<Timestamp> issue_end_date_lt;
+    std::optional<Timestamp> issue_end_date_lte;
+    std::optional<Timestamp> last_updated;
+    std::optional<Timestamp> last_updated_gt;
+    std::optional<Timestamp> last_updated_gte;
+    std::optional<Timestamp> last_updated_lt;
+    std::optional<Timestamp> last_updated_lte;
+    std::string sort{"listing_date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_date;
+};
+
+struct StockShortInterestQuery {
+    std::optional<std::string> ticker;
+    std::optional<Timestamp> settlement_date;
+    std::optional<Timestamp> settlement_date_gt;
+    std::optional<Timestamp> settlement_date_gte;
+    std::optional<Timestamp> settlement_date_lt;
+    std::optional<Timestamp> settlement_date_lte;
+    std::string sort{"settlement_date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_settlement_date;
+};
+
+struct StockShortVolumeQuery {
+    std::optional<std::string> ticker;
+    std::optional<Timestamp> trade_date;
+    std::optional<Timestamp> trade_date_gt;
+    std::optional<Timestamp> trade_date_gte;
+    std::optional<Timestamp> trade_date_lt;
+    std::optional<Timestamp> trade_date_lte;
+    std::string sort{"date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_trade_date;
+};
+
+struct FinancialsQuery {
+    std::optional<std::string> ticker;
+    std::optional<std::string> cik;
+    std::optional<std::string> timeframe;
+    std::optional<std::string> fiscal_period;
+    std::optional<int> fiscal_year;
+    std::optional<Timestamp> period_of_report_date;
+    std::optional<Timestamp> period_of_report_date_gt;
+    std::optional<Timestamp> period_of_report_date_gte;
+    std::optional<Timestamp> period_of_report_date_lt;
+    std::optional<Timestamp> period_of_report_date_lte;
+    std::optional<Timestamp> filing_date;
+    std::optional<Timestamp> filing_date_gt;
+    std::optional<Timestamp> filing_date_gte;
+    std::optional<Timestamp> filing_date_lt;
+    std::optional<Timestamp> filing_date_lte;
+    std::string sort{"period_of_report_date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_period_of_report_date;
+};
+
+struct StockSplitRecord {
+    std::string id;
+    std::string ticker;
+    Timestamp execution_date;
+    double split_from{0.0};
+    double split_to{0.0};
+};
+
+struct StockNewsRecord {
+    std::string id;
+    Timestamp published_utc;
+    Timestamp updated_utc;
+    std::string publisher_name;
+    std::string publisher_homepage_url;
+    std::string publisher_logo_url;
+    std::string publisher_favicon_url;
+    std::string title;
+    std::string author;
+    std::string article_url;
+    std::string amp_url;
+    std::string image_url;
+    std::string description;
+    std::vector<std::string> tickers;
+    std::vector<std::string> keywords;
+};
+
+struct StockNewsInsightRecord {
+    std::string article_id;
+    Timestamp published_utc;
+    std::string ticker;
+    std::string sentiment;
+    std::string sentiment_reasoning;
+    std::optional<double> sentiment_score;
+    std::optional<double> relevance_score;
+};
+
+struct StockIpoRecord {
+    std::string ticker;
+    std::optional<Timestamp> announced_date;
+    std::optional<Timestamp> listing_date;
+    std::optional<Timestamp> issue_start_date;
+    std::optional<Timestamp> issue_end_date;
+    std::optional<Timestamp> last_updated;
+    std::string ipo_status;
+    std::string raw_json;
+};
+
+struct StockShortInterestRecord {
+    std::string ticker;
+    Timestamp settlement_date;
+    std::optional<double> short_interest;
+    std::optional<double> avg_daily_volume;
+    std::optional<double> days_to_cover;
+    std::string raw_json;
+};
+
+struct StockShortVolumeRecord {
+    std::string ticker;
+    Timestamp trade_date;
+    std::optional<uint64_t> total_volume;
+    std::optional<uint64_t> short_volume;
+    std::optional<uint64_t> exempt_volume;
+    std::optional<uint64_t> non_exempt_volume;
+    std::optional<double> short_volume_ratio;
+    std::optional<uint64_t> nyse_short_volume;
+    std::optional<uint64_t> nyse_short_volume_exempt;
+    std::optional<uint64_t> nasdaq_carteret_short_volume;
+    std::optional<uint64_t> nasdaq_carteret_short_volume_exempt;
+    std::optional<uint64_t> nasdaq_chicago_short_volume;
+    std::optional<uint64_t> nasdaq_chicago_short_volume_exempt;
+    std::optional<uint64_t> adf_short_volume;
+    std::optional<uint64_t> adf_short_volume_exempt;
+    std::string raw_json;
+};
+
+struct FinancialsRecord {
+    std::string ticker;
+    std::string cik;
+    std::string company_name;
+    Timestamp start_date;
+    Timestamp end_date;
+    Timestamp filing_date;
+    Timestamp acceptance_datetime;
+    std::string timeframe;
+    std::string fiscal_period;
+    std::string fiscal_year;
+    std::string source_filing_url;
+    std::string form;
+    std::string currency;
+    Timestamp period_of_report;
+    std::unordered_map<std::string, double> balance_sheet;
+    std::unordered_map<std::string, double> income_statement;
+    std::unordered_map<std::string, double> cash_flow_statement;
+    std::unordered_map<std::string, double> comprehensive_income;
+};
+
 struct SplitRecord {
     std::string symbol;
     Timestamp date;
@@ -272,6 +488,13 @@ public:
                                                       Timestamp end_time,
                                                       size_t limit) = 0;
     virtual std::vector<DividendRecord> get_stock_dividends(const StockDividendsQuery& query) = 0;
+    virtual std::vector<StockSplitRecord> get_stock_splits(const StockSplitsQuery& query) = 0;
+    virtual std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery& query) = 0;
+    virtual std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>& article_ids) = 0;
+    virtual std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) = 0;
+    virtual std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) = 0;
+    virtual std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) = 0;
+    virtual std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery& query) = 0;
 
     virtual std::vector<SplitRecord> get_splits(const std::string& symbol,
                                                 Timestamp start_time,

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#16213e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0f3460;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00d9ff;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#00ff88;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00d9ff;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="200" fill="url(#bgGradient)"/>
+
+  <!-- Decorative lines -->
+  <line x1="50" y1="180" x2="750" y2="180" stroke="#00d9ff" stroke-width="2" opacity="0.3"/>
+  <line x1="50" y1="20" x2="750" y2="20" stroke="#00d9ff" stroke-width="2" opacity="0.3"/>
+
+  <!-- Chart-like decorative elements -->
+  <polyline points="60,150 120,130 180,140 240,100 300,110 360,80 420,90 480,60 540,70 600,50 660,65 720,45"
+            fill="none" stroke="#00ff88" stroke-width="2" opacity="0.4"/>
+  <polyline points="60,160 120,145 180,155 240,120 300,130 360,105 420,115 480,90 540,100 600,85 660,95 720,80"
+            fill="none" stroke="#00d9ff" stroke-width="2" opacity="0.3"/>
+
+  <!-- Main title -->
+  <text x="400" y="115" font-family="Arial, Helvetica, sans-serif" font-size="52" font-weight="bold"
+        fill="url(#textGradient)" text-anchor="middle" filter="url(#glow)">
+    Elan Broker Simulator
+  </text>
+
+  <!-- Subtitle -->
+  <text x="400" y="155" font-family="Arial, Helvetica, sans-serif" font-size="16"
+        fill="#888888" text-anchor="middle" letter-spacing="4">
+    MARKET SIMULATION PLATFORM
+  </text>
+
+  <!-- Corner accents -->
+  <path d="M20,20 L50,20 L50,25 L25,25 L25,50 L20,50 Z" fill="#00d9ff" opacity="0.5"/>
+  <path d="M780,20 L750,20 L750,25 L775,25 L775,50 L780,50 Z" fill="#00d9ff" opacity="0.5"/>
+  <path d="M20,180 L50,180 L50,175 L25,175 L25,150 L20,150 Z" fill="#00ff88" opacity="0.5"/>
+  <path d="M780,180 L750,180 L750,175 L775,175 L775,150 L780,150 Z" fill="#00ff88" opacity="0.5"/>
+</svg>
