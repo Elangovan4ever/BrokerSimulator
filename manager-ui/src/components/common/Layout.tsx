@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { Toaster } from 'sonner';
+import { SessionStatusBar } from '@/components/common/SessionStatusBar';
 
 interface NavItem {
   path: string;
@@ -79,8 +80,11 @@ export function Layout({ children }: LayoutProps) {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto">
-        {children}
+      <main className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 overflow-auto">
+          {children}
+        </div>
+        <SessionStatusBar />
       </main>
 
       {/* Toast notifications */}
