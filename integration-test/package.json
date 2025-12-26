@@ -1,0 +1,31 @@
+{
+  "name": "broker-simulator-integration-tests",
+  "version": "1.0.0",
+  "description": "Integration tests for Broker Simulator Polygon API",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "jest --runInBand --forceExit",
+    "test:verbose": "jest --runInBand --forceExit --verbose",
+    "test:aggregates": "jest --runInBand --forceExit src/tests/aggregates.test.ts",
+    "test:trades": "jest --runInBand --forceExit src/tests/trades.test.ts",
+    "test:quotes": "jest --runInBand --forceExit src/tests/quotes.test.ts",
+    "test:dividends": "jest --runInBand --forceExit src/tests/dividends.test.ts",
+    "test:snapshots": "jest --runInBand --forceExit src/tests/snapshots.test.ts",
+    "test:tickers": "jest --runInBand --forceExit src/tests/tickers.test.ts",
+    "test:indicators": "jest --runInBand --forceExit src/tests/indicators.test.ts",
+    "test:open-close": "jest --runInBand --forceExit src/tests/open-close.test.ts",
+    "test:market-status": "jest --runInBand --forceExit src/tests/market-status.test.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.3.0"
+  }
+}
