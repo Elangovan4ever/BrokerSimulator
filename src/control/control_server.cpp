@@ -366,7 +366,7 @@ void ControlServer::start(const drogon::HttpRequestPtr& req,
         callback(json_resp(json{{"error", "session not found"}}, 404));
         return;
     }
-    if (session->status != SessionStatus::CREATED) {
+    if (session->status == SessionStatus::RUNNING || session->status == SessionStatus::PAUSED) {
         callback(json_resp(json{{"error", "session already started"}}, 400));
         return;
     }
