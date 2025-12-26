@@ -1620,6 +1620,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                 set_json(r.income_statement, "income_loss_from_continuing_operations_before_tax", inc_json, "income_before_income_taxes");
                 set_json(r.income_statement, "operating_expenses", inc_json, "total_operating_expenses");
                 set_json(r.income_statement, "nonoperating_income_loss", inc_json, "total_other_income_expense");
+                set_json(r.income_statement, "preferred_stock_dividends_and_other_adjustments", inc_json, "preferred_stock_dividends_declared");
                 if (r.income_statement.find("nonoperating_income_loss") == r.income_statement.end()) {
                     set_json(r.income_statement, "nonoperating_income_loss", inc_json, "other_income_expense");
                 }
@@ -1654,8 +1655,19 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                         net_parent_it->second;
                 }
 
+                if (r.income_statement.find("preferred_stock_dividends_and_other_adjustments") == r.income_statement.end()) {
+                    r.income_statement["preferred_stock_dividends_and_other_adjustments"] = 0.0;
+                }
+                if (r.income_statement.find("participating_securities_distributed_and_undistributed_earnings_loss_basic") == r.income_statement.end()) {
+                    r.income_statement["participating_securities_distributed_and_undistributed_earnings_loss_basic"] = 0.0;
+                }
+
                 set_json(r.cash_flow_statement, "net_cash_flow_from_operating_activities", cf_json, "net_cash_from_operating_activities");
                 set_json(r.cash_flow_statement, "net_cash_flow_from_operating_activities_continuing", cf_json, "net_cash_from_operating_activities_continuing_operations");
+                if (r.cash_flow_statement.find("net_cash_flow_from_operating_activities_continuing") == r.cash_flow_statement.end()) {
+                    set_json(r.cash_flow_statement, "net_cash_flow_from_operating_activities_continuing",
+                             cf_json, "cash_from_operating_activities_continuing_operations");
+                }
                 set_json(r.cash_flow_statement, "net_cash_flow_from_investing_activities", cf_json, "net_cash_from_investing_activities");
                 set_json(r.cash_flow_statement, "net_cash_flow_from_investing_activities_continuing", cf_json, "net_cash_from_investing_activities_continuing_operations");
                 set_json(r.cash_flow_statement, "net_cash_flow_from_financing_activities", cf_json, "net_cash_from_financing_activities");
@@ -1665,6 +1677,14 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                 auto net_cash_it = r.cash_flow_statement.find("net_cash_flow");
                 if (net_cash_it != r.cash_flow_statement.end()) {
                     r.cash_flow_statement["net_cash_flow_continuing"] = net_cash_it->second;
+                }
+
+                if (r.comprehensive_income.empty()) {
+                    r.comprehensive_income["comprehensive_income_loss"] = 0.0;
+                    r.comprehensive_income["comprehensive_income_loss_attributable_to_noncontrolling_interest"] = 0.0;
+                    r.comprehensive_income["comprehensive_income_loss_attributable_to_parent"] = 0.0;
+                    r.comprehensive_income["other_comprehensive_income_loss"] = 0.0;
+                    r.comprehensive_income["other_comprehensive_income_loss_attributable_to_parent"] = 0.0;
                 }
 
                 out.push_back(std::move(r));
