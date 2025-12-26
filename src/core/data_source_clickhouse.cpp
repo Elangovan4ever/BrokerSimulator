@@ -1458,13 +1458,13 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
             FROM stock_balance_sheets AS bs
             LEFT JOIN stock_income_statements AS inc
               ON inc.ticker = bs.ticker
-             AND inc.period_of_report = bs.period_of_report
+             AND ifNull(inc.period_of_report, inc.end_date) = ifNull(bs.period_of_report, bs.end_date)
              AND inc.timeframe = bs.timeframe
              AND inc.fiscal_period = bs.fiscal_period
              AND inc.fiscal_year = bs.fiscal_year
             LEFT JOIN stock_cash_flow_statements AS cf
               ON cf.ticker = bs.ticker
-             AND cf.period_of_report = bs.period_of_report
+             AND ifNull(cf.period_of_report, cf.end_date) = ifNull(bs.period_of_report, bs.end_date)
              AND cf.timeframe = bs.timeframe
              AND cf.fiscal_period = bs.fiscal_period
              AND cf.fiscal_year = bs.fiscal_year
