@@ -174,37 +174,35 @@ void WsController::handleNewMessage(const drogon::WebSocketConnectionPtr& conn,
     if (type != drogon::WebSocketMessageType::Text) {
         return;  // Only handle text messages
     }
-
-    WsConnectionState* state = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(conn_mutex_);
-        auto it = conn_states_.find(conn);
-        if (it == conn_states_.end()) {
-            return;
-        }
-        state = &it->second;
-    }
-
+    json msg;
     try {
-        auto msg = json::parse(message);
-
-        switch (state->api_type) {
-            case WsApiType::ALPACA:
-                handle_alpaca_message(conn, *state, msg);
-                break;
-            case WsApiType::POLYGON:
-                handle_polygon_message(conn, *state, msg);
-                break;
-            case WsApiType::FINNHUB:
-                handle_finnhub_message(conn, *state, msg);
-                break;
-            default:
-                handle_generic_message(conn, *state, msg);
-                break;
-        }
+        msg = json::parse(message);
     } catch (const json::parse_error& e) {
         spdlog::warn("WebSocket message parse error: {}", e.what());
         conn->send(R"({"error":"invalid json"})");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    auto it = conn_states_.find(conn);
+    if (it == conn_states_.end()) {
+        return;
+    }
+
+    auto& state = it->second;
+    switch (state.api_type) {
+        case WsApiType::ALPACA:
+            handle_alpaca_message(conn, state, msg);
+            break;
+        case WsApiType::POLYGON:
+            handle_polygon_message(conn, state, msg);
+            break;
+        case WsApiType::FINNHUB:
+            handle_finnhub_message(conn, state, msg);
+            break;
+        default:
+            handle_generic_message(conn, state, msg);
+            break;
     }
 }
 
@@ -233,7 +231,6 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
                 // Use key as session_id if not already set
                 auto session = session_mgr_->get_session(key);
                 if (session) {
-                    std::lock_guard<std::mutex> lock(conn_mutex_);
                     state.session_id = key;
                     session_conns_[key].push_back(conn);
                 }
@@ -518,7 +515,6 @@ void WsController::handle_generic_message(const drogon::WebSocketConnectionPtr& 
     else if (action == "set_session") {
         std::string session_id = msg.value("session_id", "");
         if (!session_id.empty() && session_mgr_->get_session(session_id)) {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
             // Remove from old session
             if (!state.session_id.empty()) {
                 auto& old_conns = session_conns_[state.session_id];
