@@ -1,10 +1,75 @@
 #include "polygon_controller.hpp"
 #include <spdlog/spdlog.h>
 #include <drogon/drogon.h>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
 
 using json = nlohmann::json;
 
 namespace broker_sim {
+
+namespace {
+std::string format_et_iso(Timestamp ts) {
+    auto adjusted = ts - std::chrono::hours(5);
+    auto t = std::chrono::system_clock::to_time_t(adjusted);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return std::string(buf) + "-05:00";
+}
+
+std::string trim_copy(const std::string& s) {
+    auto start = s.begin();
+    while (start != s.end() && std::isspace(static_cast<unsigned char>(*start))) {
+        ++start;
+    }
+    auto end = s.end();
+    while (end != start && std::isspace(static_cast<unsigned char>(*(end - 1)))) {
+        --end;
+    }
+    return std::string(start, end);
+}
+
+json parse_conditions(const std::string& raw) {
+    json out = json::array();
+    std::string s = trim_copy(raw);
+    if (s.empty()) return out;
+
+    if (s.front() == '[' && s.back() == ']') {
+        s = s.substr(1, s.size() - 2);
+    }
+
+    std::stringstream ss(s);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token = trim_copy(token);
+        if (token.empty()) continue;
+        if ((token.front() == '\'' && token.back() == '\'') ||
+            (token.front() == '"' && token.back() == '"')) {
+            token = token.substr(1, token.size() - 2);
+            token = trim_copy(token);
+        }
+        if (token.empty()) continue;
+
+        bool is_number = std::all_of(token.begin(), token.end(), [](unsigned char c) {
+            return std::isdigit(c) || c == '-';
+        });
+        if (is_number) {
+            try {
+                out.push_back(std::stoi(token));
+                continue;
+            } catch (...) {
+                // Fall through to string.
+            }
+        }
+        out.push_back(token);
+    }
+
+    return out;
+}
+} // namespace
 
 PolygonController::PolygonController(std::shared_ptr<SessionManager> session_mgr, const Config& cfg)
     : session_mgr_(std::move(session_mgr)), cfg_(cfg) {
@@ -283,7 +348,7 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
 
                 for (const auto& t : trades) {
                     json trade_item;
-                    trade_item["conditions"] = json::array();
+                    trade_item["conditions"] = parse_conditions(t.conditions);
                     trade_item["exchange"] = t.exchange;
                     trade_item["id"] = utils::generate_id();
                     trade_item["participant_timestamp"] = utils::ts_to_ns(t.timestamp);
@@ -331,7 +396,7 @@ void PolygonController::lastTrade(const drogon::HttpRequestPtr& req,
         {"request_id", utils::generate_id()},
         {"results", {
             {"T", symbol},
-            {"c", json::array()},  // conditions
+            {"c", parse_conditions(t.conditions)},  // conditions
             {"f", t.ts_ns},
             {"i", utils::generate_id()},
             {"p", t.price},
@@ -820,26 +885,28 @@ void PolygonController::marketStatus(const drogon::HttpRequestPtr& req,
         now = std::chrono::system_clock::now();
     }
 
-    auto t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    gmtime_r(&t, &tm);
-
-    // Simplified: market hours are 14:30-21:00 UTC
-    bool is_open = (tm.tm_wday >= 1 && tm.tm_wday <= 5) &&
-                   (tm.tm_hour >= 14 && tm.tm_hour < 21);
+    auto session_type = cfg_.execution.get_market_session(now);
+    bool early_hours = session_type == ExecutionConfig::MarketSession::PREMARKET;
+    bool after_hours = session_type == ExecutionConfig::MarketSession::AFTERHOURS;
+    bool is_regular = session_type == ExecutionConfig::MarketSession::REGULAR;
+    bool is_extended = early_hours || after_hours;
+    std::string market_status = is_regular ? "open" : (is_extended ? "extended-hours" : "closed");
+    std::string exchange_status = is_regular ? "open" : (is_extended ? "extended-hours" : "closed");
 
     json response = {
-        {"market", is_open ? "open" : "closed"},
-        {"serverTime", utils::ts_to_iso(now)},
+        {"market", market_status},
+        {"serverTime", format_et_iso(now)},
         {"exchanges", {
-            {"nasdaq", is_open ? "open" : "closed"},
-            {"nyse", is_open ? "open" : "closed"},
-            {"otc", is_open ? "open" : "closed"}
+            {"nasdaq", exchange_status},
+            {"nyse", exchange_status},
+            {"otc", is_regular ? "open" : "closed"}
         }},
         {"currencies", {
             {"fx", "open"},
             {"crypto", "open"}
-        }}
+        }},
+        {"earlyHours", early_hours},
+        {"afterHours", after_hours}
     };
 
     cb(json_resp(response));

@@ -21,8 +21,8 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     { method: 'GET', path: '/v2/account', description: 'Get account details' },
     // Positions
     { method: 'GET', path: '/v2/positions', description: 'List all positions' },
-    { method: 'GET', path: '/v2/positions/{symbol}', description: 'Get position by symbol', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
-    { method: 'DELETE', path: '/v2/positions/{symbol}', description: 'Close position', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/positions/{symbol}', description: 'Get position by symbol', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'DELETE', path: '/v2/positions/{symbol}', description: 'Close position', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     { method: 'DELETE', path: '/v2/positions', description: 'Close all positions' },
     // Orders
     { method: 'GET', path: '/v2/orders', description: 'List orders', params: [{ name: 'status', type: 'query', required: false, description: 'Order status filter', default: 'all' }] },
@@ -31,9 +31,9 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     { method: 'DELETE', path: '/v2/orders/{order_id}', description: 'Cancel order', params: [{ name: 'order_id', type: 'path', required: true, description: 'Order ID' }] },
     { method: 'DELETE', path: '/v2/orders', description: 'Cancel all orders' },
     // Market Data
-    { method: 'GET', path: '/v2/stocks/{symbol}/trades', description: 'Get trades', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/v2/stocks/{symbol}/quotes', description: 'Get quotes', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/v2/stocks/{symbol}/bars', description: 'Get bars', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/stocks/{symbol}/trades', description: 'Get trades', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/v2/stocks/{symbol}/quotes', description: 'Get quotes', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/v2/stocks/{symbol}/bars', description: 'Get bars', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     { method: 'GET', path: '/v2/clock', description: 'Get market clock' },
     { method: 'GET', path: '/v2/calendar', description: 'Get trading calendar' },
   ],
@@ -41,16 +41,16 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
   polygon: [
     // Aggregates
     { method: 'GET', path: '/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from}/{to}', description: 'Get aggregates/bars', params: [
-      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
+      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
       { name: 'multiplier', type: 'path', required: true, description: 'Size of timespan (e.g., 1)', default: '1' },
       { name: 'timespan', type: 'path', required: true, description: 'Timespan (minute, hour, day)', default: 'minute' },
       { name: 'from', type: 'path', required: true, description: 'Start date (YYYY-MM-DD)', default: '2025-01-13' },
       { name: 'to', type: 'path', required: true, description: 'End date (YYYY-MM-DD)', default: '2025-01-13' },
     ]},
-    { method: 'GET', path: '/v2/aggs/ticker/{symbol}/prev', description: 'Previous day aggregate', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/aggs/ticker/{symbol}/prev', description: 'Previous day aggregate', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Trades & Quotes
     { method: 'GET', path: '/v3/trades/{symbol}', description: 'Get trades', params: [
-      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
+      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
       { name: 'timestamp', type: 'query', required: false, description: 'Query by timestamp (YYYY-MM-DD or nanoseconds)' },
       { name: 'timestamp.gte', type: 'query', required: false, description: 'Timestamp greater than or equal to' },
       { name: 'timestamp.lte', type: 'query', required: false, description: 'Timestamp less than or equal to' },
@@ -58,9 +58,9 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
     ]},
-    { method: 'GET', path: '/v2/last/trade/{symbol}', description: 'Last trade', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/last/trade/{symbol}', description: 'Last trade', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     { method: 'GET', path: '/v3/quotes/{symbol}', description: 'Get quotes', params: [
-      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol' },
+      { name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
       { name: 'timestamp', type: 'query', required: false, description: 'Query by timestamp (YYYY-MM-DD or nanoseconds)' },
       { name: 'timestamp.gte', type: 'query', required: false, description: 'Timestamp greater than or equal to' },
       { name: 'timestamp.lte', type: 'query', required: false, description: 'Timestamp less than or equal to' },
@@ -68,40 +68,40 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
     ]},
-    { method: 'GET', path: '/v2/last/nbbo/{symbol}', description: 'Last NBBO quote', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/last/nbbo/{symbol}', description: 'Last NBBO quote', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Snapshots
-    { method: 'GET', path: '/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}', description: 'Get ticker snapshot', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}', description: 'Get ticker snapshot', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Ticker Details
-    { method: 'GET', path: '/v3/reference/tickers/{symbol}', description: 'Get ticker details', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/v3/reference/tickers/{symbol}', description: 'Get ticker details', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Market Status
     { method: 'GET', path: '/v1/marketstatus/now', description: 'Current market status' },
   ],
 
   finnhub: [
     // Real-time
-    { method: 'GET', path: '/quote', description: 'Get quote', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/quote', description: 'Get quote', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Historical
     { method: 'GET', path: '/stock/candle', description: 'Get candles/OHLCV', params: [
-      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol' },
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
       { name: 'resolution', type: 'query', required: true, description: 'Resolution (1, 5, 15, 30, 60, D, W, M)', default: '1' },
       { name: 'from', type: 'query', required: true, description: 'Start timestamp (Unix)', default: '1736768400' },
       { name: 'to', type: 'query', required: true, description: 'End timestamp (Unix)', default: '1736791800' },
     ]},
     // Company Info
-    { method: 'GET', path: '/stock/profile2', description: 'Company profile', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/stock/peers', description: 'Company peers', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/stock/profile2', description: 'Company profile', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/stock/peers', description: 'Company peers', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // News
     { method: 'GET', path: '/company-news', description: 'Company news', params: [
-      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol' },
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
       { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)' },
       { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)' },
     ]},
     { method: 'GET', path: '/news', description: 'Market news', params: [{ name: 'category', type: 'query', required: false, description: 'News category', default: 'general' }] },
     // Corporate Actions
-    { method: 'GET', path: '/stock/dividend', description: 'Dividends', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/stock/split', description: 'Stock splits', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/stock/dividend', description: 'Dividends', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/stock/split', description: 'Stock splits', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Analyst
-    { method: 'GET', path: '/stock/recommendation', description: 'Analyst recommendations', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
-    { method: 'GET', path: '/stock/price-target', description: 'Price targets', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol' }] },
+    { method: 'GET', path: '/stock/recommendation', description: 'Analyst recommendations', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/stock/price-target', description: 'Price targets', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
   ],
 };

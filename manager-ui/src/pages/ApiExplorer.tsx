@@ -43,7 +43,7 @@ type BrokerService = 'alpaca' | 'polygon' | 'finnhub';
 
 export function ApiExplorer() {
   const [apiMode, setApiMode] = useState<ApiMode>('session');
-  const [brokerService, setBrokerService] = useState<BrokerService>('alpaca');
+  const [brokerService, setBrokerService] = useState<BrokerService>('polygon');
   const [selectedEndpoint, setSelectedEndpoint] = useState<ApiEndpoint | null>(null);
   const [method, setMethod] = useState<HttpMethod>('GET');
   const [path, setPath] = useState('');
@@ -57,11 +57,9 @@ export function ApiExplorer() {
 
   const { sessions, fetchSessions } = useSessionStore();
 
-  // Fetch sessions on mount and periodically
+  // Fetch sessions on mount (live updates come from status WebSocket)
   useEffect(() => {
     fetchSessions();
-    const interval = setInterval(fetchSessions, 5000);
-    return () => clearInterval(interval);
   }, [fetchSessions]);
 
   // Filter running sessions for broker APIs

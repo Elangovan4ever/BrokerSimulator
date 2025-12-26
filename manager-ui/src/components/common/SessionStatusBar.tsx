@@ -39,6 +39,7 @@ export function SessionStatusBar() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isConnectedRef = useRef(false);
+  const isActiveRef = useRef(true);
 
   // Filter for active sessions (running or paused)
   const activeSessions = sessions.filter(
@@ -47,6 +48,8 @@ export function SessionStatusBar() {
 
   // WebSocket connection for real-time updates
   useEffect(() => {
+    isActiveRef.current = true;
+
     // Initial fetch to get session list
     fetchSessions();
 
@@ -55,6 +58,10 @@ export function SessionStatusBar() {
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        if (!isActiveRef.current) {
+          ws.close();
+          return;
+        }
         isConnectedRef.current = true;
         // Clear any pending reconnect
         if (reconnectTimeoutRef.current) {
@@ -86,6 +93,9 @@ export function SessionStatusBar() {
       };
 
       ws.onclose = () => {
+        if (!isActiveRef.current) {
+          return;
+        }
         isConnectedRef.current = false;
         wsRef.current = null;
 
@@ -96,8 +106,7 @@ export function SessionStatusBar() {
       };
 
       ws.onerror = () => {
-        // Error handling - close will trigger reconnect
-        ws.close();
+        // Error handling - onclose will trigger reconnect
       };
 
       wsRef.current = ws;
@@ -106,11 +115,14 @@ export function SessionStatusBar() {
     connect();
 
     return () => {
+      isActiveRef.current = false;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.close();
+        }
       }
     };
   }, [fetchSessions, updateSessionFromWs]);

@@ -46,7 +46,6 @@ export function Sessions() {
     isLoading,
     error,
     fetchSessions,
-    fetchSession,
     createSession,
     deleteSession,
     startSession,
@@ -69,13 +68,7 @@ export function Sessions() {
 
   useEffect(() => {
     fetchSessions();
-    const interval = setInterval(() => {
-      // Use getState() to get fresh sessions data, avoiding stale closure
-      const currentSessions = useSessionStore.getState().sessions;
-      currentSessions.filter(s => s.status === 'RUNNING').forEach(s => fetchSession(s.id));
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [fetchSessions, fetchSession]);
+  }, [fetchSessions]);
 
   useEffect(() => {
     if (error) {

@@ -254,7 +254,14 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
         auto end_str = format_timestamp(end_time);
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
         std::string query = fmt::format(R"(
-            SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
+            SELECT
+                toDateTime64(timestamp, 9) AS ts,
+                CAST(symbol AS String) AS symbol,
+                toFloat64(price) AS price,
+                toInt64(size) AS size,
+                toInt32OrZero(toString(exchange)) AS exchange,
+                toString(conditions) AS conditions,
+                toInt32OrZero(toString(tape)) AS tape
             FROM stock_trades
             WHERE symbol = '{}'
               AND timestamp >= '{}'
@@ -266,7 +273,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
         client.Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 TradeRecord tr;
-                tr.timestamp = extract_ts(block[0], row);
+                tr.timestamp = extract_ts_any(block[0], row);
                 tr.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
                 tr.price = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
                 tr.size = block[3]->As<clickhouse::ColumnInt64>()->At(row);
@@ -355,14 +362,14 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
         std::string query = fmt::format(R"(
             SELECT
-                toStartOfInterval(timestamp, {}) AS bucket,
-                argMin(price, timestamp) AS open,
-                max(price) AS high,
-                min(price) AS low,
-                argMax(price, timestamp) AS close,
-                sum(size) AS volume,
-                if(sum(size) = 0, 0, sum(price * size) / sum(size)) AS vwap,
-                count() AS trade_count
+                toDateTime64(toStartOfInterval(timestamp, {}), 9) AS bucket,
+                toFloat64(argMin(price, timestamp)) AS open,
+                toFloat64(max(price)) AS high,
+                toFloat64(min(price)) AS low,
+                toFloat64(argMax(price, timestamp)) AS close,
+                toInt64(sum(size)) AS volume,
+                toFloat64(if(sum(size) = 0, 0, sum(price * size) / sum(size))) AS vwap,
+                toUInt64(count()) AS trade_count
             FROM stock_trades
             WHERE symbol = '{}'
               AND timestamp >= '{}'
@@ -375,14 +382,21 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
         client.Select(query, [&out, &symbol](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 BarRecord b;
-                b.timestamp = extract_ts(block[0], row);
+                b.open = 0.0;
+                b.high = 0.0;
+                b.low = 0.0;
+                b.close = 0.0;
+                b.volume = 0;
+                b.vwap = 0.0;
+                b.trade_count = 0;
+                b.timestamp = extract_ts_any(block[0], row);
                 b.symbol = symbol;
-                b.open = block[1]->As<clickhouse::ColumnFloat64>()->At(row);
-                b.high = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
-                b.low = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
-                b.close = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
+                if (auto v = get_nullable_float(block[1], row)) b.open = *v;
+                if (auto v = get_nullable_float(block[2], row)) b.high = *v;
+                if (auto v = get_nullable_float(block[3], row)) b.low = *v;
+                if (auto v = get_nullable_float(block[4], row)) b.close = *v;
                 b.volume = block[5]->As<clickhouse::ColumnInt64>()->At(row);
-                b.vwap = block[6]->As<clickhouse::ColumnFloat64>()->At(row);
+                if (auto v = get_nullable_float(block[6], row)) b.vwap = *v;
                 b.trade_count = block[7]->As<clickhouse::ColumnUInt64>()->At(row);
                 out.push_back(std::move(b));
             }

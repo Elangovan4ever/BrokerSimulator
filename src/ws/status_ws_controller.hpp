@@ -1,8 +1,11 @@
 #pragma once
 
 #include <drogon/WebSocketController.h>
+#include <atomic>
 #include <mutex>
 #include <set>
+#include <thread>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include "../core/session_manager.hpp"
 
@@ -28,6 +31,7 @@ public:
      * Initialize with session manager reference.
      */
     static void init(std::shared_ptr<SessionManager> session_mgr);
+    static void shutdown();
 
     /**
      * Broadcast session status update to all connected clients.
@@ -61,9 +65,14 @@ private:
     static std::shared_ptr<SessionManager> session_mgr_;
     static std::mutex conn_mutex_;
     static std::set<drogon::WebSocketConnectionPtr> connections_;
+    static std::atomic<bool> worker_running_;
+    static std::unique_ptr<std::thread> worker_;
 
     // Send current state of all sessions to a newly connected client
     static void send_initial_state(const drogon::WebSocketConnectionPtr& conn);
+    static void start_worker();
+    static void stop_worker();
+    static void worker_loop();
 };
 
 } // namespace broker_sim

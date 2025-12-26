@@ -534,15 +534,6 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
     spdlog::info("Session {} loop starting, queue_size={}", session->id, session->event_queue->size());
     try {
         size_t processed = 0;
-        auto last_broadcast = std::chrono::steady_clock::now();
-
-        // Broadcast initial status when session starts
-        auto initial_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            session->time_engine->current_time().time_since_epoch()).count();
-        StatusWsController::broadcast_session_status(
-            session->id, "RUNNING", initial_ns,
-            0, session->config.speed_factor);
-
         while (!session->should_stop.load()) {
             auto ev_opt = session->event_queue->wait_and_pop();
             if (!ev_opt) {
@@ -559,36 +550,12 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
             if (processed == 1 || processed % 10000 == 0) {
                 spdlog::info("Session {} processed {} events", session->id, processed);
             }
-            // Broadcast status update every 1 second for stable UI updates
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_broadcast >= std::chrono::seconds(1)) {
-                last_broadcast = now;
-                auto current_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    session->time_engine->current_time().time_since_epoch()).count();
-                StatusWsController::broadcast_session_status(
-                    session->id,
-                    "RUNNING",
-                    current_ns,
-                    session->events_processed.load(std::memory_order_relaxed),
-                    session->config.speed_factor);
-            }
         }
         spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
-        // Broadcast final status when loop ends
-        auto final_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            session->time_engine->current_time().time_since_epoch()).count();
         if (!session->should_stop.load()) {
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
-            StatusWsController::broadcast_session_status(
-                session->id, "COMPLETED", final_ns,
-                session->events_processed.load(std::memory_order_relaxed),
-                session->config.speed_factor);
         } else {
-            StatusWsController::broadcast_session_status(
-                session->id, "STOPPED", final_ns,
-                session->events_processed.load(std::memory_order_relaxed),
-                session->config.speed_factor);
         }
     } catch (const std::exception& e) {
         session->status = SessionStatus::ERROR;
