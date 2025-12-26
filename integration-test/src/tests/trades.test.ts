@@ -1,6 +1,6 @@
 /**
  * Integration tests for Polygon Trades API
- * Tests: /v3/trades/{symbol}, /v2/ticks/stocks/trades/{symbol}/{date}, /v2/last/trade/{symbol}
+ * Tests: /v3/trades/{symbol}, /v2/last/trade/{symbol}
  */
 
 import { polygonClient, simulatorClient, config, logTestResult } from './setup';
@@ -161,95 +161,6 @@ describe('Polygon Trades API', () => {
 
         logTestResult(
           'Trades limit=5',
-          polygonResponse.status,
-          simulatorResponse.status,
-          comparison.match
-        );
-
-        expect(polygonResponse.status).toBe(simulatorResponse.status);
-        expect(comparison.match).toBe(true);
-      });
-    });
-  });
-
-  // NOTE: /v2/ticks/stocks/trades is deprecated by Polygon.io - use /v3/trades instead
-  describe.skip('GET /v2/ticks/stocks/trades/{symbol}/{date} [DEPRECATED]', () => {
-    describe('Required Parameters', () => {
-      it.each(config.testSymbols)(
-        'should return matching schema for %s historic trades',
-        async (symbol) => {
-          const polygonResponse = await polygonClient.getHistoricTrades(symbol, testDate, {
-            limit: 10,
-          });
-          const simulatorResponse = await simulatorClient.getHistoricTrades(symbol, testDate, {
-            limit: 10,
-          });
-
-          const polygonSchema = extractSchema(polygonResponse.data);
-          const simulatorSchema = extractSchema(simulatorResponse.data);
-          const comparison = compareSchemas(polygonSchema, simulatorSchema);
-
-          logTestResult(
-            `Historic trades ${symbol}`,
-            polygonResponse.status,
-            simulatorResponse.status,
-            comparison.match
-          );
-
-          if (!comparison.match) {
-            console.log(formatComparisonResult(comparison));
-          }
-
-          expect(polygonResponse.status).toBe(simulatorResponse.status);
-          expect(comparison.match).toBe(true);
-        }
-      );
-    });
-
-    describe('Optional Parameters', () => {
-      it('should handle reverse=true parameter', async () => {
-        const symbol = config.testSymbols[0];
-
-        const polygonResponse = await polygonClient.getHistoricTrades(symbol, testDate, {
-          reverse: true,
-          limit: 10,
-        });
-        const simulatorResponse = await simulatorClient.getHistoricTrades(symbol, testDate, {
-          reverse: true,
-          limit: 10,
-        });
-
-        const polygonSchema = extractSchema(polygonResponse.data);
-        const simulatorSchema = extractSchema(simulatorResponse.data);
-        const comparison = compareSchemas(polygonSchema, simulatorSchema);
-
-        logTestResult(
-          'Historic trades reverse=true',
-          polygonResponse.status,
-          simulatorResponse.status,
-          comparison.match
-        );
-
-        expect(polygonResponse.status).toBe(simulatorResponse.status);
-        expect(comparison.match).toBe(true);
-      });
-
-      it('should handle limit parameter', async () => {
-        const symbol = config.testSymbols[0];
-
-        const polygonResponse = await polygonClient.getHistoricTrades(symbol, testDate, {
-          limit: 5,
-        });
-        const simulatorResponse = await simulatorClient.getHistoricTrades(symbol, testDate, {
-          limit: 5,
-        });
-
-        const polygonSchema = extractSchema(polygonResponse.data);
-        const simulatorSchema = extractSchema(simulatorResponse.data);
-        const comparison = compareSchemas(polygonSchema, simulatorSchema);
-
-        logTestResult(
-          'Historic trades limit=5',
           polygonResponse.status,
           simulatorResponse.status,
           comparison.match

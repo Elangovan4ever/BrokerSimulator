@@ -103,25 +103,6 @@ export class SimulatorClient {
   }
 
   /**
-   * Get historic trades for a date
-   * GET /v2/ticks/stocks/trades/{ticker}/{date}
-   */
-  async getHistoricTrades(
-    ticker: string,
-    date: string,
-    options?: {
-      timestamp?: number;
-      timestampLimit?: number;
-      reverse?: boolean;
-      limit?: number;
-    }
-  ): Promise<AxiosResponse> {
-    return this.client.get(`/v2/ticks/stocks/trades/${ticker}/${date}`, {
-      params: options,
-    });
-  }
-
-  /**
    * Get last trade for a stock
    * GET /v2/last/trade/{stocksTicker}
    */
@@ -147,25 +128,6 @@ export class SimulatorClient {
     }
   ): Promise<AxiosResponse> {
     return this.client.get(`/v3/quotes/${ticker}`, { params: options });
-  }
-
-  /**
-   * Get historic NBBO quotes for a date
-   * GET /v2/ticks/stocks/nbbo/{ticker}/{date}
-   */
-  async getHistoricQuotes(
-    ticker: string,
-    date: string,
-    options?: {
-      timestamp?: number;
-      timestampLimit?: number;
-      reverse?: boolean;
-      limit?: number;
-    }
-  ): Promise<AxiosResponse> {
-    return this.client.get(`/v2/ticks/stocks/nbbo/${ticker}/${date}`, {
-      params: options,
-    });
   }
 
   /**
