@@ -3,6 +3,7 @@
  * Tests: /v2/ticks/stocks/trades/{ticker}/{date}, /v2/ticks/stocks/nbbo/{ticker}/{date}
  */
 
+import axios from 'axios';
 import { polygonClient, simulatorClient, config, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
@@ -12,7 +13,16 @@ describe('Polygon Tick APIs', () => {
 
   describe('GET /v2/ticks/stocks/trades/{ticker}/{date}', () => {
     it('should return matching schema for trades ticks', async () => {
-      const polygonResponse = await polygonClient.getTradesTicks(symbol, date, { limit: 100 });
+      let polygonResponse;
+      try {
+        polygonResponse = await polygonClient.getTradesTicks(symbol, date, { limit: 100 });
+      } catch (error) {
+        if (axios.isAxiosError(error) && [403, 404].includes(error.response?.status || 0)) {
+          console.log('  SKIP: Trades ticks not available from Polygon API plan');
+          return;
+        }
+        throw error;
+      }
       const simulatorResponse = await simulatorClient.getTradesTicks(symbol, date, { limit: 100 });
 
       const polygonSchema = extractSchema(polygonResponse.data);
@@ -37,7 +47,16 @@ describe('Polygon Tick APIs', () => {
 
   describe('GET /v2/ticks/stocks/nbbo/{ticker}/{date}', () => {
     it('should return matching schema for NBBO ticks', async () => {
-      const polygonResponse = await polygonClient.getQuotesTicks(symbol, date, { limit: 100 });
+      let polygonResponse;
+      try {
+        polygonResponse = await polygonClient.getQuotesTicks(symbol, date, { limit: 100 });
+      } catch (error) {
+        if (axios.isAxiosError(error) && [403, 404].includes(error.response?.status || 0)) {
+          console.log('  SKIP: NBBO ticks not available from Polygon API plan');
+          return;
+        }
+        throw error;
+      }
       const simulatorResponse = await simulatorClient.getQuotesTicks(symbol, date, { limit: 100 });
 
       const polygonSchema = extractSchema(polygonResponse.data);
