@@ -92,6 +92,18 @@ export class PolygonClient {
   }
 
   /**
+   * Get stock trades (tick data)
+   * GET /v2/ticks/stocks/trades/{ticker}/{date}
+   */
+  async getTradesTicks(
+    ticker: string,
+    date: string,
+    options?: { limit?: number }
+  ): Promise<AxiosResponse> {
+    return this.client.get(`/v2/ticks/stocks/trades/${ticker}/${date}`, { params: options });
+  }
+
+  /**
    * Get last trade for a stock
    * GET /v2/last/trade/{stocksTicker}
    */
@@ -117,6 +129,18 @@ export class PolygonClient {
     }
   ): Promise<AxiosResponse> {
     return this.client.get(`/v3/quotes/${ticker}`, { params: options });
+  }
+
+  /**
+   * Get stock quotes (NBBO tick data)
+   * GET /v2/ticks/stocks/nbbo/{ticker}/{date}
+   */
+  async getQuotesTicks(
+    ticker: string,
+    date: string,
+    options?: { limit?: number }
+  ): Promise<AxiosResponse> {
+    return this.client.get(`/v2/ticks/stocks/nbbo/${ticker}/${date}`, { params: options });
   }
 
   /**
@@ -151,6 +175,161 @@ export class PolygonClient {
     sort?: string;
   }): Promise<AxiosResponse> {
     return this.client.get('/v3/reference/dividends', { params: options });
+  }
+
+  // ============ Splits ============
+
+  /**
+   * Get stock splits
+   * GET /v3/reference/splits
+   */
+  async getSplits(options?: {
+    ticker?: string;
+    'ticker.gte'?: string;
+    'ticker.gt'?: string;
+    'ticker.lte'?: string;
+    'ticker.lt'?: string;
+    execution_date?: string;
+    'execution_date.gte'?: string;
+    'execution_date.gt'?: string;
+    'execution_date.lte'?: string;
+    'execution_date.lt'?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    sort?: string;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/v3/reference/splits', { params: options });
+  }
+
+  // ============ News ============
+
+  /**
+   * Get ticker news
+   * GET /v2/reference/news
+   */
+  async getNews(options?: {
+    ticker?: string;
+    published_utc?: string;
+    'published_utc.gte'?: string;
+    'published_utc.gt'?: string;
+    'published_utc.lte'?: string;
+    'published_utc.lt'?: string;
+    order?: 'ascending' | 'descending' | 'asc' | 'desc';
+    sort?: string;
+    include_insights?: boolean;
+    limit?: number;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/v2/reference/news', { params: options });
+  }
+
+  // ============ IPOs ============
+
+  /**
+   * Get IPOs
+   * GET /vX/reference/ipos
+   */
+  async getIpos(options?: {
+    ticker?: string;
+    ipo_status?: string;
+    announced_date?: string;
+    'announced_date.gte'?: string;
+    'announced_date.gt'?: string;
+    'announced_date.lte'?: string;
+    'announced_date.lt'?: string;
+    listing_date?: string;
+    'listing_date.gte'?: string;
+    'listing_date.gt'?: string;
+    'listing_date.lte'?: string;
+    'listing_date.lt'?: string;
+    issue_start_date?: string;
+    'issue_start_date.gte'?: string;
+    'issue_start_date.gt'?: string;
+    'issue_start_date.lte'?: string;
+    'issue_start_date.lt'?: string;
+    issue_end_date?: string;
+    'issue_end_date.gte'?: string;
+    'issue_end_date.gt'?: string;
+    'issue_end_date.lte'?: string;
+    'issue_end_date.lt'?: string;
+    last_updated?: string;
+    'last_updated.gte'?: string;
+    'last_updated.gt'?: string;
+    'last_updated.lte'?: string;
+    'last_updated.lt'?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    sort?: string;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/vX/reference/ipos', { params: options });
+  }
+
+  // ============ Short Interest ============
+
+  /**
+   * Get short interest
+   * GET /stocks/v1/short-interest
+   */
+  async getShortInterest(options?: {
+    ticker?: string;
+    settlement_date?: string;
+    'settlement_date.gte'?: string;
+    'settlement_date.gt'?: string;
+    'settlement_date.lte'?: string;
+    'settlement_date.lt'?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    sort?: string;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/stocks/v1/short-interest', { params: options });
+  }
+
+  // ============ Short Volume ============
+
+  /**
+   * Get short volume
+   * GET /stocks/v1/short-volume
+   */
+  async getShortVolume(options?: {
+    ticker?: string;
+    date?: string;
+    'date.gte'?: string;
+    'date.gt'?: string;
+    'date.lte'?: string;
+    'date.lt'?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    sort?: string;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/stocks/v1/short-volume', { params: options });
+  }
+
+  // ============ Financials ============
+
+  /**
+   * Get financials
+   * GET /vX/reference/financials
+   */
+  async getFinancials(options?: {
+    ticker?: string;
+    cik?: string;
+    timeframe?: string;
+    fiscal_period?: string;
+    fiscal_year?: number;
+    period_of_report_date?: string;
+    'period_of_report_date.gte'?: string;
+    'period_of_report_date.gt'?: string;
+    'period_of_report_date.lte'?: string;
+    'period_of_report_date.lt'?: string;
+    filing_date?: string;
+    'filing_date.gte'?: string;
+    'filing_date.gt'?: string;
+    'filing_date.lte'?: string;
+    'filing_date.lt'?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    sort?: string;
+  }): Promise<AxiosResponse> {
+    return this.client.get('/vX/reference/financials', { params: options });
   }
 
   // ============ Snapshots ============

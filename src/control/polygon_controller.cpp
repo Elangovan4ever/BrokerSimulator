@@ -1496,7 +1496,7 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
         item["title"] = n.title;
         item["author"] = n.author;
         item["article_url"] = n.article_url;
-        if (!n.amp_url.empty()) item["amp_url"] = n.amp_url;
+        item["amp_url"] = n.amp_url;
         item["image_url"] = n.image_url;
         item["description"] = n.description;
         item["tickers"] = n.tickers;
@@ -2361,6 +2361,7 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
         {"accounts_payable", {"Accounts Payable", 710, "USD"}},
         {"long_term_debt", {"Long-term Debt", 810, "USD"}},
         {"fixed_assets", {"Fixed Assets", 320, "USD"}},
+        {"intangible_assets", {"Intangible Assets", 330, "USD"}},
         {"equity", {"Equity", 1400, "USD"}},
         {"current_assets", {"Current Assets", 200, "USD"}},
         {"equity_attributable_to_parent", {"Equity Attributable To Parent", 1600, "USD"}},
@@ -2370,6 +2371,7 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
         {"inventory", {"Inventory", 230, "USD"}},
         {"liabilities", {"Liabilities", 600, "USD"}},
         {"other_noncurrent_assets", {"Other Non-current Assets", 350, "USD"}},
+        {"commitments_and_contingencies", {"Commitments and Contingencies", 900, "USD"}},
     };
 
     static const std::unordered_map<std::string, FieldMeta> kIncomeStatementMeta = {
@@ -2378,6 +2380,7 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
         {"cost_of_revenue", {"Cost Of Revenue", 300, "USD"}},
         {"net_income_loss_attributable_to_parent", {"Net Income/Loss Attributable To Parent", 3500, "USD"}},
         {"income_loss_from_continuing_operations_before_tax", {"Income/Loss From Continuing Operations Before Tax", 1500, "USD"}},
+        {"income_loss_before_equity_method_investments", {"Income/Loss Before Equity Method Investments", 1300, "USD"}},
         {"gross_profit", {"Gross Profit", 800, "USD"}},
         {"research_and_development", {"Research and Development", 1030, "USD"}},
         {"net_income_loss", {"Net Income/Loss", 3200, "USD"}},

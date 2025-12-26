@@ -1588,6 +1588,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                 set_json(r.balance_sheet, "other_current_liabilities", bs_json, "accrued_and_other_current_liabilities");
                 set_json(r.balance_sheet, "other_noncurrent_assets", bs_json, "other_assets");
                 set_json(r.balance_sheet, "other_noncurrent_liabilities", bs_json, "other_noncurrent_liabilities");
+                set_json(r.balance_sheet, "intangible_assets", bs_json, "intangible_assets_net");
 
                 auto assets_it = r.balance_sheet.find("assets");
                 auto current_assets_it = r.balance_sheet.find("current_assets");
@@ -1608,6 +1609,10 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                         equity_it->second - equity_parent_it->second;
                 }
 
+                if (r.balance_sheet.find("commitments_and_contingencies") == r.balance_sheet.end()) {
+                    r.balance_sheet["commitments_and_contingencies"] = 0.0;
+                }
+
                 set_json(r.income_statement, "revenues", inc_json, "revenue");
                 set_json(r.income_statement, "cost_of_revenue", inc_json, "cost_of_revenue");
                 set_json(r.income_statement, "gross_profit", inc_json, "gross_profit");
@@ -1618,6 +1623,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                 set_json(r.income_statement, "selling_general_and_administrative_expenses", inc_json, "selling_general_administrative");
                 set_json(r.income_statement, "income_tax_expense_benefit", inc_json, "income_taxes");
                 set_json(r.income_statement, "income_loss_from_continuing_operations_before_tax", inc_json, "income_before_income_taxes");
+                set_json(r.income_statement, "income_loss_before_equity_method_investments", inc_json, "income_before_equity_method_investments");
                 set_json(r.income_statement, "operating_expenses", inc_json, "total_operating_expenses");
                 set_json(r.income_statement, "nonoperating_income_loss", inc_json, "total_other_income_expense");
                 set_json(r.income_statement, "preferred_stock_dividends_and_other_adjustments", inc_json, "preferred_stock_dividends_declared");
@@ -1642,6 +1648,11 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                 if (pretax_it != r.income_statement.end() && tax_it != r.income_statement.end()) {
                     r.income_statement["income_loss_from_continuing_operations_after_tax"] =
                         pretax_it->second - tax_it->second;
+                }
+                if (r.income_statement.find("income_loss_before_equity_method_investments") == r.income_statement.end()) {
+                    if (pretax_it != r.income_statement.end()) {
+                        r.income_statement["income_loss_before_equity_method_investments"] = pretax_it->second;
+                    }
                 }
 
                 auto net_it = r.income_statement.find("net_income_loss");
