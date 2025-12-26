@@ -64,16 +64,3 @@ export function getWsUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub', 
       throw new Error(`Unknown service: ${service}`);
   }
 }
-
-export function getStatusWsUrl(config = defaultConfig): string {
-  const isDev = import.meta.env.DEV;
-
-  if (isDev) {
-    // Use the Vite proxy in development
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}/ws/status`;
-  }
-
-  // In production, connect directly to control port
-  return `ws://${config.host}:${config.controlPort}/ws/status`;
-}

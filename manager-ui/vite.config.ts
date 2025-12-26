@@ -33,12 +33,6 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/finnhub/, ''),
       },
-      // WebSocket proxy for session status updates
-      '/ws/status': {
-        target: 'ws://elanlinux:8000',
-        ws: true,
-        changeOrigin: true,
-      },
     },
   },
 })

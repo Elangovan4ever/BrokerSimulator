@@ -1,0 +1,11 @@
+--- src/control/polygon_controller.cpp
++++ src/control/polygon_controller.cpp
+@@ -85,7 +85,8 @@ std::shared_ptr<Session> PolygonController::get_session(const drogon::HttpReques
+ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
+                              std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+                              std::string symbol, std::string multiplier,
+                              std::string timespan, std::string from, std::string to) {
+     if (!authorize(req)) { cb(unauthorized()); return; }
++    auto session = get_session(req);
+ 
+     // Parse parameters
