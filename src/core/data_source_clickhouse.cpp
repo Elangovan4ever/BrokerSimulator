@@ -1371,11 +1371,12 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
         add_str("bs.fiscal_period", query.fiscal_period);
         add_int("bs.fiscal_year", query.fiscal_year);
 
-        add_date("bs.period_of_report", query.period_of_report_date, "=");
-        add_date("bs.period_of_report", query.period_of_report_date_gt, ">");
-        add_date("bs.period_of_report", query.period_of_report_date_gte, ">=");
-        add_date("bs.period_of_report", query.period_of_report_date_lt, "<");
-        add_date("bs.period_of_report", query.period_of_report_date_lte, "<=");
+        const std::string period_col = "ifNull(bs.period_of_report, bs.end_date)";
+        add_date(period_col, query.period_of_report_date, "=");
+        add_date(period_col, query.period_of_report_date_gt, ">");
+        add_date(period_col, query.period_of_report_date_gte, ">=");
+        add_date(period_col, query.period_of_report_date_lt, "<");
+        add_date(period_col, query.period_of_report_date_lte, "<=");
 
         add_date("bs.filing_date", query.filing_date, "=");
         add_date("bs.filing_date", query.filing_date_gt, ">");
@@ -1385,7 +1386,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
 
         if (query.max_period_of_report_date) {
             auto ts = format_timestamp(*query.max_period_of_report_date);
-            where.push_back(fmt::format("bs.period_of_report <= toDate('{}')", ts));
+            where.push_back(fmt::format("{} <= toDate('{}')", period_col, ts));
         }
 
         std::string where_clause;
@@ -1397,7 +1398,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
             }
         }
 
-        std::string sort_col = "bs.period_of_report";
+        std::string sort_col = period_col;
         if (query.sort == "filing_date") sort_col = "bs.filing_date";
 
         std::string order = (query.order == "asc") ? "ASC" : "DESC";
@@ -1420,7 +1421,7 @@ std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const F
                    bs.source_filing_url,
                    CAST(bs.form AS String),
                    CAST(bs.currency AS String),
-                   bs.period_of_report,
+                   ifNull(bs.period_of_report, bs.end_date) AS period_of_report,
                    bs.assets,
                    bs.current_assets,
                    bs.noncurrent_assets,
