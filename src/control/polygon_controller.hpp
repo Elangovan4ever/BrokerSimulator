@@ -40,6 +40,9 @@ public:
     ADD_METHOD_TO(PolygonController::ticksQuotes, "/v2/ticks/stocks/nbbo/{1}/{2}", drogon::Get);
     ADD_METHOD_TO(PolygonController::lastQuote, "/v2/last/nbbo/{1}", drogon::Get);
 
+    // Corporate Actions
+    ADD_METHOD_TO(PolygonController::dividends, "/v3/reference/dividends", drogon::Get);
+
     // Snapshots
     ADD_METHOD_TO(PolygonController::snapshotAll, "/v2/snapshot/locale/us/markets/stocks/tickers", drogon::Get);
     ADD_METHOD_TO(PolygonController::snapshotTicker, "/v2/snapshot/locale/us/markets/stocks/tickers/{1}", drogon::Get);
@@ -98,6 +101,10 @@ public:
     void lastQuote(const drogon::HttpRequestPtr& req,
                    std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                    std::string symbol);
+
+    // Corporate Actions
+    void dividends(const drogon::HttpRequestPtr& req,
+                   std::function<void(const drogon::HttpResponsePtr&)>&& cb);
 
     // Snapshots
     void snapshotAll(const drogon::HttpRequestPtr& req,

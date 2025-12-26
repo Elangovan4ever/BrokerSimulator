@@ -32,6 +32,19 @@ std::string trim_copy(const std::string& s) {
     return std::string(start, end);
 }
 
+std::string format_date(Timestamp ts) {
+    auto t = std::chrono::system_clock::to_time_t(ts);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return std::string(buf);
+}
+
+bool has_timestamp(Timestamp ts) {
+    return ts.time_since_epoch().count() != 0;
+}
+
 json parse_conditions(const std::string& raw) {
     json out = json::array();
     std::string s = trim_copy(raw);
@@ -729,6 +742,107 @@ void PolygonController::lastQuote(const drogon::HttpRequestPtr& req,
             {"y", 0},
             {"z", 1}
         }}
+    };
+
+    cb(json_resp(response));
+}
+
+void PolygonController::dividends(const drogon::HttpRequestPtr& req,
+                                  std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto ticker = req->getParameter("ticker");
+    if (ticker.empty()) {
+        cb(error_resp("ticker required", 400));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    auto session = get_session(req);
+    Timestamp start_ts{};
+    Timestamp end_ts{};
+    bool have_range = false;
+    if (session) {
+        start_ts = session->config.start_time;
+        end_ts = session->config.end_time;
+        have_range = true;
+    }
+
+    auto ex_date = req->getParameter("ex_dividend_date");
+    auto ex_gte = req->getParameter("ex_dividend_date.gte");
+    auto ex_gt = req->getParameter("ex_dividend_date.gt");
+    auto ex_lte = req->getParameter("ex_dividend_date.lte");
+    auto ex_lt = req->getParameter("ex_dividend_date.lt");
+
+    if (!ex_date.empty()) {
+        if (auto ts = utils::parse_date(ex_date)) {
+            start_ts = *ts;
+            end_ts = *ts + std::chrono::hours(24);
+            have_range = true;
+        }
+    }
+    if (!ex_gte.empty()) {
+        if (auto ts = utils::parse_date(ex_gte)) {
+            start_ts = *ts;
+            have_range = true;
+        }
+    } else if (!ex_gt.empty()) {
+        if (auto ts = utils::parse_date(ex_gt)) {
+            start_ts = *ts + std::chrono::hours(24);
+            have_range = true;
+        }
+    }
+    if (!ex_lte.empty()) {
+        if (auto ts = utils::parse_date(ex_lte)) {
+            end_ts = *ts + std::chrono::hours(24);
+            have_range = true;
+        }
+    } else if (!ex_lt.empty()) {
+        if (auto ts = utils::parse_date(ex_lt)) {
+            end_ts = *ts;
+            have_range = true;
+        }
+    }
+
+    if (!have_range) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        return;
+    }
+
+    if (end_ts < start_ts) std::swap(start_ts, end_ts);
+
+    int limit = 100;
+    auto limit_param = req->getParameter("limit");
+    if (!limit_param.empty()) {
+        limit = std::min(50000, std::stoi(limit_param));
+    }
+
+    auto rows = data_source->get_dividends(ticker, start_ts, end_ts, limit);
+    json results = json::array();
+    for (const auto& d : rows) {
+        json item;
+        item["ticker"] = d.symbol;
+        item["cash_amount"] = d.amount;
+        item["dividend_type"] = "CD";
+        item["ex_dividend_date"] = format_date(d.date);
+        item["frequency"] = 0;
+        item["id"] = utils::generate_id();
+        if (!d.currency.empty()) item["currency"] = d.currency;
+        if (has_timestamp(d.pay_date)) item["pay_date"] = format_date(d.pay_date);
+        if (has_timestamp(d.record_date)) item["record_date"] = format_date(d.record_date);
+        if (has_timestamp(d.declaration_date)) item["declaration_date"] = format_date(d.declaration_date);
+        results.push_back(item);
+    }
+
+    json response = {
+        {"results", results},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
     };
 
     cb(json_resp(response));
