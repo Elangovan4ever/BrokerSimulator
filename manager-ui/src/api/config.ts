@@ -64,3 +64,8 @@ export function getWsUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub', 
       throw new Error(`Unknown service: ${service}`);
   }
 }
+
+export function getStatusWsUrl(config = defaultConfig): string {
+  const { host, controlPort } = config;
+  return `ws://${host}:${controlPort}/ws/status`;
+}
