@@ -829,8 +829,10 @@ void PolygonController::lastQuote(const drogon::HttpRequestPtr& req,
         results["y"] = 1;  // Default exchange
         results["z"] = 1;
         results["X"] = 0;
-        results["i"] = "0";
+        results["i"] = json::array();
         results["q"] = 0;
+        results["c"] = json::array();
+        results["f"] = utils::ts_to_ns(session->time_engine->current_time());
 
         json response;
         response["status"] = "OK";
@@ -864,8 +866,10 @@ void PolygonController::lastQuote(const drogon::HttpRequestPtr& req,
             {"y", 0},
             {"z", 1}
             ,{"X", 0},
-            {"i", "0"},
-            {"q", 0}
+            {"i", json::array()},
+            {"q", 0},
+            {"c", json::array()},
+            {"f", q.ts_ns}
         }}
     };
 
