@@ -76,8 +76,7 @@ describe('Polygon Snapshots API', () => {
     });
   });
 
-  // NOTE: Skipped because single ticker snapshot requires an active session with cached data
-  describe.skip('GET /v2/snapshot/locale/us/markets/stocks/tickers/{symbol} [REQUIRES SESSION]', () => {
+  describe('GET /v2/snapshot/locale/us/markets/stocks/tickers/{symbol}', () => {
     describe('Required Parameters', () => {
       it.each(config.testSymbols)(
         'should return matching schema for %s ticker snapshot',

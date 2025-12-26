@@ -57,10 +57,31 @@ beforeAll(async () => {
     port: config.polygonPort,
   });
 
-  // Note: The Polygon API in the simulator queries the database directly,
-  // so we don't need an active session for these tests.
-  // Skip session creation to avoid triggering memory issues.
-  console.log('Skipping session creation - Polygon API queries database directly');
+  // Create a session for tests that require cached data (lastTrade, lastQuote, snapshots)
+  try {
+    console.log('Creating test session...');
+    testSessionId = await sessionManager.createSession({
+      symbols: config.testSymbols,
+      start_time: `${config.testStartDate}T09:30:00`,
+      end_time: `${config.testStartDate}T16:00:00`,
+      initial_capital: 100000,
+      speed_factor: 0,  // Run as fast as possible
+    });
+
+    console.log('Starting session...');
+    await sessionManager.startSession(testSessionId);
+
+    // Wait for session to process some events so we have cached data
+    console.log('Waiting for session to process events...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Set session ID on simulator client
+    simulatorClient.setSessionId(testSessionId);
+    console.log(`Session ${testSessionId} is ready`);
+  } catch (error) {
+    console.error('Warning: Failed to create session:', error);
+    console.log('Some tests requiring session data may fail');
+  }
 
   console.log('\nSetup complete - ready to run tests\n');
 }, 120000); // 2 minute timeout for setup

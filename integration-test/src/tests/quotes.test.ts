@@ -261,8 +261,7 @@ describe('Polygon Quotes API', () => {
     });
   });
 
-  // NOTE: Skipped because last quote requires an active session with cached data
-  describe.skip('GET /v2/last/nbbo/{symbol} [REQUIRES SESSION]', () => {
+  describe('GET /v2/last/nbbo/{symbol}', () => {
     describe('Required Parameters', () => {
       it.each(config.testSymbols)(
         'should return matching schema for %s last quote',

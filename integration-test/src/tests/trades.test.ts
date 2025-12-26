@@ -261,8 +261,7 @@ describe('Polygon Trades API', () => {
     });
   });
 
-  // NOTE: Skipped because last trade requires an active session with cached data
-  describe.skip('GET /v2/last/trade/{symbol} [REQUIRES SESSION]', () => {
+  describe('GET /v2/last/trade/{symbol}', () => {
     describe('Required Parameters', () => {
       it.each(config.testSymbols)(
         'should return matching schema for %s last trade',
