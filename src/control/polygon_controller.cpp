@@ -375,6 +375,85 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
     cb(json_resp(response));
 }
 
+void PolygonController::ticksTrades(const drogon::HttpRequestPtr& req,
+                                    std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+                                    std::string symbol, std::string date) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"results_count", 0}, {"success", true}, {"ticker", symbol}}));
+        return;
+    }
+
+    int limit = 1000;
+    auto limit_param = req->getParameter("limit");
+    if (!limit_param.empty()) {
+        limit = std::min(50000, std::stoi(limit_param));
+    }
+    bool reverse = req->getParameter("reverse") == "true";
+
+    auto date_ts = utils::parse_date(date);
+    if (!date_ts) {
+        cb(error_resp("Invalid date format (expected YYYY-MM-DD).", 400));
+        return;
+    }
+
+    Timestamp from_ts = *date_ts;
+    Timestamp to_ts = *date_ts + std::chrono::hours(24);
+
+    auto ts_param = req->getParameter("timestamp");
+    if (!ts_param.empty()) {
+        if (auto ts = utils::parse_ts_any(ts_param)) {
+            from_ts = *ts;
+        }
+    }
+    auto ts_limit_param = req->getParameter("timestampLimit");
+    if (!ts_limit_param.empty()) {
+        if (auto ts = utils::parse_ts_any(ts_limit_param)) {
+            to_ts = *ts;
+        }
+    }
+
+    if (from_ts > to_ts) std::swap(from_ts, to_ts);
+
+    auto trades = data_source->get_trades(symbol, from_ts, to_ts, limit);
+    if (reverse) {
+        std::reverse(trades.begin(), trades.end());
+    }
+
+    json results = json::array();
+    int64_t seq = 1;
+    for (const auto& t : trades) {
+        int64_t ts_ns = utils::ts_to_ns(t.timestamp);
+        json trade_item;
+        trade_item["T"] = symbol;
+        trade_item["t"] = ts_ns;
+        trade_item["y"] = ts_ns;
+        trade_item["f"] = ts_ns;
+        trade_item["q"] = seq++;
+        trade_item["c"] = parse_conditions(t.conditions);
+        trade_item["e"] = 0;
+        trade_item["i"] = utils::generate_id();
+        trade_item["p"] = t.price;
+        trade_item["s"] = t.size;
+        trade_item["x"] = t.exchange;
+        trade_item["r"] = 0;
+        trade_item["z"] = t.tape;
+        results.push_back(trade_item);
+    }
+
+    json response = {
+        {"results", results},
+        {"results_count", results.size()},
+        {"success", true},
+        {"ticker", symbol},
+        {"db_latency", 0}
+    };
+
+    cb(json_resp(response));
+}
+
 void PolygonController::lastTrade(const drogon::HttpRequestPtr& req,
                                   std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                                   std::string symbol) {
@@ -512,6 +591,86 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
         {"results", results},
         {"status", "OK"},
         {"request_id", utils::generate_id()}
+    };
+
+    cb(json_resp(response));
+}
+
+void PolygonController::ticksQuotes(const drogon::HttpRequestPtr& req,
+                                    std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+                                    std::string symbol, std::string date) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"results", json::array()}, {"results_count", 0}, {"success", true}, {"ticker", symbol}}));
+        return;
+    }
+
+    int limit = 1000;
+    auto limit_param = req->getParameter("limit");
+    if (!limit_param.empty()) {
+        limit = std::min(50000, std::stoi(limit_param));
+    }
+    bool reverse = req->getParameter("reverse") == "true";
+
+    auto date_ts = utils::parse_date(date);
+    if (!date_ts) {
+        cb(error_resp("Invalid date format (expected YYYY-MM-DD).", 400));
+        return;
+    }
+
+    Timestamp from_ts = *date_ts;
+    Timestamp to_ts = *date_ts + std::chrono::hours(24);
+
+    auto ts_param = req->getParameter("timestamp");
+    if (!ts_param.empty()) {
+        if (auto ts = utils::parse_ts_any(ts_param)) {
+            from_ts = *ts;
+        }
+    }
+    auto ts_limit_param = req->getParameter("timestampLimit");
+    if (!ts_limit_param.empty()) {
+        if (auto ts = utils::parse_ts_any(ts_limit_param)) {
+            to_ts = *ts;
+        }
+    }
+
+    if (from_ts > to_ts) std::swap(from_ts, to_ts);
+
+    auto quotes = data_source->get_quotes(symbol, from_ts, to_ts, limit);
+    if (reverse) {
+        std::reverse(quotes.begin(), quotes.end());
+    }
+
+    json results = json::array();
+    int64_t seq = 1;
+    for (const auto& q : quotes) {
+        int64_t ts_ns = utils::ts_to_ns(q.timestamp);
+        json quote_item;
+        quote_item["T"] = symbol;
+        quote_item["t"] = ts_ns;
+        quote_item["y"] = ts_ns;
+        quote_item["f"] = ts_ns;
+        quote_item["q"] = seq++;
+        quote_item["p"] = q.bid_price;
+        quote_item["s"] = q.bid_size;
+        quote_item["x"] = q.bid_exchange;
+        quote_item["P"] = q.ask_price;
+        quote_item["S"] = q.ask_size;
+        quote_item["X"] = q.ask_exchange;
+        quote_item["z"] = q.tape;
+        quote_item["c"] = json::array();
+        quote_item["i"] = json::array();
+        results.push_back(quote_item);
+    }
+
+    json response = {
+        {"results", results},
+        {"results_count", results.size()},
+        {"success", true},
+        {"ticker", symbol},
+        {"db_latency", 0}
     };
 
     cb(json_resp(response));
