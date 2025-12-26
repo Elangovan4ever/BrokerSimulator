@@ -58,6 +58,11 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
     ]},
+    { method: 'GET', path: '/v2/ticks/stocks/trades/{ticker}/{date}', description: 'Stock trades (tick data)', params: [
+      { name: 'ticker', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'date', type: 'path', required: true, description: 'Trading date (YYYY-MM-DD)', default: '2025-01-13' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '1000' },
+    ]},
     { method: 'GET', path: '/v2/last/trade/{symbol}', description: 'Last trade', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     { method: 'GET', path: '/v3/quotes/{symbol}', description: 'Get quotes', params: [
       { name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
@@ -68,11 +73,53 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
     ]},
+    { method: 'GET', path: '/v2/ticks/stocks/nbbo/{ticker}/{date}', description: 'Stock quotes (NBBO ticks)', params: [
+      { name: 'ticker', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'date', type: 'path', required: true, description: 'Trading date (YYYY-MM-DD)', default: '2025-01-13' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '1000' },
+    ]},
     { method: 'GET', path: '/v2/last/nbbo/{symbol}', description: 'Last NBBO quote', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Snapshots
     { method: 'GET', path: '/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}', description: 'Get ticker snapshot', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Ticker Details
     { method: 'GET', path: '/v3/reference/tickers/{symbol}', description: 'Get ticker details', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    // Corporate Actions & Reference
+    { method: 'GET', path: '/v3/reference/dividends', description: 'Dividends', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/v3/reference/splits', description: 'Stock splits', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/v2/reference/news', description: 'Ticker news', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/v2/reference/news', description: 'News insights (insights included in news results)', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/vX/reference/ipos', description: 'IPOs', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/stocks/v1/short-interest', description: 'Short interest', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/stocks/v1/short-volume', description: 'Short volume', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/vX/reference/tickers/{id}/events', description: 'Ticker events', params: [
+      { name: 'id', type: 'path', required: true, description: 'Ticker/CUSIP/FIGI', default: 'AAPL' },
+      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '10' },
+    ]},
+    { method: 'GET', path: '/vX/reference/financials', description: 'Financials', params: [
+      { name: 'ticker', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'timeframe', type: 'query', required: false, description: 'Timeframe (annual or quarterly)', default: 'annual' },
+    ]},
     // Market Status
     { method: 'GET', path: '/v1/marketstatus/now', description: 'Current market status' },
   ],
