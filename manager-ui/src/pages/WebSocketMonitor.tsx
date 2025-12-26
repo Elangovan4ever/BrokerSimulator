@@ -388,7 +388,7 @@ export function WebSocketMonitor() {
                 </SelectTrigger>
                 <SelectContent>
                   {sessions.length === 0 ? (
-                    <SelectItem value="" disabled>No sessions available</SelectItem>
+                    <SelectItem value="__no_sessions__" disabled>No sessions available</SelectItem>
                   ) : (
                     sessions.map((session) => (
                       <SelectItem key={session.id} value={session.id}>
