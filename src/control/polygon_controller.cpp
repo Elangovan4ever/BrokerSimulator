@@ -2420,17 +2420,19 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
     json results = json::array();
     for (const auto& r : rows) {
         json item;
-        if (!r.cik.empty()) item["cik"] = r.cik;
-        if (!r.company_name.empty()) item["company_name"] = r.company_name;
-        if (has_timestamp(r.start_date)) item["start_date"] = format_date(r.start_date);
-        if (has_timestamp(r.end_date)) item["end_date"] = format_date(r.end_date);
-        if (has_timestamp(r.filing_date)) item["filing_date"] = format_date(r.filing_date);
-        if (has_timestamp(r.acceptance_datetime)) item["acceptance_datetime"] = utils::ts_to_iso(r.acceptance_datetime);
-        if (!r.timeframe.empty()) item["timeframe"] = r.timeframe;
-        if (!r.fiscal_period.empty()) item["fiscal_period"] = r.fiscal_period;
-        if (!r.fiscal_year.empty()) item["fiscal_year"] = r.fiscal_year;
-        if (!r.source_filing_url.empty()) item["source_filing_url"] = r.source_filing_url;
-        if (!r.ticker.empty()) item["tickers"] = json::array({r.ticker});
+        item["cik"] = r.cik;
+        item["company_name"] = r.company_name;
+        item["start_date"] = has_timestamp(r.start_date) ? format_date(r.start_date) : "";
+        item["end_date"] = has_timestamp(r.end_date) ? format_date(r.end_date) : "";
+        item["filing_date"] = has_timestamp(r.filing_date) ? format_date(r.filing_date) : "";
+        item["acceptance_datetime"] = has_timestamp(r.acceptance_datetime) ? utils::ts_to_iso(r.acceptance_datetime) : "";
+        item["timeframe"] = r.timeframe;
+        item["fiscal_period"] = r.fiscal_period;
+        item["fiscal_year"] = r.fiscal_year;
+        item["source_filing_url"] = r.source_filing_url;
+        item["source_filing_file_url"] = "";
+        item["sic"] = "";
+        item["tickers"] = r.ticker.empty() ? json::array() : json::array({r.ticker});
 
         json financials = json::object();
         financials["balance_sheet"] = build_section(r.balance_sheet, kBalanceSheetMeta);
