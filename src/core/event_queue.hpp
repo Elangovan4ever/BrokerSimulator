@@ -130,7 +130,7 @@ public:
     std::optional<Event> pop() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (heap_.empty()) return std::nullopt;
-        Event ev = std::move(const_cast<Event&>(heap_.top()));
+        Event ev = heap_.top();  // Copy, not move - pop() needs valid top element
         heap_.pop();
         return ev;
     }
@@ -139,7 +139,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [&]{ return stopped_.load(std::memory_order_acquire) || !heap_.empty(); });
         if (stopped_.load(std::memory_order_acquire) && heap_.empty()) return std::nullopt;
-        Event ev = std::move(const_cast<Event&>(heap_.top()));
+        Event ev = heap_.top();  // Copy, not move - pop() needs valid top element
         heap_.pop();
         return ev;
     }
