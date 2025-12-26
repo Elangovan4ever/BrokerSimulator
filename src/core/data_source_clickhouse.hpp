@@ -75,6 +75,7 @@ public:
                                               Timestamp start_time,
                                               Timestamp end_time,
                                               size_t limit) override;
+    std::vector<DividendRecord> get_stock_dividends(const StockDividendsQuery& query) override;
 
     std::vector<SplitRecord> get_splits(const std::string& symbol,
                                         Timestamp start_time,

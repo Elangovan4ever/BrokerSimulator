@@ -636,6 +636,140 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
     return out;
 }
 
+std::vector<DividendRecord> ClickHouseDataSource::get_stock_dividends(const StockDividendsQuery& query) {
+    std::vector<DividendRecord> out;
+    if (!client_) return out;
+
+    std::vector<std::string> where;
+    auto add_str = [&where](const std::string& col, const std::optional<std::string>& value, const char* op) {
+        if (!value || value->empty()) return;
+        where.push_back(fmt::format("{} {} '{}'", col, op, *value));
+    };
+    auto add_date = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
+        if (!value) return;
+        auto ts = format_timestamp(*value);
+        where.push_back(fmt::format("{} {} toDate('{}')", col, op, ts));
+    };
+    auto add_double = [&where](const std::string& col, const std::optional<double>& value, const char* op) {
+        if (!value) return;
+        where.push_back(fmt::format("toFloat64({}) {} {}", col, op, *value));
+    };
+
+    add_str("ticker", query.ticker, "=");
+    add_str("ticker", query.ticker_gt, ">");
+    add_str("ticker", query.ticker_gte, ">=");
+    add_str("ticker", query.ticker_lt, "<");
+    add_str("ticker", query.ticker_lte, "<=");
+
+    add_date("ex_dividend_date", query.ex_dividend_date, "=");
+    add_date("ex_dividend_date", query.ex_dividend_date_gt, ">");
+    add_date("ex_dividend_date", query.ex_dividend_date_gte, ">=");
+    add_date("ex_dividend_date", query.ex_dividend_date_lt, "<");
+    add_date("ex_dividend_date", query.ex_dividend_date_lte, "<=");
+
+    add_date("record_date", query.record_date, "=");
+    add_date("record_date", query.record_date_gt, ">");
+    add_date("record_date", query.record_date_gte, ">=");
+    add_date("record_date", query.record_date_lt, "<");
+    add_date("record_date", query.record_date_lte, "<=");
+
+    add_date("declaration_date", query.declaration_date, "=");
+    add_date("declaration_date", query.declaration_date_gt, ">");
+    add_date("declaration_date", query.declaration_date_gte, ">=");
+    add_date("declaration_date", query.declaration_date_lt, "<");
+    add_date("declaration_date", query.declaration_date_lte, "<=");
+
+    add_date("pay_date", query.pay_date, "=");
+    add_date("pay_date", query.pay_date_gt, ">");
+    add_date("pay_date", query.pay_date_gte, ">=");
+    add_date("pay_date", query.pay_date_lt, "<");
+    add_date("pay_date", query.pay_date_lte, "<=");
+
+    add_double("cash_amount", query.cash_amount, "=");
+    add_double("cash_amount", query.cash_amount_gt, ">");
+    add_double("cash_amount", query.cash_amount_gte, ">=");
+    add_double("cash_amount", query.cash_amount_lt, "<");
+    add_double("cash_amount", query.cash_amount_lte, "<=");
+
+    if (query.frequency) {
+        where.push_back(fmt::format("frequency = {}", *query.frequency));
+    }
+    if (query.dividend_type && !query.dividend_type->empty()) {
+        where.push_back(fmt::format("dividend_type = '{}'", *query.dividend_type));
+    }
+    if (query.max_ex_dividend_date) {
+        auto ts = format_timestamp(*query.max_ex_dividend_date);
+        where.push_back(fmt::format("ex_dividend_date <= toDate('{}')", ts));
+    }
+
+    std::string where_clause;
+    if (!where.empty()) {
+        where_clause = "WHERE ";
+        for (size_t i = 0; i < where.size(); ++i) {
+            if (i > 0) where_clause += " AND ";
+            where_clause += where[i];
+        }
+    }
+
+    std::string sort_col = "ex_dividend_date";
+    if (query.sort == "pay_date") sort_col = "pay_date";
+    else if (query.sort == "declaration_date") sort_col = "declaration_date";
+    else if (query.sort == "record_date") sort_col = "record_date";
+    else if (query.sort == "cash_amount") sort_col = "cash_amount";
+    else if (query.sort == "ticker") sort_col = "ticker";
+
+    std::string order = (query.order == "asc") ? "ASC" : "DESC";
+
+    std::string limit_clause;
+    if (query.limit > 0) {
+        limit_clause = fmt::format(" LIMIT {} OFFSET {}", query.limit, query.offset);
+    }
+
+    std::string sql = fmt::format(R"(
+        SELECT CAST(id AS String),
+               CAST(ticker AS String),
+               cash_amount,
+               CAST(currency AS String),
+               CAST(dividend_type AS String),
+               frequency,
+               ex_dividend_date,
+               declaration_date,
+               record_date,
+               pay_date
+        FROM stock_dividends
+        {}
+        ORDER BY {} {}
+        {}
+    )", where_clause, sort_col, order, limit_clause);
+
+    try {
+        client_->Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                DividendRecord d;
+                d.id = block[0]->As<clickhouse::ColumnString>()->At(row);
+                d.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                if (auto v = get_nullable_float(block[2], row)) {
+                    d.amount = *v;
+                    d.adjusted_amount = *v;
+                }
+                if (auto v = get_nullable_string(block[3], row)) d.currency = *v;
+                if (auto v = get_nullable_string(block[4], row)) d.dividend_type = *v;
+                if (auto v = get_nullable_uint16(block[5], row)) d.frequency = static_cast<int>(*v);
+                d.date = extract_ts_any(block[6], row);
+                d.declaration_date = extract_ts_any(block[7], row);
+                d.record_date = extract_ts_any(block[8], row);
+                d.pay_date = extract_ts_any(block[9], row);
+                out.push_back(std::move(d));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_dividends failed: {}", e.what());
+        out.clear();
+    }
+
+    return out;
+}
+
 std::vector<SplitRecord> ClickHouseDataSource::get_splits(const std::string& symbol,
                                                           Timestamp start_time,
                                                           Timestamp end_time,

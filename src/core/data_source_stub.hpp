@@ -109,6 +109,11 @@ public:
         return {};
     }
 
+    std::vector<DividendRecord> get_stock_dividends(const StockDividendsQuery& query) override {
+        (void)query;
+        return {};
+    }
+
     std::vector<SplitRecord> get_splits(const std::string& symbol,
                                         Timestamp start_time,
                                         Timestamp end_time,

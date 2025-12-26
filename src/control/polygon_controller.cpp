@@ -2,8 +2,12 @@
 #include <spdlog/spdlog.h>
 #include <drogon/drogon.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdlib>
+#include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
 using json = nlohmann::json;
 
@@ -81,6 +85,111 @@ json parse_conditions(const std::string& raw) {
     }
 
     return out;
+}
+
+std::string base64_decode(const std::string& input) {
+    static const std::string kChars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::array<int, 256> table{};
+    table.fill(-1);
+    for (size_t i = 0; i < kChars.size(); ++i) {
+        table[static_cast<unsigned char>(kChars[i])] = static_cast<int>(i);
+    }
+
+    int val = 0;
+    int valb = -8;
+    for (unsigned char c : input) {
+        if (table[c] == -1) break;
+        val = (val << 6) + table[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(char((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+std::string base64_encode(const std::string& input) {
+    static const char kChars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0;
+    int valb = -6;
+    for (unsigned char c : input) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(kChars[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out.push_back(kChars[((val << 8) >> (valb + 8)) & 0x3F]);
+    while (out.size() % 4) out.push_back('=');
+    return out;
+}
+
+std::string url_decode(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            std::string hex = value.substr(i + 1, 2);
+            char ch = static_cast<char>(std::strtol(hex.c_str(), nullptr, 16));
+            out.push_back(ch);
+            i += 2;
+        } else if (value[i] == '+') {
+            out.push_back(' ');
+        } else {
+            out.push_back(value[i]);
+        }
+    }
+    return out;
+}
+
+std::string url_encode(const std::string& value) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+    for (unsigned char c : value) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << '%' << std::uppercase << std::setw(2)
+                    << static_cast<int>(c) << std::nouppercase;
+        }
+    }
+    return escaped.str();
+}
+
+std::unordered_map<std::string, std::string> parse_query_string(const std::string& input) {
+    std::unordered_map<std::string, std::string> params;
+    std::stringstream ss(input);
+    std::string pair;
+    while (std::getline(ss, pair, '&')) {
+        if (pair.empty()) continue;
+        auto pos = pair.find('=');
+        if (pos == std::string::npos) {
+            params[url_decode(pair)] = "";
+            continue;
+        }
+        auto key = url_decode(pair.substr(0, pos));
+        auto val = url_decode(pair.substr(pos + 1));
+        params[key] = val;
+    }
+    return params;
+}
+
+std::string build_query_string(const std::vector<std::pair<std::string, std::string>>& params) {
+    std::ostringstream out;
+    bool first = true;
+    for (const auto& [key, val] : params) {
+        if (!first) out << '&';
+        first = false;
+        out << url_encode(key) << '=' << url_encode(val);
+    }
+    return out.str();
 }
 } // namespace
 
@@ -751,9 +860,9 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
                                   std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
 
-    auto ticker = req->getParameter("ticker");
-    if (ticker.empty()) {
-        cb(error_resp("ticker required", 400));
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
         return;
     }
 
@@ -763,75 +872,194 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
         return;
     }
 
-    auto session = get_session(req);
-    Timestamp start_ts{};
-    Timestamp end_ts{};
-    bool have_range = false;
-    if (session) {
-        start_ts = session->config.start_time;
-        end_ts = session->config.end_time;
-        have_range = true;
+    auto cursor = req->getParameter("cursor");
+    bool has_cursor = !cursor.empty();
+    std::unordered_map<std::string, std::string> param_values;
+    if (has_cursor) {
+        auto decoded = base64_decode(cursor);
+        param_values = parse_query_string(decoded);
     }
 
-    auto ex_date = req->getParameter("ex_dividend_date");
-    auto ex_gte = req->getParameter("ex_dividend_date.gte");
-    auto ex_gt = req->getParameter("ex_dividend_date.gt");
-    auto ex_lte = req->getParameter("ex_dividend_date.lte");
-    auto ex_lt = req->getParameter("ex_dividend_date.lt");
+    auto get_param = [&](const std::string& key) -> std::string {
+        if (has_cursor) {
+            auto it = param_values.find(key);
+            return it != param_values.end() ? it->second : "";
+        }
+        return req->getParameter(key);
+    };
 
-    if (!ex_date.empty()) {
-        if (auto ts = utils::parse_date(ex_date)) {
-            start_ts = *ts;
-            end_ts = *ts + std::chrono::hours(24);
-            have_range = true;
+    bool has_error = false;
+    auto fail = [&](const std::string& message) {
+        if (!has_error) {
+            cb(error_resp(message, 400));
+            has_error = true;
         }
-    }
-    if (!ex_gte.empty()) {
-        if (auto ts = utils::parse_date(ex_gte)) {
-            start_ts = *ts;
-            have_range = true;
-        }
-    } else if (!ex_gt.empty()) {
-        if (auto ts = utils::parse_date(ex_gt)) {
-            start_ts = *ts + std::chrono::hours(24);
-            have_range = true;
-        }
-    }
-    if (!ex_lte.empty()) {
-        if (auto ts = utils::parse_date(ex_lte)) {
-            end_ts = *ts + std::chrono::hours(24);
-            have_range = true;
-        }
-    } else if (!ex_lt.empty()) {
-        if (auto ts = utils::parse_date(ex_lt)) {
-            end_ts = *ts;
-            have_range = true;
-        }
-    }
+    };
 
-    if (!have_range) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+    auto parse_date_param = [&](const std::string& key, std::optional<Timestamp>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        auto ts = utils::parse_date(v);
+        if (!ts) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        out = ts;
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_double_param = [&](const std::string& key, std::optional<double>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stod(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    auto parse_int_param = [&](const std::string& key, std::optional<int>& out) {
+        auto v = get_param(key);
+        if (v.empty() || has_error) return;
+        try {
+            out = std::stoi(v);
+        } catch (...) {
+            fail("Invalid value for " + key + " parameter.");
+            return;
+        }
+        if (!has_cursor) param_values[key] = v;
+    };
+
+    StockDividendsQuery query;
+    query.max_ex_dividend_date = session->time_engine->current_time();
+
+    std::string sort = get_param("sort");
+    if (sort.empty()) sort = "ex_dividend_date";
+    if (sort != "ex_dividend_date" && sort != "pay_date" &&
+        sort != "declaration_date" && sort != "record_date" &&
+        sort != "cash_amount" && sort != "ticker") {
+        cb(error_resp("Invalid value for sort parameter.", 400));
         return;
     }
+    query.sort = sort;
+    if (!has_cursor && !sort.empty()) param_values["sort"] = sort;
 
-    if (end_ts < start_ts) std::swap(start_ts, end_ts);
+    std::string order = get_param("order");
+    if (order.empty()) order = "desc";
+    if (order != "asc" && order != "desc") {
+        cb(error_resp("Invalid value for order parameter.", 400));
+        return;
+    }
+    query.order = order;
+    if (!has_cursor && !order.empty()) param_values["order"] = order;
 
-    int limit = 100;
-    auto limit_param = req->getParameter("limit");
-    if (!limit_param.empty()) {
-        limit = std::min(50000, std::stoi(limit_param));
+    int limit = 10;
+    std::optional<int> limit_param;
+    parse_int_param("limit", limit_param);
+    if (limit_param) limit = *limit_param;
+    if (has_error) return;
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+    query.limit = static_cast<size_t>(limit);
+
+    if (has_cursor) {
+        std::optional<int> ap;
+        parse_int_param("ap", ap);
+        if (has_error) return;
+        if (ap && *ap < 0) {
+            cb(error_resp("Invalid value for cursor parameter.", 400));
+            return;
+        }
+        if (ap) query.offset = static_cast<size_t>(*ap);
     }
 
-    auto rows = data_source->get_dividends(ticker, start_ts, end_ts, limit);
+    auto ticker = get_param("ticker");
+    if (!ticker.empty()) {
+        query.ticker = ticker;
+        if (!has_cursor) param_values["ticker"] = ticker;
+    }
+
+    parse_date_param("ex_dividend_date", query.ex_dividend_date);
+    parse_date_param("ex_dividend_date.gte", query.ex_dividend_date_gte);
+    parse_date_param("ex_dividend_date.gt", query.ex_dividend_date_gt);
+    parse_date_param("ex_dividend_date.lte", query.ex_dividend_date_lte);
+    parse_date_param("ex_dividend_date.lt", query.ex_dividend_date_lt);
+
+    parse_date_param("record_date", query.record_date);
+    parse_date_param("record_date.gte", query.record_date_gte);
+    parse_date_param("record_date.gt", query.record_date_gt);
+    parse_date_param("record_date.lte", query.record_date_lte);
+    parse_date_param("record_date.lt", query.record_date_lt);
+
+    parse_date_param("declaration_date", query.declaration_date);
+    parse_date_param("declaration_date.gte", query.declaration_date_gte);
+    parse_date_param("declaration_date.gt", query.declaration_date_gt);
+    parse_date_param("declaration_date.lte", query.declaration_date_lte);
+    parse_date_param("declaration_date.lt", query.declaration_date_lt);
+
+    parse_date_param("pay_date", query.pay_date);
+    parse_date_param("pay_date.gte", query.pay_date_gte);
+    parse_date_param("pay_date.gt", query.pay_date_gt);
+    parse_date_param("pay_date.lte", query.pay_date_lte);
+    parse_date_param("pay_date.lt", query.pay_date_lt);
+
+    parse_double_param("cash_amount", query.cash_amount);
+    parse_double_param("cash_amount.gte", query.cash_amount_gte);
+    parse_double_param("cash_amount.gt", query.cash_amount_gt);
+    parse_double_param("cash_amount.lte", query.cash_amount_lte);
+    parse_double_param("cash_amount.lt", query.cash_amount_lt);
+
+    parse_int_param("frequency", query.frequency);
+    auto dividend_type = get_param("dividend_type");
+    if (!dividend_type.empty()) {
+        query.dividend_type = dividend_type;
+        if (!has_cursor) param_values["dividend_type"] = dividend_type;
+    }
+
+    auto ticker_gte = get_param("ticker.gte");
+    if (!ticker_gte.empty()) {
+        query.ticker_gte = ticker_gte;
+        if (!has_cursor) param_values["ticker.gte"] = ticker_gte;
+    }
+    auto ticker_gt = get_param("ticker.gt");
+    if (!ticker_gt.empty()) {
+        query.ticker_gt = ticker_gt;
+        if (!has_cursor) param_values["ticker.gt"] = ticker_gt;
+    }
+    auto ticker_lte = get_param("ticker.lte");
+    if (!ticker_lte.empty()) {
+        query.ticker_lte = ticker_lte;
+        if (!has_cursor) param_values["ticker.lte"] = ticker_lte;
+    }
+    auto ticker_lt = get_param("ticker.lt");
+    if (!ticker_lt.empty()) {
+        query.ticker_lt = ticker_lt;
+        if (!has_cursor) param_values["ticker.lt"] = ticker_lt;
+    }
+
+    if (has_error) return;
+
+    StockDividendsQuery fetch_query = query;
+    fetch_query.limit = static_cast<size_t>(limit + 1);
+    auto rows = data_source->get_stock_dividends(fetch_query);
+
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(limit);
+
     json results = json::array();
     for (const auto& d : rows) {
+        if (d.symbol.empty() || !has_timestamp(d.date)) continue;
         json item;
         item["ticker"] = d.symbol;
         item["cash_amount"] = d.amount;
-        item["dividend_type"] = "CD";
+        item["dividend_type"] = d.dividend_type.empty() ? "CD" : d.dividend_type;
         item["ex_dividend_date"] = format_date(d.date);
-        item["frequency"] = 0;
-        item["id"] = utils::generate_id();
+        item["frequency"] = d.frequency;
+        item["id"] = d.id.empty() ? utils::generate_id() : d.id;
         if (!d.currency.empty()) item["currency"] = d.currency;
         if (has_timestamp(d.pay_date)) item["pay_date"] = format_date(d.pay_date);
         if (has_timestamp(d.record_date)) item["record_date"] = format_date(d.record_date);
@@ -844,6 +1072,49 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
         {"status", "OK"},
         {"request_id", utils::generate_id()}
     };
+
+    if (has_more) {
+        param_values["ap"] = std::to_string(query.offset + query.limit);
+        if (param_values.find("as") == param_values.end()) param_values["as"] = "";
+        param_values["limit"] = std::to_string(limit);
+        param_values["order"] = order;
+        param_values["sort"] = sort;
+
+        std::vector<std::string> order_keys = {
+            "ap", "as",
+            "ticker", "ticker.gte", "ticker.gt", "ticker.lte", "ticker.lt",
+            "ex_dividend_date", "ex_dividend_date.gte", "ex_dividend_date.gt",
+            "ex_dividend_date.lte", "ex_dividend_date.lt",
+            "record_date", "record_date.gte", "record_date.gt",
+            "record_date.lte", "record_date.lt",
+            "declaration_date", "declaration_date.gte", "declaration_date.gt",
+            "declaration_date.lte", "declaration_date.lt",
+            "pay_date", "pay_date.gte", "pay_date.gt",
+            "pay_date.lte", "pay_date.lt",
+            "cash_amount", "cash_amount.gte", "cash_amount.gt",
+            "cash_amount.lte", "cash_amount.lt",
+            "frequency", "dividend_type",
+            "limit", "order", "sort"
+        };
+
+        std::vector<std::pair<std::string, std::string>> cursor_params;
+        for (const auto& key : order_keys) {
+            auto it = param_values.find(key);
+            if (it == param_values.end()) continue;
+            if (it->second.empty() && key != "as") continue;
+            cursor_params.emplace_back(key, it->second);
+        }
+
+        auto query_str = build_query_string(cursor_params);
+        auto next_cursor = base64_encode(query_str);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/v3/reference/dividends?cursor="
+            : proto + "://" + host + "/v3/reference/dividends?cursor=";
+        response["next_url"] = base + next_cursor;
+    }
 
     cb(json_resp(response));
 }

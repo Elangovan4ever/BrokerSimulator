@@ -105,6 +105,7 @@ struct BasicFinancialsRecord {
 };
 
 struct DividendRecord {
+    std::string id;
     std::string symbol;
     Timestamp date;
     double amount{0.0};
@@ -113,6 +114,48 @@ struct DividendRecord {
     Timestamp record_date;
     Timestamp declaration_date;
     std::string currency;
+    int frequency{0};
+    std::string dividend_type;
+};
+
+struct StockDividendsQuery {
+    std::optional<std::string> ticker;
+    std::optional<std::string> ticker_gt;
+    std::optional<std::string> ticker_gte;
+    std::optional<std::string> ticker_lt;
+    std::optional<std::string> ticker_lte;
+    std::optional<Timestamp> ex_dividend_date;
+    std::optional<Timestamp> ex_dividend_date_gt;
+    std::optional<Timestamp> ex_dividend_date_gte;
+    std::optional<Timestamp> ex_dividend_date_lt;
+    std::optional<Timestamp> ex_dividend_date_lte;
+    std::optional<Timestamp> record_date;
+    std::optional<Timestamp> record_date_gt;
+    std::optional<Timestamp> record_date_gte;
+    std::optional<Timestamp> record_date_lt;
+    std::optional<Timestamp> record_date_lte;
+    std::optional<Timestamp> declaration_date;
+    std::optional<Timestamp> declaration_date_gt;
+    std::optional<Timestamp> declaration_date_gte;
+    std::optional<Timestamp> declaration_date_lt;
+    std::optional<Timestamp> declaration_date_lte;
+    std::optional<Timestamp> pay_date;
+    std::optional<Timestamp> pay_date_gt;
+    std::optional<Timestamp> pay_date_gte;
+    std::optional<Timestamp> pay_date_lt;
+    std::optional<Timestamp> pay_date_lte;
+    std::optional<double> cash_amount;
+    std::optional<double> cash_amount_gt;
+    std::optional<double> cash_amount_gte;
+    std::optional<double> cash_amount_lt;
+    std::optional<double> cash_amount_lte;
+    std::optional<int> frequency;
+    std::optional<std::string> dividend_type;
+    std::string sort{"ex_dividend_date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_ex_dividend_date;
 };
 
 struct SplitRecord {
@@ -228,6 +271,7 @@ public:
                                                       Timestamp start_time,
                                                       Timestamp end_time,
                                                       size_t limit) = 0;
+    virtual std::vector<DividendRecord> get_stock_dividends(const StockDividendsQuery& query) = 0;
 
     virtual std::vector<SplitRecord> get_splits(const std::string& symbol,
                                                 Timestamp start_time,
