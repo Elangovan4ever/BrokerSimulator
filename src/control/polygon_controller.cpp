@@ -344,13 +344,9 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
         {"adjusted", adjusted},
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}  // Always include for Polygon API compatibility
     };
-
-    // Add next_url for pagination if needed
-    if (static_cast<int>(results.size()) >= limit) {
-        response["next_url"] = nullptr;  // Would contain pagination URL
-    }
 
     cb(json_resp(response));
 }
@@ -490,6 +486,9 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
                     trade_item["sip_timestamp"] = utils::ts_to_ns(t.timestamp);
                     trade_item["size"] = t.size;
                     trade_item["tape"] = t.tape;
+                    trade_item["sequence_number"] = utils::ts_to_ns(t.timestamp);
+                    trade_item["trf_id"] = 0;
+                    trade_item["trf_timestamp"] = utils::ts_to_ns(t.timestamp);
                     results.push_back(trade_item);
                 }
             }
@@ -499,12 +498,9 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
-
-    if (static_cast<int>(results.size()) >= limit) {
-        response["next_url"] = nullptr;
-    }
 
     cb(json_resp(response));
 }
@@ -715,6 +711,7 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
                     quote_item["participant_timestamp"] = utils::ts_to_ns(q.timestamp);
                     quote_item["sip_timestamp"] = utils::ts_to_ns(q.timestamp);
                     quote_item["tape"] = q.tape;
+                    quote_item["sequence_number"] = utils::ts_to_ns(q.timestamp);
                     results.push_back(quote_item);
                 }
             }
@@ -726,6 +723,7 @@ void PolygonController::quotes(const drogon::HttpRequestPtr& req,
         {"status", "OK"},
         {"request_id", utils::generate_id()}
     };
+    response["next_url"] = nullptr;
 
     cb(json_resp(response));
 }
@@ -830,6 +828,9 @@ void PolygonController::lastQuote(const drogon::HttpRequestPtr& req,
         results["x"] = 1;  // Default exchange
         results["y"] = 1;  // Default exchange
         results["z"] = 1;
+        results["X"] = 0;
+        results["i"] = "0";
+        results["q"] = 0;
 
         json response;
         response["status"] = "OK";
@@ -862,6 +863,9 @@ void PolygonController::lastQuote(const drogon::HttpRequestPtr& req,
             {"x", 0},
             {"y", 0},
             {"z", 1}
+            ,{"X", 0},
+            {"i", "0"},
+            {"q", 0}
         }}
     };
 
@@ -874,13 +878,13 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -1082,7 +1086,8 @@ void PolygonController::dividends(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -1137,13 +1142,13 @@ void PolygonController::splits(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -1295,7 +1300,8 @@ void PolygonController::splits(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -1564,13 +1570,13 @@ void PolygonController::ipos(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -1751,7 +1757,8 @@ void PolygonController::ipos(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -1805,13 +1812,13 @@ void PolygonController::shortInterest(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -1950,7 +1957,8 @@ void PolygonController::shortInterest(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -1996,13 +2004,13 @@ void PolygonController::shortVolume(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -2138,7 +2146,8 @@ void PolygonController::shortVolume(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -2184,13 +2193,13 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
 
     auto session = get_session(req);
     if (!session || !session->time_engine) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
     auto data_source = session_mgr_->api_data_source();
     if (!data_source) {
-        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}}));
+        cb(json_resp({{"results", json::array()}, {"status", "OK"}, {"request_id", utils::generate_id()}, {"next_url", nullptr}}));
         return;
     }
 
@@ -2450,7 +2459,8 @@ void PolygonController::financials(const drogon::HttpRequestPtr& req,
     json response = {
         {"results", results},
         {"status", "OK"},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     if (has_more) {
@@ -2522,12 +2532,20 @@ void PolygonController::snapshotAll(const drogon::HttpRequestPtr& req,
                 {"t", q.ts_ns}
             };
 
+            // Add day, min, prevDay for Polygon API compatibility
+            ticker_data["day"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+            ticker_data["min"] = {{"av", 0}, {"t", 0}, {"n", 0}, {"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+            ticker_data["prevDay"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+
             auto trade_it = trades_cache_[session->id].find(sym);
             if (trade_it != trades_cache_[session->id].end()) {
                 ticker_data["lastTrade"] = {
                     {"p", trade_it->second.price},
                     {"s", static_cast<int64_t>(trade_it->second.size)},
-                    {"t", trade_it->second.ts_ns}
+                    {"t", trade_it->second.ts_ns},
+                    {"i", "0"},
+                    {"x", 0},
+                    {"c", json::array()}
                 };
             }
 
@@ -2570,6 +2588,11 @@ void PolygonController::snapshotTicker(const drogon::HttpRequestPtr& req,
         };
     }
 
+    // Add day, min, prevDay for Polygon API compatibility
+    ticker_data["day"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+    ticker_data["min"] = {{"av", 0}, {"t", 0}, {"n", 0}, {"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+    ticker_data["prevDay"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+
     // Get cached trade
     std::lock_guard<std::mutex> lock(cache_mutex_);
     auto trade_it = trades_cache_[session->id].find(symbol);
@@ -2577,7 +2600,10 @@ void PolygonController::snapshotTicker(const drogon::HttpRequestPtr& req,
         ticker_data["lastTrade"] = {
             {"p", trade_it->second.price},
             {"s", static_cast<int64_t>(trade_it->second.size)},
-            {"t", trade_it->second.ts_ns}
+            {"t", trade_it->second.ts_ns},
+            {"i", "0"},
+            {"x", 0},
+            {"c", json::array()}
         };
         ticker_data["updated"] = trade_it->second.ts_ns;
     }
@@ -2644,7 +2670,8 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
             {"list_date", "2000-01-01"},
             {"branding", {}},
             {"share_class_shares_outstanding", 0},
-            {"weighted_shares_outstanding", 0}
+            {"weighted_shares_outstanding", 0},
+            {"round_lot", 100}
         }}
     };
 
@@ -2672,6 +2699,9 @@ void PolygonController::tickersList(const drogon::HttpRequestPtr& req,
         ticker_item["active"] = true;
         ticker_item["currency_name"] = "usd";
         ticker_item["last_updated_utc"] = "2024-01-01T00:00:00Z";
+        ticker_item["cik"] = "0000000000";
+        ticker_item["composite_figi"] = "BBG000000000";
+        ticker_item["share_class_figi"] = "BBG000000000";
         results.push_back(ticker_item);
     }
 
@@ -2679,7 +2709,8 @@ void PolygonController::tickersList(const drogon::HttpRequestPtr& req,
         {"status", "OK"},
         {"count", results.size()},
         {"results", results},
-        {"request_id", utils::generate_id()}
+        {"request_id", utils::generate_id()},
+        {"next_url", nullptr}
     };
 
     cb(json_resp(response));
@@ -2702,7 +2733,8 @@ void PolygonController::sma(const drogon::HttpRequestPtr& req,
         {"results", {
             {"underlying", {{"url", ""}}},
             {"values", json::array()}
-        }}
+        }},
+        {"next_url", nullptr}
     };
 
     cb(json_resp(response));
@@ -2719,7 +2751,8 @@ void PolygonController::ema(const drogon::HttpRequestPtr& req,
         {"results", {
             {"underlying", {{"url", ""}}},
             {"values", json::array()}
-        }}
+        }},
+        {"next_url", nullptr}
     };
 
     cb(json_resp(response));
@@ -2736,7 +2769,8 @@ void PolygonController::rsi(const drogon::HttpRequestPtr& req,
         {"results", {
             {"underlying", {{"url", ""}}},
             {"values", json::array()}
-        }}
+        }},
+        {"next_url", nullptr}
     };
 
     cb(json_resp(response));
@@ -2753,7 +2787,8 @@ void PolygonController::macd(const drogon::HttpRequestPtr& req,
         {"results", {
             {"underlying", {{"url", ""}}},
             {"values", json::array()}
-        }}
+        }},
+        {"next_url", nullptr}
     };
 
     cb(json_resp(response));
@@ -2823,7 +2858,19 @@ void PolygonController::marketStatus(const drogon::HttpRequestPtr& req,
             {"crypto", "open"}
         }},
         {"earlyHours", early_hours},
-        {"afterHours", after_hours}
+        {"afterHours", after_hours},
+        {"indicesGroups", {
+            {"s_and_p", "open"},
+            {"societe_generale", "open"},
+            {"msci", "open"},
+            {"ftse_russell", "open"},
+            {"mstar", "open"},
+            {"mstarc", "open"},
+            {"cccy", "open"},
+            {"nasdaq", "open"},
+            {"dow_jones", "open"},
+            {"cgi", "open"}
+        }}
     };
 
     cb(json_resp(response));
