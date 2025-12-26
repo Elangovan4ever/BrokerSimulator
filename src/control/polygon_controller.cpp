@@ -338,6 +338,7 @@ void PolygonController::aggs(const drogon::HttpRequestPtr& req,
 
     json response = {
         {"ticker", symbol},
+        {"count", results.size()},
         {"queryCount", results.size()},
         {"resultsCount", results.size()},
         {"adjusted", adjusted},
@@ -368,6 +369,7 @@ void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
 
     json response = {
         {"ticker", symbol},
+        {"count", results.size()},
         {"queryCount", results.size()},
         {"resultsCount", results.size()},
         {"adjusted", true},
@@ -390,6 +392,7 @@ void PolygonController::groupedDaily(const drogon::HttpRequestPtr& req,
     // For simulation, return empty or sample data
 
     json response = {
+        {"count", results.size()},
         {"queryCount", results.size()},
         {"resultsCount", results.size()},
         {"adjusted", true},
