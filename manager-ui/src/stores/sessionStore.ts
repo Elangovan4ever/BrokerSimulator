@@ -1,7 +1,16 @@
 import { create } from 'zustand';
 import { AxiosError } from 'axios';
 import { sessionsApi } from '@/api/sessions';
-import type { Session, SessionConfig } from '@/types';
+import type { Session, SessionConfig, SessionStatus } from '@/types';
+
+const statusMap: Record<number, SessionStatus> = {
+  0: 'CREATED',
+  1: 'RUNNING',
+  2: 'PAUSED',
+  3: 'STOPPED',
+  4: 'COMPLETED',
+  5: 'ERROR',
+};
 
 // Extract error message from axios error or generic error
 function getErrorMessage(error: unknown): string {
@@ -31,6 +40,13 @@ interface SessionState {
   stopSession: (sessionId: string) => Promise<void>;
   setSpeed: (sessionId: string, speed: number) => Promise<void>;
   jumpToTime: (sessionId: string, timestamp: string) => Promise<void>;
+  updateSessionFromWs: (update: {
+    session_id: string;
+    status?: number | Session['status'];
+    current_time_ns?: number;
+    events_processed?: number;
+    speed_factor?: number;
+  }) => void;
   selectSession: (sessionId: string | null) => void;
   clearError: () => void;
 }
@@ -169,5 +185,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   clearError: () => {
     set({ error: null });
+  },
+
+  updateSessionFromWs: (update) => {
+    set(state => {
+      let didUpdate = false;
+      const sessions = state.sessions.map(session => {
+        if (session.id !== update.session_id) return session;
+        didUpdate = true;
+
+        const status =
+          typeof update.status === 'number'
+            ? (statusMap[update.status] || session.status)
+            : (update.status || session.status);
+
+        const current_time = update.current_time_ns
+          ? new Date(update.current_time_ns / 1e6).toISOString()
+          : session.current_time;
+
+        return {
+          ...session,
+          status,
+          current_time,
+          events_processed: update.events_processed ?? session.events_processed,
+          speed_factor: update.speed_factor ?? session.speed_factor,
+        };
+      });
+
+      return didUpdate ? { sessions } : state;
+    });
   },
 }));
