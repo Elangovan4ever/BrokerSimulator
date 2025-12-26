@@ -958,14 +958,11 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
             std::vector<std::string> out;
             auto arr = col->As<clickhouse::ColumnArray>();
             if (!arr) return out;
-            const auto& offsets = arr->GetOffsets();
-            size_t start = row == 0 ? 0 : offsets[row - 1];
-            size_t end = offsets[row];
-            auto data = arr->GetData();
-            auto str_col = data->As<clickhouse::ColumnString>();
+            auto row_col = arr->GetAsColumn(row);
+            auto str_col = row_col->As<clickhouse::ColumnString>();
             if (!str_col) return out;
-            out.reserve(end - start);
-            for (size_t i = start; i < end; ++i) {
+            out.reserve(str_col->Size());
+            for (size_t i = 0; i < str_col->Size(); ++i) {
                 auto sv = str_col->At(i);
                 out.emplace_back(sv.data(), sv.size());
             }
