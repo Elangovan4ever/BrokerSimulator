@@ -192,6 +192,15 @@ struct StockNewsQuery {
     std::optional<Timestamp> max_published_utc;
 };
 
+struct StockTickerEventsQuery {
+    std::string ticker;
+    std::vector<std::string> types;
+    std::string sort{"date"};
+    std::string order{"desc"};
+    size_t limit{10};
+    std::optional<Timestamp> max_date;
+};
+
 struct StockIposQuery {
     std::optional<std::string> ticker;
     std::optional<std::string> ipo_status;
@@ -312,6 +321,20 @@ struct StockNewsInsightRecord {
     std::string sentiment_reasoning;
     std::optional<double> sentiment_score;
     std::optional<double> relevance_score;
+};
+
+struct StockTickerEventRecord {
+    std::string entity_name;
+    std::string event_type;
+    std::string event_date;
+    std::string new_ticker;
+    std::string raw_json;
+};
+
+struct TickerBasicRecord {
+    std::string name;
+    std::string composite_figi;
+    std::string cik;
 };
 
 struct StockIpoRecord {
@@ -491,6 +514,9 @@ public:
     virtual std::vector<StockSplitRecord> get_stock_splits(const StockSplitsQuery& query) = 0;
     virtual std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery& query) = 0;
     virtual std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>& article_ids) = 0;
+    virtual std::vector<StockTickerEventRecord> get_stock_ticker_events(const StockTickerEventsQuery& query) = 0;
+    virtual std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
+                                                              std::optional<Timestamp> max_date) = 0;
     virtual std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) = 0;
     virtual std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) = 0;
     virtual std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) = 0;

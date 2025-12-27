@@ -79,6 +79,9 @@ public:
     std::vector<StockSplitRecord> get_stock_splits(const StockSplitsQuery& query) override;
     std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery& query) override;
     std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>& article_ids) override;
+    std::vector<StockTickerEventRecord> get_stock_ticker_events(const StockTickerEventsQuery& query) override;
+    std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
+                                                      std::optional<Timestamp> max_date) override;
     std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) override;
     std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) override;
     std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) override;

@@ -66,6 +66,7 @@ public:
 
     // Reference & News
     ADD_METHOD_TO(PolygonController::news, "/v2/reference/news", drogon::Get);
+    ADD_METHOD_TO(PolygonController::tickerEvents, "/vX/reference/tickers/{1}/events", drogon::Get);
     ADD_METHOD_TO(PolygonController::ipos, "/vX/reference/ipos", drogon::Get);
     ADD_METHOD_TO(PolygonController::shortInterest, "/stocks/v1/short-interest", drogon::Get);
     ADD_METHOD_TO(PolygonController::shortVolume, "/stocks/v1/short-volume", drogon::Get);
@@ -153,6 +154,9 @@ public:
     // Reference & News
     void news(const drogon::HttpRequestPtr& req,
               std::function<void(const drogon::HttpResponsePtr&)>&& cb);
+    void tickerEvents(const drogon::HttpRequestPtr& req,
+                      std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+                      std::string symbol);
     void ipos(const drogon::HttpRequestPtr& req,
               std::function<void(const drogon::HttpResponsePtr&)>&& cb);
     void shortInterest(const drogon::HttpRequestPtr& req,

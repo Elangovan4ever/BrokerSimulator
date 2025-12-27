@@ -129,6 +129,18 @@ public:
         return {};
     }
 
+    std::vector<StockTickerEventRecord> get_stock_ticker_events(const StockTickerEventsQuery& query) override {
+        (void)query;
+        return {};
+    }
+
+    std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
+                                                      std::optional<Timestamp> max_date) override {
+        (void)ticker;
+        (void)max_date;
+        return std::nullopt;
+    }
+
     std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) override {
         (void)query;
         return {};

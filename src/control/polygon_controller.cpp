@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 using json = nlohmann::json;
 
@@ -1475,6 +1476,121 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
             : proto + "://" + host + "/v2/reference/news?cursor=";
         response["next_url"] = base + next_cursor;
     }
+
+    cb(json_resp(response));
+}
+
+void PolygonController::tickerEvents(const drogon::HttpRequestPtr& req,
+                                     std::function<void(const drogon::HttpResponsePtr&)>&& cb,
+                                     std::string symbol) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "No events found for given ID"}}, 404));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "No events found for given ID"}}, 404));
+        return;
+    }
+
+    static const std::unordered_set<std::string> kAllowedTypes = {"ticker_change"};
+
+    std::vector<std::string> types;
+    auto types_param = req->getParameter("types");
+    if (!types_param.empty()) {
+        std::stringstream ss(types_param);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            token = trim_copy(token);
+            if (token.empty()) continue;
+            if (kAllowedTypes.find(token) == kAllowedTypes.end()) {
+                cb(error_resp("Request made with invalid event: " + token, 400));
+                return;
+            }
+            types.push_back(token);
+        }
+    }
+
+    int limit = 10;
+    auto limit_param = req->getParameter("limit");
+    if (!limit_param.empty()) {
+        try {
+            int parsed = std::stoi(limit_param);
+            if (parsed > 0) limit = parsed;
+        } catch (...) {
+        }
+    }
+
+    std::string sort = req->getParameter("sort");
+    if (sort.empty()) sort = "date";
+    std::string order = req->getParameter("order");
+    if (order.empty()) order = "desc";
+
+    StockTickerEventsQuery query;
+    query.ticker = symbol;
+    query.types = types;
+    query.sort = sort;
+    query.order = order;
+    query.limit = static_cast<size_t>(limit);
+    query.max_date = session->time_engine->current_time();
+
+    auto events = data_source->get_stock_ticker_events(query);
+    if (events.empty()) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "No events found for given ID"}}, 404));
+        return;
+    }
+
+    auto details = data_source->get_ticker_basic(symbol, query.max_date);
+    std::string name = details ? details->name : "";
+    std::string composite_figi = details ? details->composite_figi : "";
+    std::string cik = details ? details->cik : "";
+    if (name.empty()) {
+        name = events.front().entity_name;
+    }
+
+    json event_items = json::array();
+    for (const auto& e : events) {
+        json event = json::object();
+        if (!e.raw_json.empty()) {
+            try {
+                event = json::parse(e.raw_json);
+            } catch (...) {
+                event = json::object();
+            }
+        }
+        if (!event.contains("type") && !e.event_type.empty()) {
+            event["type"] = e.event_type;
+        }
+        if (!event.contains("date") && !e.event_date.empty()) {
+            event["date"] = e.event_date;
+        }
+        if (e.event_type == "ticker_change" && !event.contains("ticker_change") && !e.new_ticker.empty()) {
+            event["ticker_change"] = {{"ticker", e.new_ticker}};
+        }
+        event_items.push_back(std::move(event));
+    }
+
+    json result = json::object();
+    if (!name.empty()) result["name"] = name;
+    if (!composite_figi.empty()) result["composite_figi"] = composite_figi;
+    if (!cik.empty()) result["cik"] = cik;
+    result["events"] = std::move(event_items);
+
+    json response = {
+        {"results", result},
+        {"status", "OK"},
+        {"request_id", utils::generate_id()}
+    };
 
     cb(json_resp(response));
 }

@@ -1048,6 +1048,154 @@ std::vector<StockNewsInsightRecord> ClickHouseDataSource::get_stock_news_insight
     return out;
 }
 
+std::vector<StockTickerEventRecord> ClickHouseDataSource::get_stock_ticker_events(const StockTickerEventsQuery& query) {
+    std::vector<StockTickerEventRecord> out;
+    if (query.ticker.empty()) return out;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        where.push_back(fmt::format("(entity_id = '{0}' OR new_ticker = '{0}')", query.ticker));
+
+        if (!query.types.empty()) {
+            std::string type_list;
+            for (size_t i = 0; i < query.types.size(); ++i) {
+                if (i > 0) type_list += ", ";
+                type_list += "'" + query.types[i] + "'";
+            }
+            where.push_back(fmt::format("event_type IN ({})", type_list));
+        }
+
+        if (query.max_date) {
+            auto ts = format_timestamp(*query.max_date);
+            auto date = ts.substr(0, 10);
+            where.push_back(fmt::format("(event_date IS NULL OR event_date = '' OR event_date <= '{}')", date));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sort_col = "event_date";
+        if (query.sort == "event_type" || query.sort == "type") {
+            sort_col = "event_type";
+        } else if (query.sort == "event_date" || query.sort == "date") {
+            sort_col = "event_date";
+        } else if (query.sort == "ticker") {
+            sort_col = "new_ticker";
+        }
+
+        std::string order = (query.order == "asc") ? "ASC" : "DESC";
+        size_t limit = query.limit > 0 ? query.limit : 10;
+
+        std::string sql = fmt::format(R"(
+            SELECT entity_name,
+                   CAST(event_type AS String),
+                   event_date,
+                   new_ticker,
+                   raw_json
+            FROM stock_ticker_events
+            {}
+            ORDER BY {} {}
+            LIMIT {}
+        )", where_clause, sort_col, order, limit);
+
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                StockTickerEventRecord r;
+                r.entity_name = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.event_type = block[1]->As<clickhouse::ColumnString>()->At(row);
+                if (auto v = get_nullable_string(block[2], row)) r.event_date = *v;
+                r.new_ticker = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.raw_json = block[4]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_stock_ticker_events failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::optional<TickerBasicRecord> ClickHouseDataSource::get_ticker_basic(const std::string& ticker,
+                                                                        std::optional<Timestamp> max_date) {
+    if (ticker.empty()) return std::nullopt;
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        std::vector<std::string> where;
+        where.push_back(fmt::format("ticker = '{}'", ticker));
+        if (max_date) {
+            auto ts = format_timestamp(*max_date);
+            where.push_back(fmt::format("(snapshot_date IS NULL OR snapshot_date <= toDate('{}'))", ts));
+        }
+
+        std::string where_clause;
+        if (!where.empty()) {
+            where_clause = "WHERE ";
+            for (size_t i = 0; i < where.size(); ++i) {
+                if (i > 0) where_clause += " AND ";
+                where_clause += where[i];
+            }
+        }
+
+        std::string sql = fmt::format(R"(
+            SELECT name,
+                   composite_figi,
+                   cik,
+                   raw_json
+            FROM tickers
+            {}
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+        )", where_clause);
+
+        std::optional<TickerBasicRecord> out;
+        client.Select(sql, [&out](const clickhouse::Block& block) {
+            if (block.GetRowCount() == 0) return;
+            TickerBasicRecord rec;
+            rec.name = block[0]->As<clickhouse::ColumnString>()->At(0);
+            rec.composite_figi = block[1]->As<clickhouse::ColumnString>()->At(0);
+            rec.cik = block[2]->As<clickhouse::ColumnString>()->At(0);
+            auto raw_json = block[3]->As<clickhouse::ColumnString>()->At(0);
+            if (!raw_json.empty()) {
+                try {
+                    auto j = nlohmann::json::parse(raw_json);
+                    if (j.contains("name") && j["name"].is_string()) rec.name = j["name"].get<std::string>();
+                    if (j.contains("composite_figi") && j["composite_figi"].is_string()) {
+                        rec.composite_figi = j["composite_figi"].get<std::string>();
+                    }
+                    if (j.contains("cik") && j["cik"].is_string()) rec.cik = j["cik"].get<std::string>();
+                } catch (...) {
+                }
+            }
+            out = std::move(rec);
+        });
+        return out;
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_ticker_basic failed: {}", e.what());
+    }
+    return std::nullopt;
+}
+
 std::vector<StockIpoRecord> ClickHouseDataSource::get_stock_ipos(const StockIposQuery& query) {
     std::vector<StockIpoRecord> out;
     try {
