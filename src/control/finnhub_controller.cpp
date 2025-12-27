@@ -483,6 +483,10 @@ void FinnhubController::dividends(const drogon::HttpRequestPtr& req,
 void FinnhubController::splits(const drogon::HttpRequestPtr& req,
                                std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!env_enabled("FINNHUB_ENABLE_SPLITS")) {
+        cb(json_resp(json{{"error","You don't have access to this resource."}},403));
+        return;
+    }
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
@@ -607,10 +611,11 @@ void FinnhubController::price_target(const drogon::HttpRequestPtr& req,
 
     auto time_t = std::chrono::system_clock::to_time_t(target->last_updated);
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
+    ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d %H:%M:%S");
 
     json out{
         {"lastUpdated", ss.str()},
+        {"numberAnalysts", target->number_analysts},
         {"symbol", sym},
         {"targetHigh", target->target_high},
         {"targetLow", target->target_low},
@@ -633,15 +638,14 @@ void FinnhubController::upgrade_downgrade(const drogon::HttpRequestPtr& req,
 
     json out = json::array();
     for (const auto& g : grades) {
-        auto time_t = std::chrono::system_clock::to_time_t(g.grade_time);
-        std::stringstream ss;
-        ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
+        auto ts = std::chrono::duration_cast<std::chrono::seconds>(
+            g.grade_time.time_since_epoch()).count();
 
         out.push_back({
             {"action", g.action},
             {"company", g.company},
             {"fromGrade", g.from_grade},
-            {"gradeTime", ss.str()},
+            {"gradeTime", ts},
             {"symbol", g.symbol},
             {"toGrade", g.to_grade}
         });
