@@ -22,7 +22,7 @@ export class PolygonClient {
     this.httpsAgent = new https.Agent({ keepAlive: false });
     this.client = axios.create({
       baseURL: config.baseUrl || 'https://api.polygon.io',
-      timeout: 30000,
+      timeout: 60000,
       httpAgent: this.httpAgent,
       httpsAgent: this.httpsAgent,
       headers: {
