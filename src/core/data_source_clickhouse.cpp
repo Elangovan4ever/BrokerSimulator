@@ -438,7 +438,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
                 n.image = block[5]->As<clickhouse::ColumnString>()->At(row);
                 n.category = block[6]->As<clickhouse::ColumnString>()->At(row);
                 n.related = block[7]->As<clickhouse::ColumnString>()->At(row);
-                n.id = block[8]->As<clickhouse::ColumnInt64>()->At(row);
+                n.id = block[8]->As<clickhouse::ColumnUInt64>()->At(row);
                 n.raw_json = block[9]->As<clickhouse::ColumnString>()->At(row);
                 out.push_back(std::move(n));
             }
