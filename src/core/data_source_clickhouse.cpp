@@ -622,12 +622,12 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 DividendRecord d;
                 d.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
-                d.date = extract_ts(block[1], row);
+                d.date = extract_ts_any(block[1], row);
                 d.amount = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
                 d.adjusted_amount = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
-                d.pay_date = extract_ts(block[4], row);
-                d.record_date = extract_ts(block[5], row);
-                d.declaration_date = extract_ts(block[6], row);
+                d.pay_date = extract_ts_any(block[4], row);
+                d.record_date = extract_ts_any(block[5], row);
+                d.declaration_date = extract_ts_any(block[6], row);
                 d.currency = block[7]->As<clickhouse::ColumnString>()->At(row);
                 d.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
                 out.push_back(std::move(d));
