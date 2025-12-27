@@ -420,6 +420,7 @@ void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
                 double vwap = volume > 0 ? vwap_num / static_cast<double>(volume) : 0.0;
 
                 json bar_item;
+                bar_item["T"] = symbol;
                 bar_item["v"] = volume;
                 bar_item["vw"] = vwap;
                 bar_item["o"] = bars.front().open;
