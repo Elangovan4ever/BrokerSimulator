@@ -3,12 +3,13 @@
 #include <mutex>
 #include <chrono>
 #include "../src/core/session_manager.hpp"
+#include "../src/core/data_source_stub.hpp"
 
 using namespace broker_sim;
 
 namespace {
 
-class FakeDataSource : public DataSource {
+class FakeDataSource : public StubDataSource {
 public:
     explicit FakeDataSource(std::vector<MarketEvent> events)
         : events_(std::move(events)) {}

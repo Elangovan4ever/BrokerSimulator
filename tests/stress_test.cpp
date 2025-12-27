@@ -7,7 +7,7 @@
 #include <vector>
 #include <random>
 #include "../src/core/session_manager.hpp"
-#include "../src/core/data_source.hpp"
+#include "../src/core/data_source_stub.hpp"
 
 using namespace broker_sim;
 
@@ -17,7 +17,7 @@ namespace {
  * High-throughput data source for stress testing.
  * Generates configurable number of events at high speed.
  */
-class StressTestDataSource : public DataSource {
+class StressTestDataSource : public StubDataSource {
 public:
     explicit StressTestDataSource(size_t events_per_symbol = 1000)
         : events_per_symbol_(events_per_symbol) {}

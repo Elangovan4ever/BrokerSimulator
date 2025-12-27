@@ -9,7 +9,7 @@
 #include <vector>
 #include <set>
 #include "../src/core/session_manager.hpp"
-#include "../src/core/data_source.hpp"
+#include "../src/core/data_source_stub.hpp"
 #include "../src/control/control_server.hpp"
 
 using namespace broker_sim;
@@ -17,7 +17,7 @@ using namespace broker_sim;
 namespace {
 
 // Fake DataSource for integration tests
-class IntegrationTestDataSource : public DataSource {
+class IntegrationTestDataSource : public StubDataSource {
 public:
     void stream_trades(const std::vector<std::string>&,
                        Timestamp, Timestamp,
