@@ -15,11 +15,14 @@ import { FinnhubSimulatorClient } from '../clients/finnhub-simulator-client';
 
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '../../.env.test') });
+dotenv.config({ path: path.join(__dirname, '../../../.env'), override: false });
 
 // Global test configuration
 export const config = {
   polygonApiKey: process.env.POLYGON_API_KEY || '',
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
+  alpacaApiKeyId: process.env.ALPACA_ACCESS_KEY_ID || '',
+  alpacaApiSecret: process.env.ALPACA_ACCESS_KEY || '',
   simulatorHost: process.env.SIMULATOR_HOST || 'elanlinux',
   controlPort: parseInt(process.env.CONTROL_PORT || '8000', 10),
   alpacaPort: parseInt(process.env.ALPACA_PORT || '8100', 10),
@@ -27,6 +30,7 @@ export const config = {
   finnhubPort: parseInt(process.env.FINNHUB_PORT || '8300', 10),
   polygonBaseUrl: process.env.POLYGON_BASE_URL || 'https://api.polygon.io',
   finnhubBaseUrl: process.env.FINNHUB_BASE_URL || 'https://finnhub.io/api/v1',
+  alpacaBaseUrl: process.env.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets',
   testSymbols: (process.env.TEST_SYMBOLS || 'AAPL,MSFT,AMZN').split(','),
   testStartDate: process.env.TEST_START_DATE || '2025-01-13',
   testEndDate: process.env.TEST_END_DATE || '2025-01-17',

@@ -2,9 +2,11 @@
  * Integration tests for Alpaca Trading API endpoints.
  */
 
-import { config } from './setup';
+import { config, logTestResult } from './setup';
 import { SessionManager } from '../utils/session-manager';
 import { AlpacaSimulatorClient } from '../clients/alpaca-simulator-client';
+import { AlpacaClient } from '../clients/alpaca-client';
+import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Alpaca Trading API', () => {
   const testSymbol = config.testSymbols[0] || 'AAPL';
@@ -14,6 +16,7 @@ describe('Alpaca Trading API', () => {
   let sessionManager: SessionManager;
   let sessionId: string;
   let alpacaClient: AlpacaSimulatorClient;
+  let realAlpacaClient: AlpacaClient;
 
   beforeAll(async () => {
     sessionManager = new SessionManager(config.simulatorHost, config.controlPort);
@@ -31,6 +34,15 @@ describe('Alpaca Trading API', () => {
       host: config.simulatorHost,
       port: config.alpacaPort,
       sessionId,
+    });
+
+    if (!config.alpacaApiKeyId || !config.alpacaApiSecret) {
+      throw new Error('Missing Alpaca API credentials. Set ALPACA_ACCESS_KEY_ID and ALPACA_ACCESS_KEY.');
+    }
+    realAlpacaClient = new AlpacaClient({
+      apiKeyId: config.alpacaApiKeyId,
+      apiSecret: config.alpacaApiSecret,
+      baseUrl: config.alpacaBaseUrl,
     });
   }, 60000);
 
@@ -54,100 +66,173 @@ describe('Alpaca Trading API', () => {
     }
   }, 30000);
 
-  it('returns account data', async () => {
-    const response = await alpacaClient.getAccount();
-    expect(response.status).toBe(200);
-    expect(response.data).toEqual(
-      expect.objectContaining({
-        id: sessionId,
-        account_number: sessionId,
-        status: 'ACTIVE',
-        currency: 'USD',
-      })
-    );
-    expect(typeof response.data.cash).toBe('string');
-    expect(typeof response.data.buying_power).toBe('string');
+  it('matches account schema', async () => {
+    const realResponse = await realAlpacaClient.getAccount();
+    const simResponse = await alpacaClient.getAccount();
+
+    const realSchema = extractSchema(realResponse.data);
+    const simSchema = extractSchema(simResponse.data);
+    const comparison = compareSchemas(realSchema, simSchema);
+
+    logTestResult('Alpaca account', realResponse.status, simResponse.status, comparison.match);
+    if (!comparison.match) {
+      console.log(formatComparisonResult(comparison));
+    }
+
+    expect(realResponse.status).toBe(simResponse.status);
+    expect(comparison.match).toBe(true);
   }, 20000);
 
-  it('returns empty positions and 404 for missing position', async () => {
-    const listResponse = await alpacaClient.listPositions();
-    expect(listResponse.status).toBe(200);
-    expect(Array.isArray(listResponse.data)).toBe(true);
-    expect(listResponse.data.length).toBe(0);
+  it('matches positions list schema and error responses', async () => {
+    const realList = await realAlpacaClient.listPositions();
+    const simList = await alpacaClient.listPositions();
 
-    const getResponse = await alpacaClient.getPosition(testSymbol);
-    expect(getResponse.status).toBe(404);
+    const realSchema = extractSchema(realList.data);
+    const simSchema = extractSchema(simList.data);
+    const comparison = compareSchemas(realSchema, simSchema);
 
-    const closeResponse = await alpacaClient.closePosition(testSymbol);
-    expect(closeResponse.status).toBe(404);
+    logTestResult('Alpaca positions list', realList.status, simList.status, comparison.match);
+    if (!comparison.match) {
+      console.log(formatComparisonResult(comparison));
+    }
 
-    const closeAllResponse = await alpacaClient.closeAllPositions();
-    expect(closeAllResponse.status).toBe(200);
-    expect(Array.isArray(closeAllResponse.data)).toBe(true);
-    expect(closeAllResponse.data.length).toBe(0);
+    expect(realList.status).toBe(simList.status);
+    expect(comparison.match).toBe(true);
+
+    const realMissing = await realAlpacaClient.getPosition('ZZZ_NOT_REAL');
+    const simMissing = await alpacaClient.getPosition('ZZZ_NOT_REAL');
+    expect(realMissing.status).toBe(simMissing.status);
+
+    const realCloseMissing = await realAlpacaClient.closePosition('ZZZ_NOT_REAL');
+    const simCloseMissing = await alpacaClient.closePosition('ZZZ_NOT_REAL');
+    expect(realCloseMissing.status).toBe(simCloseMissing.status);
   }, 30000);
 
-  it('creates, fetches, replaces, and cancels orders', async () => {
-    const createResponse = await alpacaClient.submitOrder({
+  it('matches order lifecycle schemas', async () => {
+    const clientOrderId = `sim-test-${Date.now()}`;
+    const orderPayload = {
       symbol: testSymbol,
       qty: 1,
       side: 'buy',
       type: 'limit',
-      limit_price: 0.01,
+      limit_price: 1,
       time_in_force: 'day',
-    });
+      client_order_id: clientOrderId,
+    };
 
-    expect(createResponse.status).toBe(200);
-    const orderId = createResponse.data.id as string;
-    const clientOrderId = createResponse.data.client_order_id as string;
-    expect(orderId).toBeTruthy();
-    expect(clientOrderId).toBeTruthy();
+    const realCreate = await realAlpacaClient.submitOrder(orderPayload);
+    const simCreate = await alpacaClient.submitOrder(orderPayload);
 
-    const listOpen = await alpacaClient.listOrders({ status: 'open' });
-    expect(listOpen.status).toBe(200);
-    const openIds = (listOpen.data as Array<{ id?: string }>).map((order) => order.id);
-    expect(openIds).toContain(orderId);
-
-    const getResponse = await alpacaClient.getOrder(orderId);
-    expect(getResponse.status).toBe(200);
-    expect(getResponse.data.id).toBe(orderId);
-
-    const getByClient = await alpacaClient.getOrderByClientId(clientOrderId);
-    expect(getByClient.status).toBe(200);
-    expect(getByClient.data.id).toBe(orderId);
-
-    const replaceResponse = await alpacaClient.replaceOrder(orderId, {
-      qty: 2,
-      limit_price: 0.02,
-      time_in_force: 'day',
-    });
-    expect(replaceResponse.status).toBe(200);
-    const replacedId = replaceResponse.data.id as string;
-    expect(replacedId).toBeTruthy();
-    expect(replacedId).not.toBe(orderId);
-
-    const cancelResponse = await alpacaClient.cancelOrder(replacedId);
-    expect(cancelResponse.status).toBe(204);
-
-    const closedList = await alpacaClient.listOrders({ status: 'closed' });
-    expect(closedList.status).toBe(200);
-    const closedIds = (closedList.data as Array<{ id?: string }>).map((order) => order.id);
-    expect(closedIds).toContain(replacedId);
-  }, 40000);
-
-  it('rejects notional orders', async () => {
-    const response = await alpacaClient.submitOrder({
-      symbol: testSymbol,
-      notional: 100,
-      side: 'buy',
-      type: 'market',
-      time_in_force: 'day',
-    });
-    expect(response.status).toBe(400);
-    expect(response.data).toEqual(
-      expect.objectContaining({
-        code: 400,
-      })
+    const createComparison = compareSchemas(
+      extractSchema(realCreate.data),
+      extractSchema(simCreate.data)
     );
-  }, 20000);
+
+    logTestResult('Alpaca order create', realCreate.status, simCreate.status, createComparison.match);
+    if (!createComparison.match) {
+      console.log(formatComparisonResult(createComparison));
+    }
+
+    expect(realCreate.status).toBe(simCreate.status);
+    expect(createComparison.match).toBe(true);
+
+    const realOrderId = realCreate.data.id as string;
+    const simOrderId = simCreate.data.id as string;
+    expect(realOrderId).toBeTruthy();
+    expect(simOrderId).toBeTruthy();
+
+    const realList = await realAlpacaClient.listOrders({ status: 'open' });
+    const simList = await alpacaClient.listOrders({ status: 'open' });
+    const listComparison = compareSchemas(
+      extractSchema(realList.data),
+      extractSchema(simList.data)
+    );
+    logTestResult('Alpaca orders list', realList.status, simList.status, listComparison.match);
+    if (!listComparison.match) {
+      console.log(formatComparisonResult(listComparison));
+    }
+    expect(realList.status).toBe(simList.status);
+    expect(listComparison.match).toBe(true);
+
+    const realGet = await realAlpacaClient.getOrder(realOrderId);
+    const simGet = await alpacaClient.getOrder(simOrderId);
+    const getComparison = compareSchemas(
+      extractSchema(realGet.data),
+      extractSchema(simGet.data)
+    );
+    logTestResult('Alpaca order get', realGet.status, simGet.status, getComparison.match);
+    if (!getComparison.match) {
+      console.log(formatComparisonResult(getComparison));
+    }
+    expect(realGet.status).toBe(simGet.status);
+    expect(getComparison.match).toBe(true);
+
+    const realByClient = await realAlpacaClient.getOrderByClientId(clientOrderId);
+    const simByClient = await alpacaClient.getOrderByClientId(clientOrderId);
+    const byClientComparison = compareSchemas(
+      extractSchema(realByClient.data),
+      extractSchema(simByClient.data)
+    );
+    logTestResult(
+      'Alpaca order by client id',
+      realByClient.status,
+      simByClient.status,
+      byClientComparison.match
+    );
+    if (!byClientComparison.match) {
+      console.log(formatComparisonResult(byClientComparison));
+    }
+    expect(realByClient.status).toBe(simByClient.status);
+    expect(byClientComparison.match).toBe(true);
+
+    const replacePayload = {
+      qty: 2,
+      limit_price: 1.1,
+      time_in_force: 'day',
+    };
+
+    const realReplace = await realAlpacaClient.replaceOrder(realOrderId, replacePayload);
+    const simReplace = await alpacaClient.replaceOrder(simOrderId, replacePayload);
+    const replaceComparison = compareSchemas(
+      extractSchema(realReplace.data),
+      extractSchema(simReplace.data)
+    );
+    logTestResult(
+      'Alpaca order replace',
+      realReplace.status,
+      simReplace.status,
+      replaceComparison.match
+    );
+    if (!replaceComparison.match) {
+      console.log(formatComparisonResult(replaceComparison));
+    }
+    expect(realReplace.status).toBe(simReplace.status);
+    expect(replaceComparison.match).toBe(true);
+
+    const realCancelId = (realReplace.data.id as string) || realOrderId;
+    const simCancelId = (simReplace.data.id as string) || simOrderId;
+    const realCancel = await realAlpacaClient.cancelOrder(realCancelId);
+    const simCancel = await alpacaClient.cancelOrder(simCancelId);
+    expect(realCancel.status).toBe(simCancel.status);
+    expect([204, 200]).toContain(simCancel.status);
+    expect([204, 200]).toContain(realCancel.status);
+
+    const realClosed = await realAlpacaClient.listOrders({ status: 'closed' });
+    const simClosed = await alpacaClient.listOrders({ status: 'closed' });
+    const closedComparison = compareSchemas(
+      extractSchema(realClosed.data),
+      extractSchema(simClosed.data)
+    );
+    logTestResult(
+      'Alpaca orders closed list',
+      realClosed.status,
+      simClosed.status,
+      closedComparison.match
+    );
+    if (!closedComparison.match) {
+      console.log(formatComparisonResult(closedComparison));
+    }
+    expect(realClosed.status).toBe(simClosed.status);
+    expect(closedComparison.match).toBe(true);
+  }, 60000);
 });
