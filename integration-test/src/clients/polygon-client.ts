@@ -92,18 +92,6 @@ export class PolygonClient {
   }
 
   /**
-   * Get stock trades (tick data)
-   * GET /v2/ticks/stocks/trades/{ticker}/{date}
-   */
-  async getTradesTicks(
-    ticker: string,
-    date: string,
-    options?: { limit?: number }
-  ): Promise<AxiosResponse> {
-    return this.client.get(`/v2/ticks/stocks/trades/${ticker}/${date}`, { params: options });
-  }
-
-  /**
    * Get last trade for a stock
    * GET /v2/last/trade/{stocksTicker}
    */
@@ -129,18 +117,6 @@ export class PolygonClient {
     }
   ): Promise<AxiosResponse> {
     return this.client.get(`/v3/quotes/${ticker}`, { params: options });
-  }
-
-  /**
-   * Get stock quotes (NBBO tick data)
-   * GET /v2/ticks/stocks/nbbo/{ticker}/{date}
-   */
-  async getQuotesTicks(
-    ticker: string,
-    date: string,
-    options?: { limit?: number }
-  ): Promise<AxiosResponse> {
-    return this.client.get(`/v2/ticks/stocks/nbbo/${ticker}/${date}`, { params: options });
   }
 
   /**

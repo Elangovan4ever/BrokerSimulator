@@ -32,12 +32,10 @@ public:
 
     // Trades
     ADD_METHOD_TO(PolygonController::trades, "/v3/trades/{1}", drogon::Get);
-    ADD_METHOD_TO(PolygonController::ticksTrades, "/v2/ticks/stocks/trades/{1}/{2}", drogon::Get);
     ADD_METHOD_TO(PolygonController::lastTrade, "/v2/last/trade/{1}", drogon::Get);
 
     // Quotes
     ADD_METHOD_TO(PolygonController::quotes, "/v3/quotes/{1}", drogon::Get);
-    ADD_METHOD_TO(PolygonController::ticksQuotes, "/v2/ticks/stocks/nbbo/{1}/{2}", drogon::Get);
     ADD_METHOD_TO(PolygonController::lastQuote, "/v2/last/nbbo/{1}", drogon::Get);
 
     // Corporate Actions
@@ -92,9 +90,6 @@ public:
     void trades(const drogon::HttpRequestPtr& req,
                 std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                 std::string symbol);
-    void ticksTrades(const drogon::HttpRequestPtr& req,
-                     std::function<void(const drogon::HttpResponsePtr&)>&& cb,
-                     std::string symbol, std::string date);
     void lastTrade(const drogon::HttpRequestPtr& req,
                    std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                    std::string symbol);
@@ -103,9 +98,6 @@ public:
     void quotes(const drogon::HttpRequestPtr& req,
                 std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                 std::string symbol);
-    void ticksQuotes(const drogon::HttpRequestPtr& req,
-                     std::function<void(const drogon::HttpResponsePtr&)>&& cb,
-                     std::string symbol, std::string date);
     void lastQuote(const drogon::HttpRequestPtr& req,
                    std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                    std::string symbol);

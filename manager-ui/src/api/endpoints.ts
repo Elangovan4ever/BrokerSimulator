@@ -58,11 +58,6 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
     ]},
-    { method: 'GET', path: '/v2/ticks/stocks/trades/{ticker}/{date}', description: 'Stock trades (tick data)', params: [
-      { name: 'ticker', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
-      { name: 'date', type: 'path', required: true, description: 'Trading date (YYYY-MM-DD)', default: '2025-01-13' },
-      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '1000' },
-    ]},
     { method: 'GET', path: '/v2/last/trade/{symbol}', description: 'Last trade', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     { method: 'GET', path: '/v3/quotes/{symbol}', description: 'Get quotes', params: [
       { name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
@@ -72,11 +67,6 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
       { name: 'order', type: 'query', required: false, description: 'Order results (asc or desc)', default: 'asc' },
       { name: 'limit', type: 'query', required: false, description: 'Limit results (default 1000, max 50000)', default: '1000' },
       { name: 'sort', type: 'query', required: false, description: 'Sort field', default: 'timestamp' },
-    ]},
-    { method: 'GET', path: '/v2/ticks/stocks/nbbo/{ticker}/{date}', description: 'Stock quotes (NBBO ticks)', params: [
-      { name: 'ticker', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' },
-      { name: 'date', type: 'path', required: true, description: 'Trading date (YYYY-MM-DD)', default: '2025-01-13' },
-      { name: 'limit', type: 'query', required: false, description: 'Limit results', default: '1000' },
     ]},
     { method: 'GET', path: '/v2/last/nbbo/{symbol}', description: 'Last NBBO quote', params: [{ name: 'symbol', type: 'path', required: true, description: 'Stock symbol', default: 'AAPL' }] },
     // Snapshots
