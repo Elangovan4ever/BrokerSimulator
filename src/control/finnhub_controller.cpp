@@ -976,23 +976,9 @@ void FinnhubController::ownership(const drogon::HttpRequestPtr& req,
     auto sym = symbol_param(req);
     if (sym.empty()) { cb(json_resp(json{{"ownership", json::array()}, {"symbol",""}},200)); return; }
 
-    auto from_str = req->getParameter("from");
-    auto to_str = req->getParameter("to");
     auto now = current_time(req);
     Timestamp from_ts = Timestamp{};
     Timestamp to_ts = now;
-    if (!from_str.empty()) {
-        auto parsed = parse_date(from_str);
-        if (!parsed) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
-        from_ts = *parsed;
-    }
-    if (!to_str.empty()) {
-        auto parsed = parse_date(to_str);
-        if (!parsed) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
-        to_ts = *parsed;
-    }
-    if (to_ts > now) to_ts = now;
-    if (from_ts > to_ts) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
 
     auto rows = data_source_->get_finnhub_ownership(sym, from_ts, to_ts, 5000);
     json items = json::array();
