@@ -420,19 +420,25 @@ void FinnhubController::earnings_calendar(const drogon::HttpRequestPtr& req,
     auto to_str = req->getParameter("to");
 
     auto now = current_time(req);
-    Timestamp from_ts = now - std::chrono::hours(24 * 30);
-    Timestamp to_ts = now;
-    if (!from_str.empty()) {
+    const bool has_from = !from_str.empty();
+    const bool has_to = !to_str.empty();
+    if (!sym.empty() && (!has_from || !has_to)) {
+        cb(json_resp(json{{"earningsCalendar", json::array()}},200));
+        return;
+    }
+
+    Timestamp from_ts = now;
+    Timestamp to_ts = now + std::chrono::hours(24 * 30);
+    if (has_from) {
         auto parsed = parse_date(from_str);
         if (!parsed) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
         from_ts = *parsed;
     }
-    if (!to_str.empty()) {
+    if (has_to) {
         auto parsed = parse_date(to_str);
         if (!parsed) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
         to_ts = *parsed;
     }
-    if (to_ts > now) to_ts = now;
     if (from_ts > to_ts) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
 
     auto earnings = data_source_->get_earnings_calendar(sym, from_ts, to_ts, 100);
@@ -553,8 +559,8 @@ void FinnhubController::ipo_calendar(const drogon::HttpRequestPtr& req,
     auto from_str = req->getParameter("from");
     auto to_str = req->getParameter("to");
     auto now = current_time(req);
-    Timestamp from_ts = now - std::chrono::hours(24 * 30);
-    Timestamp to_ts = now;
+    Timestamp from_ts = now;
+    Timestamp to_ts = now + std::chrono::hours(24 * 30);
     if (!from_str.empty()) {
         auto parsed = parse_date(from_str);
         if (!parsed) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
@@ -565,7 +571,6 @@ void FinnhubController::ipo_calendar(const drogon::HttpRequestPtr& req,
         if (!parsed) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
         to_ts = *parsed;
     }
-    if (to_ts > now) to_ts = now;
     if (from_ts > to_ts) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
 
     auto ipos = data_source_->get_finnhub_ipo_calendar(from_ts, to_ts, 1000);
