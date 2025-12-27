@@ -71,9 +71,9 @@ beforeAll(async () => {
     console.log('Starting session...');
     await sessionManager.startSession(testSessionId);
 
-    // Wait for session to process some events so we have cached data
+    // Wait for session to process events so we have cached data
     console.log('Waiting for session to process events...');
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await sessionManager.waitForWarmup(testSessionId, 1, 30000);
 
     // Set session ID on simulator client
     simulatorClient.setSessionId(testSessionId);

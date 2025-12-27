@@ -15,10 +15,20 @@ export interface SessionConfig {
 
 export interface Session {
   session_id: string;
-  status: string;
+  status: string | number;
   symbols: string[];
   start_time: string;
   end_time: string;
+}
+
+export interface SessionStats {
+  id: string;
+  status: string | number;
+  queue_size: number;
+  queue_dropped: number;
+  last_event_ns: number;
+  events_enqueued: number;
+  events_dropped: number;
 }
 
 export class SessionManager {
@@ -173,11 +183,12 @@ export class SessionManager {
     while (Date.now() - startTime < maxWaitMs) {
       try {
         const session = await this.getSession(id);
-        if (session.status === 'RUNNING' || session.status === 'PAUSED') {
-          console.log(`Session ${id} is ready (status: ${session.status})`);
+        const status = session.status;
+        if (status === 'RUNNING' || status === 'PAUSED' || status === 1 || status === 2) {
+          console.log(`Session ${id} is ready (status: ${status})`);
           return;
         }
-        if (session.status === 'ERROR') {
+        if (status === 'ERROR' || status === 5) {
           throw new Error(`Session ${id} is in ERROR state`);
         }
       } catch (error) {
@@ -186,6 +197,51 @@ export class SessionManager {
       await this.sleep(500);
     }
     throw new Error(`Timeout waiting for session ${id} to be ready`);
+  }
+
+  /**
+   * Get session stats
+   */
+  async getStats(sessionId?: string): Promise<SessionStats> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      const response = await this.client.get(`/sessions/${id}/stats`);
+      return response.data as SessionStats;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to get session stats: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Wait until events have been processed so caches are warm.
+   */
+  async waitForWarmup(sessionId?: string, minEvents = 1, maxWaitMs = 30000): Promise<void> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+      try {
+        const stats = await this.getStats(id);
+        if (stats.events_enqueued >= minEvents && stats.last_event_ns > 0) {
+          console.log(`Session ${id} warmed up (events_enqueued=${stats.events_enqueued})`);
+          return;
+        }
+      } catch (error) {
+        // Ignore errors during polling
+      }
+      await this.sleep(500);
+    }
+    throw new Error(`Timeout waiting for session ${id} to warm up`);
   }
 
   /**
