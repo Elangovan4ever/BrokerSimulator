@@ -1639,12 +1639,20 @@ void PolygonController::ipos(const drogon::HttpRequestPtr& req,
     bool has_more = rows.size() > static_cast<size_t>(limit);
     if (has_more) rows.resize(limit);
 
-    auto maybe_set_date = [&](json& item, const char* key, const std::optional<Timestamp>& ts) {
-        if (!ts || !has_timestamp(*ts) || *ts > current_time) {
-            item.erase(key);
+    auto scrub_date = [&](json& item, const char* key, const std::optional<Timestamp>& fallback) {
+        auto it = item.find(key);
+        if (it != item.end() && it->is_string()) {
+            auto ts = utils::parse_date(it->get<std::string>());
+            if (!ts || *ts > current_time) {
+                item.erase(it);
+            }
             return;
         }
-        item[key] = format_date(*ts);
+        if (fallback && has_timestamp(*fallback) && *fallback <= current_time) {
+            item[key] = format_date(*fallback);
+        } else {
+            item.erase(key);
+        }
     };
 
     json results = json::array();
@@ -1660,11 +1668,11 @@ void PolygonController::ipos(const drogon::HttpRequestPtr& req,
 
         if (!r.ticker.empty()) item["ticker"] = r.ticker;
         if (!r.ipo_status.empty()) item["ipo_status"] = r.ipo_status;
-        maybe_set_date(item, "announced_date", r.announced_date);
-        maybe_set_date(item, "listing_date", r.listing_date);
-        maybe_set_date(item, "issue_start_date", r.issue_start_date);
-        maybe_set_date(item, "issue_end_date", r.issue_end_date);
-        maybe_set_date(item, "last_updated", r.last_updated);
+        scrub_date(item, "announced_date", r.announced_date);
+        scrub_date(item, "listing_date", r.listing_date);
+        scrub_date(item, "issue_start_date", r.issue_start_date);
+        scrub_date(item, "issue_end_date", r.issue_end_date);
+        scrub_date(item, "last_updated", r.last_updated);
         results.push_back(std::move(item));
     }
 
