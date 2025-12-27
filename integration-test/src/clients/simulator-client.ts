@@ -366,6 +366,22 @@ export class SimulatorClient {
   // ============ Ticker Details ============
 
   /**
+   * Get ticker events
+   * GET /vX/reference/tickers/{ticker}/events
+   */
+  async getTickerEvents(
+    ticker: string,
+    options?: {
+      types?: string;
+      limit?: number;
+      sort?: string;
+      order?: 'asc' | 'desc';
+    }
+  ): Promise<AxiosResponse> {
+    return this.client.get(`/vX/reference/tickers/${ticker}/events`, { params: options });
+  }
+
+  /**
    * Get ticker details
    * GET /v3/reference/tickers/{ticker}
    */

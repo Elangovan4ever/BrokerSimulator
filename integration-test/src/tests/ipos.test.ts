@@ -6,6 +6,31 @@
 import { polygonClient, simulatorClient, getSimDate, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
+function scrubFutureIpoDates(data: unknown, cutoffDate: string): unknown {
+  if (!data || typeof data !== 'object') return data;
+  const clone = JSON.parse(JSON.stringify(data)) as { results?: Array<Record<string, unknown>> };
+  if (!Array.isArray(clone.results)) return clone;
+  const cutoff = new Date(`${cutoffDate}T00:00:00Z`).getTime();
+  const dateKeys = [
+    'last_updated',
+    'listing_date',
+    'announced_date',
+    'issue_start_date',
+    'issue_end_date',
+  ];
+  for (const item of clone.results) {
+    for (const key of dateKeys) {
+      const value = item[key];
+      if (typeof value !== 'string') continue;
+      const ts = Date.parse(value);
+      if (!Number.isNaN(ts) && ts > cutoff) {
+        delete item[key];
+      }
+    }
+  }
+  return clone;
+}
+
 describe('Polygon IPOs API', () => {
   describe('GET /vX/reference/ipos', () => {
     it('should return matching schema for IPOs list', async () => {
@@ -22,7 +47,8 @@ describe('Polygon IPOs API', () => {
       expectResultsNotEmpty('IPOs list polygon', polygonResponse.data);
       expectResultsNotEmpty('IPOs list simulator', simulatorResponse.data);
 
-      const polygonSchema = extractSchema(polygonResponse.data);
+      const polygonData = scrubFutureIpoDates(polygonResponse.data, cutoffDate);
+      const polygonSchema = extractSchema(polygonData);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(polygonSchema, simulatorSchema);
 
@@ -57,7 +83,8 @@ describe('Polygon IPOs API', () => {
       expectResultsNotEmpty('IPOs ipo_status=history polygon', polygonResponse.data);
       expectResultsNotEmpty('IPOs ipo_status=history simulator', simulatorResponse.data);
 
-      const polygonSchema = extractSchema(polygonResponse.data);
+      const polygonData = scrubFutureIpoDates(polygonResponse.data, cutoffDate);
+      const polygonSchema = extractSchema(polygonData);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(polygonSchema, simulatorSchema);
 
@@ -88,7 +115,8 @@ describe('Polygon IPOs API', () => {
       expectResultsNotEmpty('IPOs announced_date.gte polygon', polygonResponse.data);
       expectResultsNotEmpty('IPOs announced_date.gte simulator', simulatorResponse.data);
 
-      const polygonSchema = extractSchema(polygonResponse.data);
+      const polygonData = scrubFutureIpoDates(polygonResponse.data, cutoffDate);
+      const polygonSchema = extractSchema(polygonData);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(polygonSchema, simulatorSchema);
 
@@ -117,7 +145,8 @@ describe('Polygon IPOs API', () => {
       expectResultsNotEmpty('IPOs pagination polygon', polygonResponse.data);
       expectResultsNotEmpty('IPOs pagination simulator', simulatorResponse.data);
 
-      const polygonSchema = extractSchema(polygonResponse.data);
+      const polygonData = scrubFutureIpoDates(polygonResponse.data, cutoffDate);
+      const polygonSchema = extractSchema(polygonData);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(polygonSchema, simulatorSchema);
 
