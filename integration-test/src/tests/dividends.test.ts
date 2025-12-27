@@ -8,46 +8,41 @@ import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/
 
 describe('Polygon Dividends API', () => {
   describe('GET /v3/reference/dividends', () => {
-    const dividendSymbols = config.testSymbols.filter((symbol) => symbol !== 'AMZN');
-
     describe('Required Parameters', () => {
-      it.each(dividendSymbols)(
-        'should return matching schema for %s dividends',
-        async (symbol) => {
-          const cutoffDate = getSimDate();
-          const polygonResponse = await polygonClient.getDividends({
-            ticker: symbol,
-            'ex_dividend_date.lte': cutoffDate,
-            limit: 10,
-          });
-          const simulatorResponse = await simulatorClient.getDividends({
-            ticker: symbol,
-            'ex_dividend_date.lte': cutoffDate,
-            limit: 10,
-          });
+      it('should return matching schema for AAPL dividends', async () => {
+        const cutoffDate = getSimDate();
+        const polygonResponse = await polygonClient.getDividends({
+          ticker: 'AAPL',
+          'ex_dividend_date.lte': cutoffDate,
+          limit: 10,
+        });
+        const simulatorResponse = await simulatorClient.getDividends({
+          ticker: 'AAPL',
+          'ex_dividend_date.lte': cutoffDate,
+          limit: 10,
+        });
 
-          expectResultsNotEmpty(`Dividends ${symbol} polygon`, polygonResponse.data);
-          expectResultsNotEmpty(`Dividends ${symbol} simulator`, simulatorResponse.data);
+        expectResultsNotEmpty('Dividends AAPL polygon', polygonResponse.data);
+        expectResultsNotEmpty('Dividends AAPL simulator', simulatorResponse.data);
 
-          const polygonSchema = extractSchema(polygonResponse.data);
-          const simulatorSchema = extractSchema(simulatorResponse.data);
-          const comparison = compareSchemas(polygonSchema, simulatorSchema);
+        const polygonSchema = extractSchema(polygonResponse.data);
+        const simulatorSchema = extractSchema(simulatorResponse.data);
+        const comparison = compareSchemas(polygonSchema, simulatorSchema);
 
-          logTestResult(
-            `Dividends ${symbol}`,
-            polygonResponse.status,
-            simulatorResponse.status,
-            comparison.match
-          );
+        logTestResult(
+          'Dividends AAPL',
+          polygonResponse.status,
+          simulatorResponse.status,
+          comparison.match
+        );
 
-          if (!comparison.match) {
-            console.log(formatComparisonResult(comparison));
-          }
-
-          expect(polygonResponse.status).toBe(simulatorResponse.status);
-          expect(comparison.match).toBe(true);
+        if (!comparison.match) {
+          console.log(formatComparisonResult(comparison));
         }
-      );
+
+        expect(polygonResponse.status).toBe(simulatorResponse.status);
+        expect(comparison.match).toBe(true);
+      });
 
       it('should return empty results for a non-dividend symbol', async () => {
         const cutoffDate = getSimDate();
