@@ -623,8 +623,8 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
                 DividendRecord d;
                 d.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
                 d.date = extract_ts_any(block[1], row);
-                d.amount = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
-                d.adjusted_amount = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
+                if (auto v = get_nullable_float(block[2], row)) d.amount = *v;
+                if (auto v = get_nullable_float(block[3], row)) d.adjusted_amount = *v;
                 d.pay_date = extract_ts_any(block[4], row);
                 d.record_date = extract_ts_any(block[5], row);
                 d.declaration_date = extract_ts_any(block[6], row);
