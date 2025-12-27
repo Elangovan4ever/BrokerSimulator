@@ -431,8 +431,11 @@ void AlpacaController::replaceOrder(const drogon::HttpRequestPtr& req,
     }
 
     // Can only replace open orders
+    if (it->second.status == OrderStatus::ACCEPTED) {
+        cb(error_resp("cannot replace order in accepted status", 422));
+        return;
+    }
     if (it->second.status != OrderStatus::NEW &&
-        it->second.status != OrderStatus::ACCEPTED &&
         it->second.status != OrderStatus::PARTIALLY_FILLED) {
         cb(error_resp("order cannot be replaced", 422));
         return;
