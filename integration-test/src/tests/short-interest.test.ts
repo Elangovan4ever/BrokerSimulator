@@ -3,14 +3,26 @@
  * Tests: /stocks/v1/short-interest
  */
 
-import { polygonClient, simulatorClient, logTestResult } from './setup';
+import { polygonClient, simulatorClient, getSimDate, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Polygon Short Interest API', () => {
   describe('GET /stocks/v1/short-interest', () => {
     it('should return matching schema for AAPL short interest', async () => {
-      const polygonResponse = await polygonClient.getShortInterest({ ticker: 'AAPL', limit: 10 });
-      const simulatorResponse = await simulatorClient.getShortInterest({ ticker: 'AAPL', limit: 10 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getShortInterest({
+        ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
+        limit: 10,
+      });
+      const simulatorResponse = await simulatorClient.getShortInterest({
+        ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
+        limit: 10,
+      });
+
+      expectResultsNotEmpty('Short interest AAPL polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short interest AAPL simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -32,16 +44,22 @@ describe('Polygon Short Interest API', () => {
     });
 
     it('should handle settlement_date.gte parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getShortInterest({
         ticker: 'AAPL',
         'settlement_date.gte': '2024-01-01',
+        'settlement_date.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getShortInterest({
         ticker: 'AAPL',
         'settlement_date.gte': '2024-01-01',
+        'settlement_date.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('Short interest settlement_date.gte polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short interest settlement_date.gte simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -59,16 +77,22 @@ describe('Polygon Short Interest API', () => {
     });
 
     it('should handle order=asc parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getShortInterest({
         ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getShortInterest({
         ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
+
+      expectResultsNotEmpty('Short interest order=asc polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short interest order=asc simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -86,8 +110,20 @@ describe('Polygon Short Interest API', () => {
     });
 
     it('should match pagination next_url presence', async () => {
-      const polygonResponse = await polygonClient.getShortInterest({ ticker: 'AAPL', limit: 1 });
-      const simulatorResponse = await simulatorClient.getShortInterest({ ticker: 'AAPL', limit: 1 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getShortInterest({
+        ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
+        limit: 1,
+      });
+      const simulatorResponse = await simulatorClient.getShortInterest({
+        ticker: 'AAPL',
+        'settlement_date.lte': cutoffDate,
+        limit: 1,
+      });
+
+      expectResultsNotEmpty('Short interest pagination polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short interest pagination simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);

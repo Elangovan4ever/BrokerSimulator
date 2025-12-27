@@ -19,6 +19,7 @@ export interface Session {
   symbols: string[];
   start_time: string;
   end_time: string;
+  current_time?: string;
 }
 
 export interface SessionStats {

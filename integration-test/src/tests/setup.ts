@@ -5,6 +5,7 @@
 
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { expect } from '@jest/globals';
 import { SessionManager } from '../utils/session-manager';
 import { PolygonClient } from '../clients/polygon-client';
 import { SimulatorClient } from '../clients/simulator-client';
@@ -29,6 +30,19 @@ export let sessionManager: SessionManager;
 export let polygonClient: PolygonClient;
 export let simulatorClient: SimulatorClient;
 export let testSessionId: string;
+export let currentSimDate: string | null = null;
+
+export function getSimDate(): string {
+  return currentSimDate || config.testStartDate;
+}
+
+export function expectResultsNotEmpty(label: string, data: unknown): void {
+  const results = (data as { results?: unknown }).results;
+  if (!Array.isArray(results)) {
+    throw new Error(`${label}: response missing results array`);
+  }
+  expect(results.length).toBeGreaterThan(0);
+}
 
 // Setup before all tests
 beforeAll(async () => {
@@ -77,6 +91,11 @@ beforeAll(async () => {
 
     // Set session ID on simulator client
     simulatorClient.setSessionId(testSessionId);
+    const session = await sessionManager.getSession(testSessionId);
+    if (session.current_time) {
+      currentSimDate = session.current_time.split('T')[0];
+      console.log(`Session current date: ${currentSimDate}`);
+    }
     console.log(`Session ${testSessionId} is ready`);
   } catch (error) {
     console.error('Warning: Failed to create session:', error);
@@ -97,6 +116,7 @@ afterAll(async () => {
       console.log(`Cleaning up session: ${testSessionId}`);
       await sessionManager.cleanup();
     }
+    polygonClient?.close();
     console.log('Cleanup complete');
   } catch (error) {
     console.error('Error during cleanup:', error);

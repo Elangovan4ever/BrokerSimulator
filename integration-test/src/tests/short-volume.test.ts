@@ -3,14 +3,26 @@
  * Tests: /stocks/v1/short-volume
  */
 
-import { polygonClient, simulatorClient, logTestResult } from './setup';
+import { polygonClient, simulatorClient, getSimDate, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Polygon Short Volume API', () => {
   describe('GET /stocks/v1/short-volume', () => {
     it('should return matching schema for AAPL short volume', async () => {
-      const polygonResponse = await polygonClient.getShortVolume({ ticker: 'AAPL', limit: 10 });
-      const simulatorResponse = await simulatorClient.getShortVolume({ ticker: 'AAPL', limit: 10 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getShortVolume({
+        ticker: 'AAPL',
+        'date.lte': cutoffDate,
+        limit: 10,
+      });
+      const simulatorResponse = await simulatorClient.getShortVolume({
+        ticker: 'AAPL',
+        'date.lte': cutoffDate,
+        limit: 10,
+      });
+
+      expectResultsNotEmpty('Short volume AAPL polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short volume AAPL simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -32,16 +44,22 @@ describe('Polygon Short Volume API', () => {
     });
 
     it('should handle date.gte parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getShortVolume({
         ticker: 'AAPL',
         'date.gte': '2024-01-01',
+        'date.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getShortVolume({
         ticker: 'AAPL',
         'date.gte': '2024-01-01',
+        'date.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('Short volume date.gte polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short volume date.gte simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -59,16 +77,22 @@ describe('Polygon Short Volume API', () => {
     });
 
     it('should handle order=asc parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getShortVolume({
         ticker: 'AAPL',
+        'date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getShortVolume({
         ticker: 'AAPL',
+        'date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
+
+      expectResultsNotEmpty('Short volume order=asc polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short volume order=asc simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -86,8 +110,20 @@ describe('Polygon Short Volume API', () => {
     });
 
     it('should match pagination next_url presence', async () => {
-      const polygonResponse = await polygonClient.getShortVolume({ ticker: 'AAPL', limit: 1 });
-      const simulatorResponse = await simulatorClient.getShortVolume({ ticker: 'AAPL', limit: 1 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getShortVolume({
+        ticker: 'AAPL',
+        'date.lte': cutoffDate,
+        limit: 1,
+      });
+      const simulatorResponse = await simulatorClient.getShortVolume({
+        ticker: 'AAPL',
+        'date.lte': cutoffDate,
+        limit: 1,
+      });
+
+      expectResultsNotEmpty('Short volume pagination polygon', polygonResponse.data);
+      expectResultsNotEmpty('Short volume pagination simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);

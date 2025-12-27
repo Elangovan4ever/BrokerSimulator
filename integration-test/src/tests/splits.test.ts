@@ -3,14 +3,26 @@
  * Tests: /v3/reference/splits
  */
 
-import { polygonClient, simulatorClient, logTestResult } from './setup';
+import { polygonClient, simulatorClient, getSimDate, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Polygon Splits API', () => {
   describe('GET /v3/reference/splits', () => {
     it('should return matching schema for AAPL splits', async () => {
-      const polygonResponse = await polygonClient.getSplits({ ticker: 'AAPL', limit: 10 });
-      const simulatorResponse = await simulatorClient.getSplits({ ticker: 'AAPL', limit: 10 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getSplits({
+        ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
+        limit: 10,
+      });
+      const simulatorResponse = await simulatorClient.getSplits({
+        ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
+        limit: 10,
+      });
+
+      expectResultsNotEmpty('Splits AAPL polygon', polygonResponse.data);
+      expectResultsNotEmpty('Splits AAPL simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -32,16 +44,22 @@ describe('Polygon Splits API', () => {
     });
 
     it('should handle execution_date.gte parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getSplits({
         ticker: 'AAPL',
         'execution_date.gte': '2010-01-01',
+        'execution_date.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getSplits({
         ticker: 'AAPL',
         'execution_date.gte': '2010-01-01',
+        'execution_date.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('Splits execution_date.gte polygon', polygonResponse.data);
+      expectResultsNotEmpty('Splits execution_date.gte simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -59,16 +77,22 @@ describe('Polygon Splits API', () => {
     });
 
     it('should handle order=asc parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getSplits({
         ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getSplits({
         ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
         order: 'asc',
         limit: 10,
       });
+
+      expectResultsNotEmpty('Splits order=asc polygon', polygonResponse.data);
+      expectResultsNotEmpty('Splits order=asc simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -86,16 +110,22 @@ describe('Polygon Splits API', () => {
     });
 
     it('should handle sort=ticker parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getSplits({
         ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
         sort: 'ticker',
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getSplits({
         ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
         sort: 'ticker',
         limit: 10,
       });
+
+      expectResultsNotEmpty('Splits sort=ticker polygon', polygonResponse.data);
+      expectResultsNotEmpty('Splits sort=ticker simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -113,8 +143,20 @@ describe('Polygon Splits API', () => {
     });
 
     it('should match pagination next_url presence', async () => {
-      const polygonResponse = await polygonClient.getSplits({ ticker: 'AAPL', limit: 1 });
-      const simulatorResponse = await simulatorClient.getSplits({ ticker: 'AAPL', limit: 1 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getSplits({
+        ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
+        limit: 1,
+      });
+      const simulatorResponse = await simulatorClient.getSplits({
+        ticker: 'AAPL',
+        'execution_date.lte': cutoffDate,
+        limit: 1,
+      });
+
+      expectResultsNotEmpty('Splits pagination polygon', polygonResponse.data);
+      expectResultsNotEmpty('Splits pagination simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);

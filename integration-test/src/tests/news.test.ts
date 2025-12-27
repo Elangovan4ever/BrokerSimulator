@@ -3,14 +3,26 @@
  * Tests: /v2/reference/news
  */
 
-import { polygonClient, simulatorClient, logTestResult } from './setup';
+import { polygonClient, simulatorClient, getSimDate, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Polygon News API', () => {
   describe('GET /v2/reference/news', () => {
     it('should return matching schema for AAPL news', async () => {
-      const polygonResponse = await polygonClient.getNews({ ticker: 'AAPL', limit: 10 });
-      const simulatorResponse = await simulatorClient.getNews({ ticker: 'AAPL', limit: 10 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getNews({
+        ticker: 'AAPL',
+        'published_utc.lte': cutoffDate,
+        limit: 10,
+      });
+      const simulatorResponse = await simulatorClient.getNews({
+        ticker: 'AAPL',
+        'published_utc.lte': cutoffDate,
+        limit: 10,
+      });
+
+      expectResultsNotEmpty('News AAPL polygon', polygonResponse.data);
+      expectResultsNotEmpty('News AAPL simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -32,16 +44,22 @@ describe('Polygon News API', () => {
     });
 
     it('should handle published_utc.gte parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getNews({
         ticker: 'AAPL',
         'published_utc.gte': '2024-01-01',
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getNews({
         ticker: 'AAPL',
         'published_utc.gte': '2024-01-01',
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('News published_utc.gte polygon', polygonResponse.data);
+      expectResultsNotEmpty('News published_utc.gte simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -59,16 +77,22 @@ describe('Polygon News API', () => {
     });
 
     it('should handle order=ascending parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getNews({
         ticker: 'AAPL',
         order: 'ascending',
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getNews({
         ticker: 'AAPL',
         order: 'ascending',
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('News order=ascending polygon', polygonResponse.data);
+      expectResultsNotEmpty('News order=ascending simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -86,16 +110,22 @@ describe('Polygon News API', () => {
     });
 
     it('should handle include_insights=false parameter', async () => {
+      const cutoffDate = getSimDate();
       const polygonResponse = await polygonClient.getNews({
         ticker: 'AAPL',
         include_insights: false,
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
       const simulatorResponse = await simulatorClient.getNews({
         ticker: 'AAPL',
         include_insights: false,
+        'published_utc.lte': cutoffDate,
         limit: 10,
       });
+
+      expectResultsNotEmpty('News include_insights=false polygon', polygonResponse.data);
+      expectResultsNotEmpty('News include_insights=false simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -113,8 +143,20 @@ describe('Polygon News API', () => {
     });
 
     it('should match pagination next_url presence', async () => {
-      const polygonResponse = await polygonClient.getNews({ ticker: 'AAPL', limit: 1 });
-      const simulatorResponse = await simulatorClient.getNews({ ticker: 'AAPL', limit: 1 });
+      const cutoffDate = getSimDate();
+      const polygonResponse = await polygonClient.getNews({
+        ticker: 'AAPL',
+        'published_utc.lte': cutoffDate,
+        limit: 1,
+      });
+      const simulatorResponse = await simulatorClient.getNews({
+        ticker: 'AAPL',
+        'published_utc.lte': cutoffDate,
+        limit: 1,
+      });
+
+      expectResultsNotEmpty('News pagination polygon', polygonResponse.data);
+      expectResultsNotEmpty('News pagination simulator', simulatorResponse.data);
 
       const polygonSchema = extractSchema(polygonResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);

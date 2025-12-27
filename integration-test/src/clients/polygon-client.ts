@@ -4,6 +4,8 @@
  */
 
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import http from 'http';
+import https from 'https';
 
 export interface PolygonClientConfig {
   apiKey: string;
@@ -12,15 +14,26 @@ export interface PolygonClientConfig {
 
 export class PolygonClient {
   private client: AxiosInstance;
+  private httpAgent: http.Agent;
+  private httpsAgent: https.Agent;
 
   constructor(config: PolygonClientConfig) {
+    this.httpAgent = new http.Agent({ keepAlive: false });
+    this.httpsAgent = new https.Agent({ keepAlive: false });
     this.client = axios.create({
       baseURL: config.baseUrl || 'https://api.polygon.io',
       timeout: 30000,
+      httpAgent: this.httpAgent,
+      httpsAgent: this.httpsAgent,
       headers: {
         'Authorization': `Bearer ${config.apiKey}`,
       },
     });
+  }
+
+  close(): void {
+    this.httpAgent.destroy();
+    this.httpsAgent.destroy();
   }
 
   // ============ Aggregates (Bars) ============
