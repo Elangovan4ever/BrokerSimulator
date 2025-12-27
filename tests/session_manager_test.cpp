@@ -100,6 +100,15 @@ public:
         return {};
     }
 
+    std::vector<StockTickerEventRecord> get_stock_ticker_events(const StockTickerEventsQuery&) override {
+        return {};
+    }
+
+    std::optional<TickerBasicRecord> get_ticker_basic(const std::string&,
+                                                      std::optional<Timestamp>) override {
+        return std::nullopt;
+    }
+
     std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery&) override {
         return {};
     }
