@@ -43,6 +43,11 @@ describeIfKey('Finnhub News API', () => {
         console.log(formatComparisonResult(comparison));
       }
 
+      if (Array.isArray(finnhubResponse.data) && finnhubResponse.data.length > 0) {
+        expect(Array.isArray(simulatorResponse.data)).toBe(true);
+        expect(simulatorResponse.data.length).toBeGreaterThan(0);
+      }
+
       expect(finnhubResponse.status).toBe(simulatorResponse.status);
       expect(comparison.match).toBe(true);
     });
@@ -69,6 +74,11 @@ describeIfKey('Finnhub News API', () => {
 
       if (!comparison.match) {
         console.log(formatComparisonResult(comparison));
+      }
+
+      if (Array.isArray(finnhubResponse.data) && finnhubResponse.data.length > 0) {
+        expect(Array.isArray(simulatorResponse.data)).toBe(true);
+        expect(simulatorResponse.data.length).toBeGreaterThan(0);
       }
 
       expect(finnhubResponse.status).toBe(simulatorResponse.status);

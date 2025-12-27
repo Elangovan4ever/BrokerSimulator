@@ -45,6 +45,11 @@ describeIfKey('Finnhub Financials API', () => {
         console.log(formatComparisonResult(comparison));
       }
 
+      if (Array.isArray(finnhubResponse.data?.data) && finnhubResponse.data.data.length > 0) {
+        expect(Array.isArray(simulatorResponse.data?.data)).toBe(true);
+        expect(simulatorResponse.data.data.length).toBeGreaterThan(0);
+      }
+
       expect(finnhubResponse.status).toBe(simulatorResponse.status);
       expect(comparison.match).toBe(true);
     });
@@ -71,6 +76,11 @@ describeIfKey('Finnhub Financials API', () => {
 
       if (!comparison.match) {
         console.log(formatComparisonResult(comparison));
+      }
+
+      if (Array.isArray(finnhubResponse.data?.data) && finnhubResponse.data.data.length > 0) {
+        expect(Array.isArray(simulatorResponse.data?.data)).toBe(true);
+        expect(simulatorResponse.data.data.length).toBeGreaterThan(0);
       }
 
       expect(finnhubResponse.status).toBe(simulatorResponse.status);
