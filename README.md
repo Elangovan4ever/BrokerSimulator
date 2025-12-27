@@ -25,8 +25,12 @@ Defaults are in `config/settings.json`:
 }
 ```
 
-### Manager UI (`manager-ui/.env`)
-The UI reads Vite env vars:
+### Manager UI (`manager-ui/.env.example`)
+The UI reads Vite env vars. Copy `manager-ui/.env.example` to `manager-ui/.env` and edit as needed:
+```bash
+cp manager-ui/.env.example manager-ui/.env
+```
+Expected values:
 ```
 VITE_SIMULATOR_HOST=elanlinux
 VITE_CONTROL_PORT=8000
