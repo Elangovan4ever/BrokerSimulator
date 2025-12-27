@@ -2726,8 +2726,8 @@ Timestamp ClickHouseDataSource::extract_ts_any(const clickhouse::ColumnRef& col,
         return Timestamp{} + std::chrono::seconds(secs);
     }
     if (auto c = col->As<clickhouse::ColumnDate>()) {
-        auto days = c->At(row);
-        return Timestamp{} + std::chrono::hours(24 * days);
+        auto secs = c->At(row);
+        return Timestamp{} + std::chrono::seconds(secs);
     }
     return Timestamp{};
 }
