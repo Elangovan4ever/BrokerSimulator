@@ -22,6 +22,7 @@ export const config = {
   finnhubApiKey: process.env.FINNHUB_API_KEY || '',
   simulatorHost: process.env.SIMULATOR_HOST || 'elanlinux',
   controlPort: parseInt(process.env.CONTROL_PORT || '8000', 10),
+  alpacaPort: parseInt(process.env.ALPACA_PORT || '8100', 10),
   polygonPort: parseInt(process.env.POLYGON_PORT || '8200', 10),
   finnhubPort: parseInt(process.env.FINNHUB_PORT || '8300', 10),
   polygonBaseUrl: process.env.POLYGON_BASE_URL || 'https://api.polygon.io',
@@ -68,6 +69,7 @@ beforeAll(async () => {
   console.log('========================================');
   console.log(`Simulator Host: ${config.simulatorHost}`);
   console.log(`Control Port: ${config.controlPort}`);
+  console.log(`Alpaca Port: ${config.alpacaPort}`);
   console.log(`Polygon Port: ${config.polygonPort}`);
   console.log(`Finnhub Port: ${config.finnhubPort}`);
   console.log(`Test Symbols: ${config.testSymbols.join(', ')}`);
