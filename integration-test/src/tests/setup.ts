@@ -5,10 +5,13 @@
 
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import axios from 'axios';
 import { expect } from '@jest/globals';
 import { SessionManager } from '../utils/session-manager';
 import { PolygonClient } from '../clients/polygon-client';
 import { SimulatorClient } from '../clients/simulator-client';
+import { FinnhubClient } from '../clients/finnhub-client';
+import { FinnhubSimulatorClient } from '../clients/finnhub-simulator-client';
 
 // Load environment variables
 dotenv.config({ path: path.join(__dirname, '../../.env.test') });
@@ -16,10 +19,13 @@ dotenv.config({ path: path.join(__dirname, '../../.env.test') });
 // Global test configuration
 export const config = {
   polygonApiKey: process.env.POLYGON_API_KEY || '',
+  finnhubApiKey: process.env.FINNHUB_API_KEY || '',
   simulatorHost: process.env.SIMULATOR_HOST || 'elanlinux',
   controlPort: parseInt(process.env.CONTROL_PORT || '8000', 10),
   polygonPort: parseInt(process.env.POLYGON_PORT || '8200', 10),
+  finnhubPort: parseInt(process.env.FINNHUB_PORT || '8300', 10),
   polygonBaseUrl: process.env.POLYGON_BASE_URL || 'https://api.polygon.io',
+  finnhubBaseUrl: process.env.FINNHUB_BASE_URL || 'https://finnhub.io/api/v1',
   testSymbols: (process.env.TEST_SYMBOLS || 'AAPL,MSFT,AMZN').split(','),
   testStartDate: process.env.TEST_START_DATE || '2025-01-13',
   testEndDate: process.env.TEST_END_DATE || '2025-01-17',
@@ -29,6 +35,9 @@ export const config = {
 export let sessionManager: SessionManager;
 export let polygonClient: PolygonClient;
 export let simulatorClient: SimulatorClient;
+export let finnhubClient: FinnhubClient;
+export let finnhubSimulatorClient: FinnhubSimulatorClient;
+export let finnhubApiAvailable = false;
 export let testSessionId: string;
 export let currentSimDate: string | null = null;
 
@@ -52,6 +61,7 @@ beforeAll(async () => {
   console.log(`Simulator Host: ${config.simulatorHost}`);
   console.log(`Control Port: ${config.controlPort}`);
   console.log(`Polygon Port: ${config.polygonPort}`);
+  console.log(`Finnhub Port: ${config.finnhubPort}`);
   console.log(`Test Symbols: ${config.testSymbols.join(', ')}`);
   console.log(`Date Range: ${config.testStartDate} to ${config.testEndDate}`);
   console.log('========================================\n');
@@ -70,6 +80,34 @@ beforeAll(async () => {
     host: config.simulatorHost,
     port: config.polygonPort,
   });
+
+  // Initialize Finnhub client (real API)
+  finnhubClient = new FinnhubClient({
+    apiKey: config.finnhubApiKey,
+    baseUrl: config.finnhubBaseUrl,
+  });
+
+  // Initialize Finnhub Simulator client
+  finnhubSimulatorClient = new FinnhubSimulatorClient({
+    host: config.simulatorHost,
+    port: config.finnhubPort,
+  });
+
+  if (config.finnhubApiKey) {
+    try {
+      await finnhubClient.getQuote(config.testSymbols[0] || 'AAPL');
+      finnhubApiAvailable = true;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 401) {
+        console.warn('Finnhub API key invalid. Finnhub comparison tests will be skipped.');
+      } else {
+        console.warn('Finnhub API check failed. Finnhub comparison tests will be skipped.');
+      }
+      finnhubApiAvailable = false;
+    }
+  } else {
+    console.warn('FINNHUB_API_KEY not set. Finnhub comparison tests will be skipped.');
+  }
 
   // Create a session for tests that require cached data (lastTrade, lastQuote, snapshots)
   try {
@@ -117,6 +155,7 @@ afterAll(async () => {
       await sessionManager.cleanup();
     }
     polygonClient?.close();
+    finnhubClient?.close();
     console.log('Cleanup complete');
   } catch (error) {
     console.error('Error during cleanup:', error);
