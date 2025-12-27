@@ -3,7 +3,7 @@
  * Tests: /v2/aggs/ticker/{symbol}/range/..., /v2/aggs/ticker/{symbol}/prev, grouped daily
  */
 
-import { polygonClient, simulatorClient, config, logTestResult } from './setup';
+import { polygonClient, simulatorClient, config, expectResultsNotEmpty, logTestResult } from './setup';
 import { extractSchema, compareSchemas, formatComparisonResult } from '../utils/schema-compare';
 
 describe('Polygon Aggregates API', () => {
@@ -402,6 +402,14 @@ describe('Polygon Aggregates API', () => {
           expect(comparison.match).toBe(true);
         }
       );
+
+      it('should return non-empty previous close for AAPL', async () => {
+        const polygonResponse = await polygonClient.getPreviousClose('AAPL');
+        const simulatorResponse = await simulatorClient.getPreviousClose('AAPL');
+
+        expectResultsNotEmpty('Previous close AAPL polygon', polygonResponse.data);
+        expectResultsNotEmpty('Previous close AAPL simulator', simulatorResponse.data);
+      });
     });
 
     describe('Optional Parameters', () => {
