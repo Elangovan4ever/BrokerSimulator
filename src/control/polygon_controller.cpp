@@ -361,7 +361,7 @@ void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
     bool adjusted = req->getParameter("adjusted") != "false";
     json results = json::array();
 
-    // Get previous day's bar (latest full trading day before current ET day)
+    // Get previous day's bar (regular session for the last completed trading day)
     if (session && session->time_engine) {
         auto data_source = session_mgr_->api_data_source();
         if (data_source) {
@@ -375,23 +375,60 @@ void PolygonController::aggsPrev(const drogon::HttpRequestPtr& req,
             tm_et.tm_sec = 0;
 
             auto et_midnight_tt = timegm(&tm_et);
-            auto day_start_tt = et_midnight_tt + kEtOffsetSec;
-            auto day_start = std::chrono::system_clock::from_time_t(day_start_tt);
-            auto lookback_start = day_start - std::chrono::hours(24 * 14);
+            for (int attempts = 0; attempts < 10; ++attempts) {
+                et_midnight_tt -= 24 * 3600;
+                auto day_midnight_tp = std::chrono::system_clock::from_time_t(et_midnight_tt);
+                std::tm day_tm = *std::gmtime(&et_midnight_tt);
+                bool weekend = (day_tm.tm_wday == 0 || day_tm.tm_wday == 6);
+                bool holiday = cfg_.execution.is_market_holiday(day_midnight_tp);
+                if (weekend || holiday) {
+                    continue;
+                }
 
-            auto bars = data_source->get_bars(symbol, lookback_start, day_start, 1, "day", 0);
-            if (!bars.empty()) {
-                const auto& bar = bars.back();
+                std::tm start_tm = day_tm;
+                start_tm.tm_hour = 9;
+                start_tm.tm_min = 30;
+                start_tm.tm_sec = 0;
+                std::tm end_tm = day_tm;
+                end_tm.tm_hour = 16;
+                end_tm.tm_min = 0;
+                end_tm.tm_sec = 0;
+
+                auto start_tt = timegm(&start_tm) + kEtOffsetSec;
+                auto end_tt = timegm(&end_tm) + kEtOffsetSec;
+                auto start = std::chrono::system_clock::from_time_t(start_tt);
+                auto end = std::chrono::system_clock::from_time_t(end_tt);
+
+                auto bars = data_source->get_bars(symbol, start, end, 1, "minute", 0);
+                if (bars.empty()) {
+                    continue;
+                }
+
+                double high = bars.front().high;
+                double low = bars.front().low;
+                double vwap_num = 0.0;
+                int64_t volume = 0;
+                uint64_t trade_count = 0;
+                for (const auto& bar : bars) {
+                    high = std::max(high, bar.high);
+                    low = std::min(low, bar.low);
+                    volume += bar.volume;
+                    vwap_num += bar.vwap * static_cast<double>(bar.volume);
+                    trade_count += bar.trade_count;
+                }
+                double vwap = volume > 0 ? vwap_num / static_cast<double>(volume) : 0.0;
+
                 json bar_item;
-                bar_item["v"] = bar.volume;
-                bar_item["vw"] = bar.vwap;
-                bar_item["o"] = bar.open;
-                bar_item["c"] = bar.close;
-                bar_item["h"] = bar.high;
-                bar_item["l"] = bar.low;
-                bar_item["t"] = utils::ts_to_ms(bar.timestamp);
-                bar_item["n"] = bar.trade_count;
+                bar_item["v"] = volume;
+                bar_item["vw"] = vwap;
+                bar_item["o"] = bars.front().open;
+                bar_item["c"] = bars.back().close;
+                bar_item["h"] = high;
+                bar_item["l"] = low;
+                bar_item["t"] = utils::ts_to_ms(end);
+                bar_item["n"] = trade_count;
                 results.push_back(bar_item);
+                break;
             }
         }
     }
