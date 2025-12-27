@@ -12,8 +12,8 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
     { method: 'POST', path: '/sessions/{session_id}/pause', description: 'Pause session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'POST', path: '/sessions/{session_id}/resume', description: 'Resume session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
     { method: 'POST', path: '/sessions/{session_id}/stop', description: 'Stop session', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }] },
-    { method: 'POST', path: '/sessions/{session_id}/set_speed', description: 'Set replay speed', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { speed_factor: 10.0 } },
-    { method: 'POST', path: '/sessions/{session_id}/jump_to', description: 'Jump to timestamp', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { timestamp: '2025-01-13T10:00:00' } },
+    { method: 'POST', path: '/sessions/{session_id}/speed', description: 'Set replay speed', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { speed: 10.0 } },
+    { method: 'POST', path: '/sessions/{session_id}/jump', description: 'Jump to timestamp', params: [{ name: 'session_id', type: 'path', required: true, description: 'Session ID' }], body: { timestamp: '2025-01-13T10:00:00' } },
   ],
 
   alpaca: [

@@ -20,6 +20,7 @@ export interface Session {
   start_time: string;
   end_time: string;
   current_time?: string;
+  speed_factor?: number;
 }
 
 export interface SessionStats {
@@ -30,6 +31,11 @@ export interface SessionStats {
   last_event_ns: number;
   events_enqueued: number;
   events_dropped: number;
+}
+
+export interface SessionTime {
+  current_time: string;
+  speed_factor: number;
 }
 
 export class SessionManager {
@@ -114,6 +120,86 @@ export class SessionManager {
   }
 
   /**
+   * Pause a session
+   */
+  async pauseSession(sessionId?: string): Promise<void> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      await this.client.post(`/sessions/${id}/pause`);
+      console.log(`Paused session: ${id}`);
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to pause session: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Resume a session
+   */
+  async resumeSession(sessionId?: string): Promise<void> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      await this.client.post(`/sessions/${id}/resume`);
+      console.log(`Resumed session: ${id}`);
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to resume session: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Set replay speed
+   */
+  async setSpeed(speed: number, sessionId?: string): Promise<void> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      await this.client.post(`/sessions/${id}/speed`, { speed });
+      console.log(`Set speed for session ${id} to ${speed}`);
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to set speed: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Jump session time
+   */
+  async jumpTo(timestamp: string, sessionId?: string): Promise<void> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      await this.client.post(`/sessions/${id}/jump`, { timestamp });
+      console.log(`Jumped session ${id} to ${timestamp}`);
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to jump session time: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Delete a session
    */
   async deleteSession(sessionId?: string): Promise<void> {
@@ -151,6 +237,26 @@ export class SessionManager {
     } catch (error) {
       if (axios.isAxiosError(error)) {
         throw new Error(`Failed to get session: ${error.response?.data?.error || error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Get session time metadata
+   */
+  async getSessionTime(sessionId?: string): Promise<SessionTime> {
+    const id = sessionId || this.activeSessionId;
+    if (!id) {
+      throw new Error('No session ID provided and no active session');
+    }
+
+    try {
+      const response = await this.client.get(`/sessions/${id}/time`);
+      return response.data as SessionTime;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(`Failed to get session time: ${error.response?.data?.error || error.message}`);
       }
       throw error;
     }

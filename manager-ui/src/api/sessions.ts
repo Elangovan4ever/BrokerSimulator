@@ -84,14 +84,14 @@ export const sessionsApi = {
 
   // Time Control
   async setSpeed(sessionId: string, speedFactor: number): Promise<Session> {
-    await controlClient.post(`/sessions/${sessionId}/set_speed`, {
-      speed_factor: speedFactor,
+    await controlClient.post(`/sessions/${sessionId}/speed`, {
+      speed: speedFactor,
     });
     return this.getSession(sessionId);
   },
 
   async jumpToTime(sessionId: string, timestamp: string): Promise<Session> {
-    await controlClient.post(`/sessions/${sessionId}/jump_to`, {
+    await controlClient.post(`/sessions/${sessionId}/jump`, {
       timestamp,
     });
     return this.getSession(sessionId);
