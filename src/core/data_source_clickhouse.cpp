@@ -1107,10 +1107,11 @@ std::vector<StockIpoRecord> ClickHouseDataSource::get_stock_ipos(const StockIpos
             auto ts = format_timestamp(*query.max_date);
             where.push_back(fmt::format(R"(
                 (
-                    (last_updated IS NOT NULL AND last_updated <= toDate('{0}')) OR
-                    (last_updated IS NULL AND announced_date IS NOT NULL AND announced_date <= toDate('{0}')) OR
-                    (last_updated IS NULL AND announced_date IS NULL AND listing_date IS NOT NULL AND listing_date <= toDate('{0}')) OR
-                    (last_updated IS NULL AND announced_date IS NULL AND listing_date IS NULL)
+                    (listing_date IS NOT NULL AND listing_date <= toDate('{0}')) OR
+                    (listing_date IS NULL AND announced_date IS NOT NULL AND announced_date <= toDate('{0}')) OR
+                    (listing_date IS NULL AND announced_date IS NULL AND issue_end_date IS NOT NULL AND issue_end_date <= toDate('{0}')) OR
+                    (listing_date IS NULL AND announced_date IS NULL AND issue_end_date IS NULL AND issue_start_date IS NOT NULL AND issue_start_date <= toDate('{0}')) OR
+                    (listing_date IS NULL AND announced_date IS NULL AND issue_end_date IS NULL AND issue_start_date IS NULL)
                 )
             )", ts));
         }
