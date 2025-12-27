@@ -418,7 +418,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
     auto end_str = format_timestamp(end_time);
     // finnhub_company_news: category is LowCardinality(String)
     std::string query = fmt::format(R"(
-        SELECT datetime, headline, summary, source_name, url, image, CAST(category AS String), related, id
+        SELECT datetime, headline, summary, source_name, url, image, CAST(category AS String), related, id, raw_json
         FROM finnhub_company_news
         WHERE symbol = '{}'
           AND datetime >= '{}'
@@ -439,6 +439,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
                 n.category = block[6]->As<clickhouse::ColumnString>()->At(row);
                 n.related = block[7]->As<clickhouse::ColumnString>()->At(row);
                 n.id = block[8]->As<clickhouse::ColumnInt64>()->At(row);
+                n.raw_json = block[9]->As<clickhouse::ColumnString>()->At(row);
                 out.push_back(std::move(n));
             }
         });
@@ -607,7 +608,8 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
                toDateTime(payment_date) as pay_dt,
                toDateTime(record_date) as record_dt,
                toDateTime(declared_date) as decl_dt,
-               CAST(currency AS String)
+               CAST(currency AS String),
+               raw_json
         FROM finnhub_dividends
         WHERE symbol = '{}'
           AND ex_date >= toDate('{}')
@@ -627,6 +629,7 @@ std::vector<DividendRecord> ClickHouseDataSource::get_dividends(const std::strin
                 d.record_date = extract_ts(block[5], row);
                 d.declaration_date = extract_ts(block[6], row);
                 d.currency = block[7]->As<clickhouse::ColumnString>()->At(row);
+                d.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
                 out.push_back(std::move(d));
             }
         });
@@ -1905,18 +1908,22 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
     std::string query = fmt::format(R"(
         SELECT CAST(symbol AS String), date, quarter, year,
                toFloat64(eps_estimate), toFloat64(eps_actual),
                toFloat64(revenue_estimate), toFloat64(revenue_actual),
                CAST(hour AS String)
         FROM finnhub_earnings_calendar
-        WHERE symbol = '{}'
-          AND date >= toDate('{}')
+        WHERE date >= toDate('{}')
           AND date < toDate('{}')
+          {}
         ORDER BY date DESC
         {}
-    )", symbol, start_str, end_str, limit_clause(limit));
+    )", start_str, end_str, where_symbol, limit_clause(limit));
     try {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
@@ -2020,16 +2027,20 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, from_grade, to_grade, action are LowCardinality(String)
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
     std::string query = fmt::format(R"(
         SELECT CAST(symbol AS String), grade_time, company,
                CAST(from_grade AS String), CAST(to_grade AS String), CAST(action AS String)
         FROM finnhub_upgrades_downgrades
-        WHERE symbol = '{}'
-          AND grade_time >= toDateTime('{}')
+        WHERE grade_time >= toDateTime('{}')
           AND grade_time < toDateTime('{}')
+          {}
         ORDER BY grade_time DESC
         {}
-    )", symbol, start_str, end_str, limit_clause(limit));
+    )", start_str, end_str, where_symbol, limit_clause(limit));
     try {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
@@ -2045,6 +2056,607 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
         });
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse get_upgrades_downgrades failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubIpoRecord> ClickHouseDataSource::get_finnhub_ipo_calendar(Timestamp start_time,
+                                                                             Timestamp end_time,
+                                                                             size_t limit) {
+    std::vector<FinnhubIpoRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), date, exchange, name, number_of_shares, price_range,
+               CAST(status AS String), total_shares_value, raw_json
+        FROM finnhub_ipo_calendar
+        WHERE date >= toDate('{}')
+          AND date < toDate('{}')
+        ORDER BY date DESC
+        {}
+    )", start_str, end_str, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubIpoRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.date = extract_ts_any(block[1], row);
+                r.exchange = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.name = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.number_of_shares = get_nullable_uint64(block[4], row);
+                r.price_range = block[5]->As<clickhouse::ColumnString>()->At(row);
+                r.status = block[6]->As<clickhouse::ColumnString>()->At(row);
+                r.total_shares_value = get_nullable_uint64(block[7], row);
+                r.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_ipo_calendar failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<CompanyNewsRecord> ClickHouseDataSource::get_finnhub_market_news(Timestamp start_time,
+                                                                             Timestamp end_time,
+                                                                             size_t limit) {
+    std::vector<CompanyNewsRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string query = fmt::format(R"(
+        SELECT CAST(category AS String), datetime, headline, source_name, url, summary, image, id, raw_json
+        FROM finnhub_market_news
+        WHERE datetime >= toDateTime('{}')
+          AND datetime < toDateTime('{}')
+        ORDER BY datetime DESC
+        {}
+    )", start_str, end_str, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                CompanyNewsRecord n;
+                n.category = block[0]->As<clickhouse::ColumnString>()->At(row);
+                n.datetime = extract_ts_any(block[1], row);
+                n.headline = block[2]->As<clickhouse::ColumnString>()->At(row);
+                n.source = block[3]->As<clickhouse::ColumnString>()->At(row);
+                n.url = block[4]->As<clickhouse::ColumnString>()->At(row);
+                n.summary = block[5]->As<clickhouse::ColumnString>()->At(row);
+                n.image = block[6]->As<clickhouse::ColumnString>()->At(row);
+                n.id = block[7]->As<clickhouse::ColumnUInt64>()->At(row);
+                n.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(n));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_market_news failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubInsiderTransactionRecord> ClickHouseDataSource::get_finnhub_insider_transactions(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubInsiderTransactionRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), filing_id, transaction_date, name,
+               toFloat64(share), toFloat64(change), toFloat64(transaction_price),
+               CAST(transaction_code AS String), raw_json
+        FROM finnhub_insider_transactions
+        WHERE transaction_date >= toDate('{}')
+          AND transaction_date < toDate('{}')
+          {}
+        ORDER BY transaction_date DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubInsiderTransactionRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.filing_id = block[1]->As<clickhouse::ColumnString>()->At(row);
+                r.transaction_date = extract_ts_any(block[2], row);
+                r.name = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.share = get_nullable_float(block[4], row);
+                r.change = get_nullable_float(block[5], row);
+                r.transaction_price = get_nullable_float(block[6], row);
+                r.transaction_code = block[7]->As<clickhouse::ColumnString>()->At(row);
+                r.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_insider_transactions failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubSecFilingRecord> ClickHouseDataSource::get_finnhub_sec_filings(const std::string& symbol,
+                                                                                  Timestamp start_time,
+                                                                                  Timestamp end_time,
+                                                                                  size_t limit) {
+    std::vector<FinnhubSecFilingRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), filed_date, accepted_datetime, CAST(form AS String),
+               access_number, report_url, raw_json
+        FROM finnhub_sec_filings
+        WHERE filed_date >= toDate('{}')
+          AND filed_date < toDate('{}')
+          {}
+        ORDER BY filed_date DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubSecFilingRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.filed_date = extract_ts_any(block[1], row);
+                r.accepted_datetime = extract_ts_any(block[2], row);
+                r.form = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.access_number = block[4]->As<clickhouse::ColumnString>()->At(row);
+                r.report_url = block[5]->As<clickhouse::ColumnString>()->At(row);
+                r.raw_json = block[6]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_sec_filings failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubCongressionalTradingRecord> ClickHouseDataSource::get_finnhub_congressional_trading(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubCongressionalTradingRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), transaction_date, name,
+               CAST(position AS String), CAST(owner_type AS String), CAST(transaction_type AS String),
+               amount_from, amount_to, asset_name, filing_date, raw_json
+        FROM finnhub_congressional_trading
+        WHERE transaction_date >= toDate('{}')
+          AND transaction_date < toDate('{}')
+          {}
+        ORDER BY transaction_date DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubCongressionalTradingRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.transaction_date = extract_ts_any(block[1], row);
+                r.name = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.position = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.owner_type = block[4]->As<clickhouse::ColumnString>()->At(row);
+                r.transaction_type = block[5]->As<clickhouse::ColumnString>()->At(row);
+                r.amount_from = get_nullable_uint64(block[6], row);
+                r.amount_to = get_nullable_uint64(block[7], row);
+                r.asset_name = block[8]->As<clickhouse::ColumnString>()->At(row);
+                r.filing_date = extract_ts_any(block[9], row);
+                r.raw_json = block[10]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_congressional_trading failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubInsiderSentimentRecord> ClickHouseDataSource::get_finnhub_insider_sentiment(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubInsiderSentimentRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), year, month, toFloat64(change), toFloat64(mspr)
+        FROM finnhub_insider_sentiment
+        WHERE makeDate(year, month, 1) >= toDate('{}')
+          AND makeDate(year, month, 1) < toDate('{}')
+          {}
+        ORDER BY year DESC, month DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubInsiderSentimentRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.year = block[1]->As<clickhouse::ColumnUInt16>()->At(row);
+                r.month = block[2]->As<clickhouse::ColumnUInt8>()->At(row);
+                r.change = get_nullable_float(block[3], row);
+                r.mspr = get_nullable_float(block[4], row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_insider_sentiment failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubEpsEstimateRecord> ClickHouseDataSource::get_finnhub_eps_estimates(const std::string& symbol,
+                                                                                      Timestamp start_time,
+                                                                                      Timestamp end_time,
+                                                                                      const std::string& freq,
+                                                                                      size_t limit) {
+    std::vector<FinnhubEpsEstimateRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string where_freq;
+    if (!freq.empty()) {
+        where_freq = fmt::format("AND freq = '{}'", freq);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), period, quarter, year,
+               toFloat64(eps_avg), toFloat64(eps_high), toFloat64(eps_low),
+               number_analysts, CAST(freq AS String)
+        FROM finnhub_eps_estimates
+        WHERE period >= toDate('{}')
+          AND period < toDate('{}')
+          {}
+          {}
+        ORDER BY period DESC
+        {}
+    )", start_str, end_str, where_symbol, where_freq, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubEpsEstimateRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.period = extract_ts_any(block[1], row);
+                r.quarter = get_nullable_uint16(block[2], row);
+                r.year = get_nullable_uint16(block[3], row);
+                r.eps_avg = get_nullable_float(block[4], row);
+                r.eps_high = get_nullable_float(block[5], row);
+                r.eps_low = get_nullable_float(block[6], row);
+                r.number_analysts = get_nullable_uint16(block[7], row);
+                r.freq = block[8]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_eps_estimates failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubRevenueEstimateRecord> ClickHouseDataSource::get_finnhub_revenue_estimates(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    const std::string& freq,
+    size_t limit) {
+    std::vector<FinnhubRevenueEstimateRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string where_freq;
+    if (!freq.empty()) {
+        where_freq = fmt::format("AND freq = '{}'", freq);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), period, quarter, year,
+               toFloat64(revenue_avg), toFloat64(revenue_high), toFloat64(revenue_low),
+               number_analysts, CAST(freq AS String)
+        FROM finnhub_revenue_estimates
+        WHERE period >= toDate('{}')
+          AND period < toDate('{}')
+          {}
+          {}
+        ORDER BY period DESC
+        {}
+    )", start_str, end_str, where_symbol, where_freq, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubRevenueEstimateRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.period = extract_ts_any(block[1], row);
+                r.quarter = get_nullable_uint16(block[2], row);
+                r.year = get_nullable_uint16(block[3], row);
+                r.revenue_avg = get_nullable_float(block[4], row);
+                r.revenue_high = get_nullable_float(block[5], row);
+                r.revenue_low = get_nullable_float(block[6], row);
+                r.number_analysts = get_nullable_uint16(block[7], row);
+                r.freq = block[8]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_revenue_estimates failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubEarningsHistoryRecord> ClickHouseDataSource::get_finnhub_earnings_history(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubEarningsHistoryRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), period, quarter, year,
+               toFloat64(actual), toFloat64(estimate), toFloat64(surprise), toFloat64(surprise_percent)
+        FROM finnhub_earnings_history
+        WHERE period >= toDate('{}')
+          AND period < toDate('{}')
+          {}
+        ORDER BY period DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubEarningsHistoryRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.period = extract_ts_any(block[1], row);
+                r.quarter = get_nullable_uint16(block[2], row);
+                r.year = get_nullable_uint16(block[3], row);
+                r.actual = get_nullable_float(block[4], row);
+                r.estimate = get_nullable_float(block[5], row);
+                r.surprise = get_nullable_float(block[6], row);
+                r.surprise_percent = get_nullable_float(block[7], row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_earnings_history failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubSocialSentimentRecord> ClickHouseDataSource::get_finnhub_social_sentiment(
+    const std::string& symbol,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubSocialSentimentRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), at_time, mention, positive_score, negative_score,
+               positive_mention, negative_mention, score
+        FROM finnhub_social_sentiment
+        WHERE at_time >= toDateTime('{}')
+          AND at_time < toDateTime('{}')
+          {}
+        ORDER BY at_time DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubSocialSentimentRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.at_time = extract_ts_any(block[1], row);
+                r.mention = get_nullable_uint32(block[2], row);
+                r.positive_score = get_nullable_float(block[3], row);
+                r.negative_score = get_nullable_float(block[4], row);
+                r.positive_mention = get_nullable_uint32(block[5], row);
+                r.negative_mention = get_nullable_uint32(block[6], row);
+                r.score = get_nullable_float(block[7], row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_social_sentiment failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubOwnershipRecord> ClickHouseDataSource::get_finnhub_ownership(const std::string& symbol,
+                                                                                Timestamp start_time,
+                                                                                Timestamp end_time,
+                                                                                size_t limit) {
+    std::vector<FinnhubOwnershipRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), report_date, organization,
+               toFloat64(position), toFloat64(position_change), toFloat64(percent_held), raw_json
+        FROM finnhub_ownership
+        WHERE report_date >= toDate('{}')
+          AND report_date < toDate('{}')
+          {}
+        ORDER BY report_date DESC
+        {}
+    )", start_str, end_str, where_symbol, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubOwnershipRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.report_date = extract_ts_any(block[1], row);
+                r.organization = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.position = get_nullable_float(block[3], row);
+                r.position_change = get_nullable_float(block[4], row);
+                r.percent_held = get_nullable_float(block[5], row);
+                r.raw_json = block[6]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_ownership failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubFinancialsStandardizedRecord> ClickHouseDataSource::get_finnhub_financials_standardized(
+    const std::string& symbol,
+    const std::string& statement,
+    const std::string& freq,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubFinancialsStandardizedRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string where_statement;
+    if (!statement.empty()) {
+        where_statement = fmt::format("AND statement = '{}'", statement);
+    }
+    std::string where_freq;
+    if (!freq.empty()) {
+        where_freq = fmt::format("AND freq = '{}'", freq);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), CAST(statement AS String), period, CAST(freq AS String),
+               CAST(currency AS String), data_json
+        FROM finnhub_financials_standardized
+        WHERE period >= toDate('{}')
+          AND period < toDate('{}')
+          {}
+          {}
+          {}
+        ORDER BY period DESC
+        {}
+    )", start_str, end_str, where_symbol, where_statement, where_freq, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubFinancialsStandardizedRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.statement = block[1]->As<clickhouse::ColumnString>()->At(row);
+                r.period = extract_ts_any(block[2], row);
+                r.freq = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.currency = block[4]->As<clickhouse::ColumnString>()->At(row);
+                r.data_json = block[5]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_financials_standardized failed: {}", e.what());
+        out.clear();
+    }
+    return out;
+}
+
+std::vector<FinnhubFinancialsReportedRecord> ClickHouseDataSource::get_finnhub_financials_reported(
+    const std::string& symbol,
+    const std::string& freq,
+    Timestamp start_time,
+    Timestamp end_time,
+    size_t limit) {
+    std::vector<FinnhubFinancialsReportedRecord> out;
+    if (!client_) return out;
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+    std::string where_symbol;
+    if (!symbol.empty()) {
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+    }
+    std::string where_freq;
+    if (!freq.empty()) {
+        where_freq = fmt::format("AND freq = '{}'", freq);
+    }
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), period, CAST(freq AS String), access_number, form,
+               filed_date, accepted_datetime, data_json
+        FROM finnhub_financials_reported
+        WHERE period >= toDate('{}')
+          AND period < toDate('{}')
+          {}
+          {}
+        ORDER BY period DESC
+        {}
+    )", start_str, end_str, where_symbol, where_freq, limit_clause(limit));
+    try {
+        client_->Select(query, [&out](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                FinnhubFinancialsReportedRecord r;
+                r.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                r.period = extract_ts_any(block[1], row);
+                r.freq = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.access_number = block[3]->As<clickhouse::ColumnString>()->At(row);
+                r.form = block[4]->As<clickhouse::ColumnString>()->At(row);
+                r.filed_date = extract_ts_any(block[5], row);
+                r.accepted_datetime = extract_ts_any(block[6], row);
+                r.data_json = block[7]->As<clickhouse::ColumnString>()->At(row);
+                out.push_back(std::move(r));
+            }
+        });
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_finnhub_financials_reported failed: {}", e.what());
         out.clear();
     }
     return out;
@@ -2155,6 +2767,18 @@ std::optional<uint32_t> ClickHouseDataSource::get_nullable_uint32(const clickhou
     if (auto v = col->As<clickhouse::ColumnUInt32>()) return v->At(row);
     if (auto v = col->As<clickhouse::ColumnUInt16>()) return v->At(row);
     if (auto v = col->As<clickhouse::ColumnUInt8>()) return v->At(row);
+    return std::nullopt;
+}
+
+std::optional<uint64_t> ClickHouseDataSource::get_nullable_uint64(const clickhouse::ColumnRef& col, size_t row) {
+    if (auto c = col->As<clickhouse::ColumnNullable>()) {
+        if (c->IsNull(row)) return std::nullopt;
+        auto nested = c->Nested();
+        if (auto v = nested->As<clickhouse::ColumnUInt64>()) return v->At(row);
+        if (auto v = nested->As<clickhouse::ColumnUInt32>()) return v->At(row);
+    }
+    if (auto v = col->As<clickhouse::ColumnUInt64>()) return v->At(row);
+    if (auto v = col->As<clickhouse::ColumnUInt32>()) return v->At(row);
     return std::nullopt;
 }
 

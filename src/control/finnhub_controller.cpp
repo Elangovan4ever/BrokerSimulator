@@ -3,7 +3,6 @@
 #include <drogon/drogon.h>
 #include <iomanip>
 #include <sstream>
-#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -14,20 +13,7 @@ FinnhubController::FinnhubController(std::shared_ptr<SessionManager> session_mgr
                                      const Config& cfg)
     : session_mgr_(std::move(session_mgr))
     , data_source_(std::move(data_source))
-    , cfg_(cfg) {
-    session_mgr_->add_event_callback([this](const std::string& session_id, const Event& ev) {
-        std::lock_guard<std::mutex> lock(last_mutex_);
-        if (ev.event_type == EventType::QUOTE) {
-            const auto& q = std::get<QuoteData>(ev.data);
-            double ts = std::chrono::duration_cast<std::chrono::seconds>(ev.timestamp.time_since_epoch()).count();
-            last_quotes_[session_id][ev.symbol] = {q.bid_price, q.ask_price, ts};
-        } else if (ev.event_type == EventType::TRADE) {
-            const auto& t = std::get<TradeData>(ev.data);
-            int64_t ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count();
-            last_trades_[session_id][ev.symbol] = {t.price, static_cast<double>(t.size), ts_ns};
-        }
-    });
-}
+    , cfg_(cfg) {}
 
 drogon::HttpResponsePtr FinnhubController::json_resp(json body, int code) {
     auto resp = drogon::HttpResponse::newHttpResponse();
@@ -52,24 +38,29 @@ bool FinnhubController::authorize(const drogon::HttpRequestPtr& req) {
     return auth == expected;
 }
 
-static bool env_enabled(const char* name) {
-    const char* value = std::getenv(name);
-    if (!value) return false;
-    std::string v(value);
-    return v == "1" || v == "true" || v == "TRUE";
-}
-
-std::shared_ptr<Session> FinnhubController::default_session() {
+std::shared_ptr<Session> FinnhubController::get_session(const drogon::HttpRequestPtr& req) {
+    auto session_id = req->getParameter("session_id");
+    if (!session_id.empty()) {
+        return session_mgr_->get_session(session_id);
+    }
     auto sessions = session_mgr_->list_sessions();
     if (!sessions.empty()) return sessions.front();
     return nullptr;
+}
+
+Timestamp FinnhubController::current_time(const drogon::HttpRequestPtr& req) {
+    auto session = get_session(req);
+    if (session && session->time_engine) {
+        return session->time_engine->current_time();
+    }
+    return std::chrono::system_clock::now();
 }
 
 std::string FinnhubController::symbol_param(const drogon::HttpRequestPtr& req) {
     return req->getParameter("symbol");
 }
 
-Timestamp FinnhubController::parse_date(const std::string& date_str) {
+std::optional<Timestamp> FinnhubController::parse_date(const std::string& date_str) {
     std::tm tm = {};
     std::istringstream ss(date_str);
     ss >> std::get_time(&tm, "%Y-%m-%d");
@@ -79,142 +70,32 @@ Timestamp FinnhubController::parse_date(const std::string& date_str) {
             int64_t ts = std::stoll(date_str);
             return Timestamp{} + std::chrono::seconds(ts);
         } catch (...) {
-            return std::chrono::system_clock::now();
+            return std::nullopt;
         }
     }
     return std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
 
-// ============================================================================
-// Real-time data endpoints
-// ============================================================================
-
-void FinnhubController::quote(const drogon::HttpRequestPtr& req,
-                              std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
-    if (!authorize(req)) { cb(unauthorized()); return; }
-    auto session = default_session();
-    if (!session) { cb(json_resp(json{{"error","session not found"}},404)); return; }
-    auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
-    std::lock_guard<std::mutex> lock(last_mutex_);
-    auto it = last_quotes_[session->id].find(sym);
-    if (it == last_quotes_[session->id].end()) { cb(json_resp(json{{"error","quote not found"}},404)); return; }
-    auto q = it->second;
-    // Finnhub quote format
-    json out{
-        {"c", q.ask_price},              // Current price (using ask as proxy)
-        {"d", 0.0},                       // Change
-        {"dp", 0.0},                      // Percent change
-        {"h", q.ask_price},               // High price of the day
-        {"l", q.bid_price},               // Low price of the day
-        {"o", (q.bid_price + q.ask_price) / 2.0}, // Open price
-        {"pc", q.bid_price},              // Previous close price
-        {"t", static_cast<int64_t>(q.ts)} // Timestamp
-    };
-    cb(json_resp(out));
+static std::string format_date(Timestamp ts) {
+    auto t = std::chrono::system_clock::to_time_t(ts);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return std::string(buf);
 }
 
-void FinnhubController::trades(const drogon::HttpRequestPtr& req,
-                               std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
-    if (!authorize(req)) { cb(unauthorized()); return; }
-    if (!env_enabled("FINNHUB_ENABLE_TRADES")) {
-        auto resp = drogon::HttpResponse::newHttpResponse();
-        resp->setStatusCode(drogon::k200OK);
-        resp->setContentTypeCode(drogon::CT_TEXT_HTML);
-        resp->setBody("<!DOCTYPE html><html><body>Not Found</body></html>");
-        cb(resp);
-        return;
-    }
-    auto session = default_session();
-    if (!session) { cb(json_resp(json{{"error","session not found"}},404)); return; }
-    auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
-    std::lock_guard<std::mutex> lock(last_mutex_);
-    auto it = last_trades_[session->id].find(sym);
-    if (it == last_trades_[session->id].end()) { cb(json_resp(json{{"error","trade not found"}},404)); return; }
-    auto t = it->second;
-    // Finnhub trade format (WebSocket style)
-    json out{
-        {"data", json::array({{
-            {"p", t.price},
-            {"s", sym},
-            {"t", t.ts_ns / 1000000},  // milliseconds
-            {"v", t.size},
-            {"c", json::array()}       // conditions
-        }})},
-        {"type", "trade"}
-    };
-    cb(json_resp(out));
+static std::string format_datetime(Timestamp ts) {
+    auto t = std::chrono::system_clock::to_time_t(ts);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    char buf[24];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    return std::string(buf);
 }
 
-// ============================================================================
-// Historical data endpoints
-// ============================================================================
-
-void FinnhubController::candle(const drogon::HttpRequestPtr& req,
-                               std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
-    if (!authorize(req)) { cb(unauthorized()); return; }
-    if (!env_enabled("FINNHUB_ENABLE_CANDLES")) {
-        cb(json_resp(json{{"error","You don't have access to this resource."}},403));
-        return;
-    }
-    if (!data_source_) { cb(json_resp(json{{"s","no_data"}},200)); return; }
-
-    auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
-
-    auto resolution = req->getParameter("resolution");
-    auto from_str = req->getParameter("from");
-    auto to_str = req->getParameter("to");
-
-    if (from_str.empty() || to_str.empty()) {
-        cb(json_resp(json{{"error","from and to required"}},400));
-        return;
-    }
-
-    Timestamp from_ts = parse_date(from_str);
-    Timestamp to_ts = parse_date(to_str);
-
-    // Map resolution to multiplier and timespan
-    int multiplier = 1;
-    std::string timespan = "minute";
-    if (resolution == "1") { multiplier = 1; timespan = "minute"; }
-    else if (resolution == "5") { multiplier = 5; timespan = "minute"; }
-    else if (resolution == "15") { multiplier = 15; timespan = "minute"; }
-    else if (resolution == "30") { multiplier = 30; timespan = "minute"; }
-    else if (resolution == "60") { multiplier = 1; timespan = "hour"; }
-    else if (resolution == "D") { multiplier = 1; timespan = "day"; }
-    else if (resolution == "W") { multiplier = 1; timespan = "week"; }
-    else if (resolution == "M") { multiplier = 1; timespan = "month"; }
-
-    auto bars = data_source_->get_bars(sym, from_ts, to_ts, multiplier, timespan, 5000);
-
-    if (bars.empty()) {
-        cb(json_resp(json{{"s","no_data"}}));
-        return;
-    }
-
-    // Finnhub candle format
-    json out;
-    out["s"] = "ok";
-    out["c"] = json::array();  // close
-    out["h"] = json::array();  // high
-    out["l"] = json::array();  // low
-    out["o"] = json::array();  // open
-    out["v"] = json::array();  // volume
-    out["t"] = json::array();  // timestamp
-
-    for (const auto& bar : bars) {
-        out["c"].push_back(bar.close);
-        out["h"].push_back(bar.high);
-        out["l"].push_back(bar.low);
-        out["o"].push_back(bar.open);
-        out["v"].push_back(bar.volume);
-        out["t"].push_back(std::chrono::duration_cast<std::chrono::seconds>(
-            bar.timestamp.time_since_epoch()).count());
-    }
-
-    cb(json_resp(out));
+static bool has_timestamp(Timestamp ts) {
+    return ts.time_since_epoch().count() != 0;
 }
 
 // ============================================================================
@@ -224,14 +105,14 @@ void FinnhubController::candle(const drogon::HttpRequestPtr& req,
 void FinnhubController::company_profile(const drogon::HttpRequestPtr& req,
                                         std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
-    if (!data_source_) { cb(json_resp(json{{"error","no data source"}},500)); return; }
+    if (!data_source_) { cb(json_resp(json::object(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json::object(),200)); return; }
 
     auto profile = data_source_->get_company_profile(sym);
     if (!profile) {
-        cb(json_resp(json{{"error","profile not found"}},404));
+        cb(json_resp(json::object(),200));
         return;
     }
     if (!profile->raw_json.empty()) {
@@ -250,7 +131,7 @@ void FinnhubController::company_profile(const drogon::HttpRequestPtr& req,
         {"estimateCurrency", profile->estimate_currency},
         {"exchange", profile->exchange},
         {"finnhubIndustry", profile->industry},
-        {"ipo", ""}, // Would need date formatting
+        {"ipo", has_timestamp(profile->ipo) ? format_date(profile->ipo) : ""},
         {"logo", profile->logo},
         {"marketCapitalization", profile->market_capitalization},
         {"name", profile->name},
@@ -268,7 +149,7 @@ void FinnhubController::company_peers(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json::array(),200)); return; }
 
     auto peers = data_source_->get_company_peers(sym, 20);
     cb(json_resp(json(peers)));
@@ -280,7 +161,7 @@ void FinnhubController::basic_financials(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json{{"metric", json::object()}},200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
 
     auto financials = data_source_->get_basic_financials(sym);
     if (!financials) {
@@ -329,22 +210,40 @@ void FinnhubController::company_news(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameter symbol"}},422)); return; }
 
     auto from_str = req->getParameter("from");
     auto to_str = req->getParameter("to");
+    if (from_str.empty() || to_str.empty()) {
+        cb(json_resp(json{{"error","Wrong date format. Please use 2022-01-15 format for from and to params."}},422));
+        return;
+    }
 
-    Timestamp from_ts = from_str.empty() ?
-        std::chrono::system_clock::now() - std::chrono::hours(24 * 7) :
-        parse_date(from_str);
-    Timestamp to_ts = to_str.empty() ?
-        std::chrono::system_clock::now() :
-        parse_date(to_str);
+    auto from_ts = parse_date(from_str);
+    auto to_ts = parse_date(to_str);
+    if (!from_ts || !to_ts) {
+        cb(json_resp(json{{"error","Wrong date format. Please use 2022-01-15 format for from and to params."}},422));
+        return;
+    }
 
-    auto news = data_source_->get_company_news(sym, from_ts, to_ts, 50);
+    auto now = current_time(req);
+    if (*to_ts > now) *to_ts = now;
+    if (*from_ts > *to_ts) {
+        cb(json_resp(json::array(),200));
+        return;
+    }
+
+    auto news = data_source_->get_company_news(sym, *from_ts, *to_ts, 50);
 
     json out = json::array();
     for (const auto& item : news) {
+        if (!item.raw_json.empty()) {
+            try {
+                out.push_back(json::parse(item.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
         out.push_back({
             {"category", item.category},
             {"datetime", std::chrono::duration_cast<std::chrono::seconds>(
@@ -369,25 +268,41 @@ void FinnhubController::market_news(const drogon::HttpRequestPtr& req,
     auto category = req->getParameter("category");
     if (category.empty()) category = "general";
 
-    // For market news, use empty symbol to get general news
-    auto now = std::chrono::system_clock::now();
-    auto news = data_source_->get_company_news("", now - std::chrono::hours(24), now, 50);
+    auto now = current_time(req);
+    auto news = data_source_->get_finnhub_market_news(Timestamp{}, now, 100);
 
     json out = json::array();
     for (const auto& item : news) {
+        auto matches_category = [&category](const json& j) {
+            if (category == "general") return true;
+            auto it = j.find("category");
+            if (it == j.end()) return false;
+            return it->is_string() && it->get<std::string>() == category;
+        };
+        if (!item.raw_json.empty()) {
+            try {
+                auto parsed = json::parse(item.raw_json);
+                if (matches_category(parsed)) {
+                    out.push_back(std::move(parsed));
+                }
+                continue;
+            } catch (...) {
+            }
+        }
+        json built{
+            {"category", item.category},
+            {"datetime", std::chrono::duration_cast<std::chrono::seconds>(
+                item.datetime.time_since_epoch()).count()},
+            {"headline", item.headline},
+            {"id", item.id},
+            {"image", item.image},
+            {"related", item.related},
+            {"source", item.source},
+            {"summary", item.summary},
+            {"url", item.url}
+        };
         if (category == "general" || item.category == category) {
-            out.push_back({
-                {"category", item.category},
-                {"datetime", std::chrono::duration_cast<std::chrono::seconds>(
-                    item.datetime.time_since_epoch()).count()},
-                {"headline", item.headline},
-                {"id", item.id},
-                {"image", item.image},
-                {"related", item.related},
-                {"source", item.source},
-                {"summary", item.summary},
-                {"url", item.url}
-            });
+            out.push_back(std::move(built));
         }
     }
     cb(json_resp(out));
@@ -399,11 +314,11 @@ void FinnhubController::news_sentiment(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json{{"symbol",""}},200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json{{"symbol",""}},200)); return; }
 
     auto sentiment = data_source_->get_news_sentiment(sym);
     if (!sentiment) {
-        cb(json_resp(json{{"symbol", sym}, {"buzz", json::object()}, {"sentiment", json::object()}}));
+        cb(json_resp(json{{"symbol", sym}}));
         return;
     }
     if (!sentiment->raw_json.empty()) {
@@ -443,79 +358,50 @@ void FinnhubController::dividends(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
 
     auto from_str = req->getParameter("from");
     auto to_str = req->getParameter("to");
 
-    Timestamp from_ts = from_str.empty() ?
-        std::chrono::system_clock::now() - std::chrono::hours(24 * 365) :
-        parse_date(from_str);
-    Timestamp to_ts = to_str.empty() ?
-        std::chrono::system_clock::now() + std::chrono::hours(24 * 90) :
-        parse_date(to_str);
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (parsed) from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (parsed) to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) {
+        cb(json_resp(json::array(),200));
+        return;
+    }
 
     auto divs = data_source_->get_dividends(sym, from_ts, to_ts, 100);
 
     json out = json::array();
     for (const auto& d : divs) {
-        auto format_date = [](Timestamp ts) -> std::string {
-            auto time_t = std::chrono::system_clock::to_time_t(ts);
-            std::stringstream ss;
-            ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
-            return ss.str();
-        };
-
-        out.push_back({
+        if (!d.raw_json.empty()) {
+            try {
+                out.push_back(json::parse(d.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
             {"symbol", d.symbol},
-            {"date", format_date(d.date)},
             {"amount", d.amount},
             {"adjustedAmount", d.adjusted_amount},
-            {"payDate", format_date(d.pay_date)},
-            {"recordDate", format_date(d.record_date)},
-            {"declarationDate", format_date(d.declaration_date)},
-            {"currency", d.currency}
-        });
-    }
-    cb(json_resp(out));
-}
-
-void FinnhubController::splits(const drogon::HttpRequestPtr& req,
-                               std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
-    if (!authorize(req)) { cb(unauthorized()); return; }
-    if (!env_enabled("FINNHUB_ENABLE_SPLITS")) {
-        cb(json_resp(json{{"error","You don't have access to this resource."}},403));
-        return;
-    }
-    if (!data_source_) { cb(json_resp(json::array(),200)); return; }
-
-    auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
-
-    auto from_str = req->getParameter("from");
-    auto to_str = req->getParameter("to");
-
-    Timestamp from_ts = from_str.empty() ?
-        std::chrono::system_clock::now() - std::chrono::hours(24 * 365 * 5) :
-        parse_date(from_str);
-    Timestamp to_ts = to_str.empty() ?
-        std::chrono::system_clock::now() :
-        parse_date(to_str);
-
-    auto splits_data = data_source_->get_splits(sym, from_ts, to_ts, 100);
-
-    json out = json::array();
-    for (const auto& s : splits_data) {
-        auto time_t = std::chrono::system_clock::to_time_t(s.date);
-        std::stringstream ss;
-        ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
-
-        out.push_back({
-            {"symbol", s.symbol},
-            {"date", ss.str()},
-            {"fromFactor", s.from_factor},
-            {"toFactor", s.to_factor}
-        });
+            {"currency", d.currency},
+            {"date", has_timestamp(d.date) ? format_date(d.date) : ""},
+            {"payDate", has_timestamp(d.pay_date) ? format_date(d.pay_date) : ""},
+            {"recordDate", has_timestamp(d.record_date) ? format_date(d.record_date) : ""},
+            {"declarationDate", has_timestamp(d.declaration_date) ? format_date(d.declaration_date) : ""}
+        };
+        out.push_back(std::move(item));
     }
     cb(json_resp(out));
 }
@@ -533,23 +419,28 @@ void FinnhubController::earnings_calendar(const drogon::HttpRequestPtr& req,
     auto from_str = req->getParameter("from");
     auto to_str = req->getParameter("to");
 
-    Timestamp from_ts = from_str.empty() ?
-        std::chrono::system_clock::now() - std::chrono::hours(24 * 7) :
-        parse_date(from_str);
-    Timestamp to_ts = to_str.empty() ?
-        std::chrono::system_clock::now() + std::chrono::hours(24 * 30) :
-        parse_date(to_str);
+    auto now = current_time(req);
+    Timestamp from_ts = now - std::chrono::hours(24 * 30);
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"earningsCalendar", json::array()}},200)); return; }
 
     auto earnings = data_source_->get_earnings_calendar(sym, from_ts, to_ts, 100);
 
     json calendar = json::array();
     for (const auto& e : earnings) {
-        auto time_t = std::chrono::system_clock::to_time_t(e.date);
-        std::stringstream ss;
-        ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
-
         calendar.push_back({
-            {"date", ss.str()},
+            {"date", has_timestamp(e.date) ? format_date(e.date) : ""},
             {"epsActual", e.eps_actual},
             {"epsEstimate", e.eps_estimate},
             {"hour", e.hour},
@@ -571,21 +462,17 @@ void FinnhubController::recommendation(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) { cb(json_resp(json::array(),200)); return; }
 
-    auto now = std::chrono::system_clock::now();
+    auto now = current_time(req);
     auto recs = data_source_->get_recommendation_trends(sym, now - std::chrono::hours(24 * 365), now, 12);
 
     json out = json::array();
     for (const auto& r : recs) {
-        auto time_t = std::chrono::system_clock::to_time_t(r.period);
-        std::stringstream ss;
-        ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d");
-
         out.push_back({
             {"buy", r.buy},
             {"hold", r.hold},
-            {"period", ss.str()},
+            {"period", has_timestamp(r.period) ? format_date(r.period) : ""},
             {"sell", r.sell},
             {"strongBuy", r.strong_buy},
             {"strongSell", r.strong_sell},
@@ -601,7 +488,18 @@ void FinnhubController::price_target(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json{{"symbol",""}},200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
+    if (sym.empty()) {
+        cb(json_resp(json{
+            {"lastUpdated",""},
+            {"numberAnalysts", 1},
+            {"symbol",""},
+            {"targetHigh", 0},
+            {"targetLow", 0},
+            {"targetMean", 0},
+            {"targetMedian", 0}
+        }));
+        return;
+    }
 
     auto target = data_source_->get_price_targets(sym);
     if (!target) {
@@ -609,12 +507,8 @@ void FinnhubController::price_target(const drogon::HttpRequestPtr& req,
         return;
     }
 
-    auto time_t = std::chrono::system_clock::to_time_t(target->last_updated);
-    std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d %H:%M:%S");
-
     json out{
-        {"lastUpdated", ss.str()},
+        {"lastUpdated", has_timestamp(target->last_updated) ? format_datetime(target->last_updated) : ""},
         {"numberAnalysts", target->number_analysts},
         {"symbol", sym},
         {"targetHigh", target->target_high},
@@ -631,9 +525,7 @@ void FinnhubController::upgrade_downgrade(const drogon::HttpRequestPtr& req,
     if (!data_source_) { cb(json_resp(json::array(),200)); return; }
 
     auto sym = symbol_param(req);
-    if (sym.empty()) { cb(json_resp(json{{"error","symbol required"}},400)); return; }
-
-    auto now = std::chrono::system_clock::now();
+    auto now = current_time(req);
     auto grades = data_source_->get_upgrades_downgrades(sym, now - std::chrono::hours(24 * 365), now, 50);
 
     json out = json::array();
@@ -651,6 +543,552 @@ void FinnhubController::upgrade_downgrade(const drogon::HttpRequestPtr& req,
         });
     }
     cb(json_resp(out));
+}
+
+void FinnhubController::ipo_calendar(const drogon::HttpRequestPtr& req,
+                                     std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
+
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = now - std::chrono::hours(24 * 30);
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"ipoCalendar", json::array()}},200)); return; }
+
+    auto ipos = data_source_->get_finnhub_ipo_calendar(from_ts, to_ts, 1000);
+    json calendar = json::array();
+    for (const auto& ipo : ipos) {
+        if (!ipo.raw_json.empty()) {
+            try {
+                calendar.push_back(json::parse(ipo.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
+            {"date", has_timestamp(ipo.date) ? format_date(ipo.date) : ""},
+            {"exchange", ipo.exchange},
+            {"name", ipo.name},
+            {"numberOfShares", ipo.number_of_shares ? json(*ipo.number_of_shares) : json(nullptr)},
+            {"price", ipo.price_range},
+            {"status", ipo.status},
+            {"symbol", ipo.symbol},
+            {"totalSharesValue", ipo.total_shares_value ? json(*ipo.total_shares_value) : json(nullptr)}
+        };
+        calendar.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"ipoCalendar", calendar}}));
+}
+
+void FinnhubController::insider_transactions(const drogon::HttpRequestPtr& req,
+                                             std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_insider_transactions(sym, from_ts, to_ts, 2000);
+    json data = json::array();
+    for (const auto& row : rows) {
+        if (!row.raw_json.empty()) {
+            try {
+                data.push_back(json::parse(row.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
+            {"change", row.change ? json(*row.change) : json(nullptr)},
+            {"currency", ""},
+            {"filingDate", has_timestamp(row.transaction_date) ? format_date(row.transaction_date) : ""},
+            {"id", row.filing_id},
+            {"isDerivative", nullptr},
+            {"name", row.name},
+            {"share", row.share ? json(*row.share) : json(nullptr)},
+            {"source", ""},
+            {"symbol", row.symbol},
+            {"transactionCode", row.transaction_code},
+            {"transactionDate", has_timestamp(row.transaction_date) ? format_date(row.transaction_date) : ""},
+            {"transactionPrice", row.transaction_price ? json(*row.transaction_price) : json(nullptr)}
+        };
+        data.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"data", data}, {"symbol", sym}}));
+}
+
+void FinnhubController::sec_filings(const drogon::HttpRequestPtr& req,
+                                    std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json::array(),200)); return; }
+
+    auto sym = symbol_param(req);
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json::array(),200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json::array(),200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json::array(),200)); return; }
+
+    auto rows = data_source_->get_finnhub_sec_filings(sym, from_ts, to_ts, 250);
+    json out = json::array();
+    for (const auto& row : rows) {
+        if (!row.raw_json.empty()) {
+            try {
+                out.push_back(json::parse(row.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
+            {"acceptedDate", has_timestamp(row.accepted_datetime) ? format_datetime(row.accepted_datetime) : ""},
+            {"accessNumber", row.access_number},
+            {"cik", ""},
+            {"filedDate", has_timestamp(row.filed_date) ? format_datetime(row.filed_date) : ""},
+            {"filingUrl", ""},
+            {"form", row.form},
+            {"reportUrl", row.report_url},
+            {"symbol", row.symbol}
+        };
+        out.push_back(std::move(item));
+    }
+    cb(json_resp(out));
+}
+
+void FinnhubController::congressional_trading(const drogon::HttpRequestPtr& req,
+                                              std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameter symbol"}},422)); return; }
+
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_congressional_trading(sym, from_ts, to_ts, 200);
+    json data = json::array();
+    for (const auto& row : rows) {
+        if (!row.raw_json.empty()) {
+            try {
+                data.push_back(json::parse(row.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
+            {"amountFrom", row.amount_from ? json(*row.amount_from) : json(nullptr)},
+            {"amountTo", row.amount_to ? json(*row.amount_to) : json(nullptr)},
+            {"assetName", row.asset_name},
+            {"filingDate", has_timestamp(row.filing_date) ? format_date(row.filing_date) : ""},
+            {"name", row.name},
+            {"ownerType", row.owner_type},
+            {"position", row.position},
+            {"symbol", row.symbol},
+            {"transactionDate", has_timestamp(row.transaction_date) ? format_date(row.transaction_date) : ""},
+            {"transactionType", row.transaction_type}
+        };
+        data.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"data", data}, {"symbol", sym}}));
+}
+
+void FinnhubController::insider_sentiment(const drogon::HttpRequestPtr& req,
+                                          std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_insider_sentiment(sym, from_ts, to_ts, 200);
+    json data = json::array();
+    for (const auto& row : rows) {
+        json item{
+            {"change", row.change ? json(*row.change) : json(nullptr)},
+            {"month", row.month},
+            {"mspr", row.mspr ? json(*row.mspr) : json(nullptr)},
+            {"symbol", row.symbol},
+            {"year", row.year}
+        };
+        data.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"data", data}, {"symbol", sym}}));
+}
+
+void FinnhubController::eps_estimate(const drogon::HttpRequestPtr& req,
+                                     std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
+    auto freq = req->getParameter("freq");
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_eps_estimates(sym, from_ts, to_ts, freq, 200);
+    json data = json::array();
+    for (const auto& row : rows) {
+        json item{
+            {"epsAvg", row.eps_avg ? json(*row.eps_avg) : json(nullptr)},
+            {"epsHigh", row.eps_high ? json(*row.eps_high) : json(nullptr)},
+            {"epsLow", row.eps_low ? json(*row.eps_low) : json(nullptr)},
+            {"numberAnalysts", row.number_analysts ? json(*row.number_analysts) : json(nullptr)},
+            {"period", has_timestamp(row.period) ? format_date(row.period) : ""},
+            {"quarter", row.quarter ? json(*row.quarter) : json(nullptr)},
+            {"year", row.year ? json(*row.year) : json(nullptr)}
+        };
+        data.push_back(std::move(item));
+    }
+    if (freq.empty() && !rows.empty()) freq = rows.front().freq;
+    cb(json_resp(json{{"data", data}, {"symbol", sym}, {"freq", freq}}));
+}
+
+void FinnhubController::revenue_estimate(const drogon::HttpRequestPtr& req,
+                                         std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
+    auto freq = req->getParameter("freq");
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}, {"freq", freq}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_revenue_estimates(sym, from_ts, to_ts, freq, 200);
+    json data = json::array();
+    for (const auto& row : rows) {
+        json item{
+            {"numberAnalysts", row.number_analysts ? json(*row.number_analysts) : json(nullptr)},
+            {"period", has_timestamp(row.period) ? format_date(row.period) : ""},
+            {"quarter", row.quarter ? json(*row.quarter) : json(nullptr)},
+            {"revenueAvg", row.revenue_avg ? json(*row.revenue_avg) : json(nullptr)},
+            {"revenueHigh", row.revenue_high ? json(*row.revenue_high) : json(nullptr)},
+            {"revenueLow", row.revenue_low ? json(*row.revenue_low) : json(nullptr)},
+            {"year", row.year ? json(*row.year) : json(nullptr)}
+        };
+        data.push_back(std::move(item));
+    }
+    if (freq.empty() && !rows.empty()) freq = rows.front().freq;
+    cb(json_resp(json{{"data", data}, {"symbol", sym}, {"freq", freq}}));
+}
+
+void FinnhubController::earnings_history(const drogon::HttpRequestPtr& req,
+                                         std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json::array(),200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json::array(),200)); return; }
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json::array(),200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json::array(),200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json::array(),200)); return; }
+
+    auto rows = data_source_->get_finnhub_earnings_history(sym, from_ts, to_ts, 200);
+    json out = json::array();
+    for (const auto& row : rows) {
+        json item{
+            {"actual", row.actual ? json(*row.actual) : json(nullptr)},
+            {"estimate", row.estimate ? json(*row.estimate) : json(nullptr)},
+            {"period", has_timestamp(row.period) ? format_date(row.period) : ""},
+            {"quarter", row.quarter ? json(*row.quarter) : json(nullptr)},
+            {"surprise", row.surprise ? json(*row.surprise) : json(nullptr)},
+            {"surprisePercent", row.surprise_percent ? json(*row.surprise_percent) : json(nullptr)},
+            {"symbol", row.symbol},
+            {"year", row.year ? json(*row.year) : json(nullptr)}
+        };
+        out.push_back(std::move(item));
+    }
+    cb(json_resp(out));
+}
+
+void FinnhubController::social_sentiment(const drogon::HttpRequestPtr& req,
+                                         std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_social_sentiment(sym, from_ts, to_ts, 200);
+    json data = json::array();
+    for (const auto& row : rows) {
+        json item{
+            {"atTime", has_timestamp(row.at_time) ? format_datetime(row.at_time) : ""},
+            {"mention", row.mention ? json(*row.mention) : json(nullptr)},
+            {"positiveScore", row.positive_score ? json(*row.positive_score) : json(nullptr)},
+            {"negativeScore", row.negative_score ? json(*row.negative_score) : json(nullptr)},
+            {"positiveMention", row.positive_mention ? json(*row.positive_mention) : json(nullptr)},
+            {"negativeMention", row.negative_mention ? json(*row.negative_mention) : json(nullptr)},
+            {"score", row.score ? json(*row.score) : json(nullptr)}
+        };
+        data.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"data", data}, {"symbol", sym}}));
+}
+
+void FinnhubController::ownership(const drogon::HttpRequestPtr& req,
+                                  std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"ownership", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"ownership", json::array()}, {"symbol",""}},200)); return; }
+
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"ownership", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_ownership(sym, from_ts, to_ts, 5000);
+    json items = json::array();
+    for (const auto& row : rows) {
+        if (!row.raw_json.empty()) {
+            try {
+                items.push_back(json::parse(row.raw_json));
+                continue;
+            } catch (...) {
+            }
+        }
+        json item{
+            {"change", row.position_change ? json(*row.position_change) : json(nullptr)},
+            {"filingDate", has_timestamp(row.report_date) ? format_date(row.report_date) : ""},
+            {"name", row.organization},
+            {"share", row.position ? json(*row.position) : json(nullptr)}
+        };
+        items.push_back(std::move(item));
+    }
+    cb(json_resp(json{{"ownership", items}, {"symbol", sym}}));
+}
+
+void FinnhubController::financials(const drogon::HttpRequestPtr& req,
+                                   std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"financials", nullptr}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    auto freq = req->getParameter("freq");
+    if (freq.empty() || (freq != "annual" && freq != "quarterly" && freq != "ttm" && freq != "ytd")) {
+        cb(json_resp(json{{"error","Wrong frequency value. Only support annual, quarterly, ttm and ytd."}},422));
+        return;
+    }
+    if (sym.empty()) {
+        cb(json_resp(json{{"financials", nullptr}, {"symbol",""}},200));
+        return;
+    }
+
+    auto statement = req->getParameter("statement");
+    if (statement.empty()) {
+        cb(json_resp(json{{"financials", nullptr}, {"symbol", sym}},200));
+        return;
+    }
+
+    auto now = current_time(req);
+    auto rows = data_source_->get_finnhub_financials_standardized(sym, statement, freq, Timestamp{}, now, 1000);
+    json list = json::array();
+    for (const auto& row : rows) {
+        if (row.data_json.empty()) continue;
+        try {
+            list.push_back(json::parse(row.data_json));
+        } catch (...) {
+        }
+    }
+    cb(json_resp(json{{"financials", list}, {"symbol", sym}}));
+}
+
+void FinnhubController::financials_reported(const drogon::HttpRequestPtr& req,
+                                            std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
+    if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!data_source_) { cb(json_resp(json{{"data", json::array()}, {"symbol",""}},200)); return; }
+
+    auto sym = symbol_param(req);
+    if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
+    auto freq = req->getParameter("freq");
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto now = current_time(req);
+    Timestamp from_ts = Timestamp{};
+    Timestamp to_ts = now;
+    if (!from_str.empty()) {
+        auto parsed = parse_date(from_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        from_ts = *parsed;
+    }
+    if (!to_str.empty()) {
+        auto parsed = parse_date(to_str);
+        if (!parsed) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+        to_ts = *parsed;
+    }
+    if (to_ts > now) to_ts = now;
+    if (from_ts > to_ts) { cb(json_resp(json{{"data", json::array()}, {"symbol", sym}},200)); return; }
+
+    auto rows = data_source_->get_finnhub_financials_reported(sym, freq, from_ts, to_ts, 1000);
+    json data = json::array();
+    std::string cik;
+    for (const auto& row : rows) {
+        if (row.data_json.empty()) continue;
+        try {
+            auto parsed = json::parse(row.data_json);
+            if (cik.empty()) {
+                auto it = parsed.find("cik");
+                if (it != parsed.end() && it->is_string()) {
+                    cik = it->get<std::string>();
+                }
+            }
+            data.push_back(std::move(parsed));
+        } catch (...) {
+        }
+    }
+    cb(json_resp(json{{"cik", cik}, {"data", data}, {"symbol", sym}}));
 }
 
 } // namespace broker_sim

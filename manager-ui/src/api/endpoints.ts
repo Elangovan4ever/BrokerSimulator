@@ -188,30 +188,112 @@ export const apiEndpoints: Record<ApiService, ApiEndpoint[]> = {
   ],
 
   finnhub: [
-    // Real-time
-    { method: 'GET', path: '/quote', description: 'Get quote', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    // Historical
-    { method: 'GET', path: '/stock/candle', description: 'Get candles/OHLCV', params: [
-      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
-      { name: 'resolution', type: 'query', required: true, description: 'Resolution (1, 5, 15, 30, 60, D, W, M)', default: '1' },
-      { name: 'from', type: 'query', required: true, description: 'Start timestamp (Unix)', default: '1736768400' },
-      { name: 'to', type: 'query', required: true, description: 'End timestamp (Unix)', default: '1736791800' },
-    ]},
     // Company Info
-    { method: 'GET', path: '/stock/profile2', description: 'Company profile', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    { method: 'GET', path: '/stock/peers', description: 'Company peers', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    // News
+    { method: 'GET', path: '/stock/profile2', description: 'Company profile', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
+    { method: 'GET', path: '/stock/peers', description: 'Company peers', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
+    { method: 'GET', path: '/stock/metric', description: 'Basic financial metrics', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'metric', type: 'query', required: false, description: 'Metric type', default: 'all' },
+    ]},
+    // News & Sentiment
     { method: 'GET', path: '/company-news', description: 'Company news', params: [
       { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
-      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)' },
-      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)' },
+      { name: 'from', type: 'query', required: true, description: 'From date (YYYY-MM-DD)', default: '2025-01-01' },
+      { name: 'to', type: 'query', required: true, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
     ]},
-    { method: 'GET', path: '/news', description: 'Market news', params: [{ name: 'category', type: 'query', required: false, description: 'News category', default: 'general' }] },
+    { method: 'GET', path: '/news', description: 'Market news', params: [
+      { name: 'category', type: 'query', required: false, description: 'News category', default: 'general' },
+    ]},
+    { method: 'GET', path: '/news-sentiment', description: 'News sentiment', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
     // Corporate Actions
-    { method: 'GET', path: '/stock/dividend', description: 'Dividends', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    { method: 'GET', path: '/stock/split', description: 'Stock splits', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    // Analyst
-    { method: 'GET', path: '/stock/recommendation', description: 'Analyst recommendations', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
-    { method: 'GET', path: '/stock/price-target', description: 'Price targets', params: [{ name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' }] },
+    { method: 'GET', path: '/stock/dividend', description: 'Dividends', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    // Analyst & Calendar
+    { method: 'GET', path: '/calendar/earnings', description: 'Earnings calendar', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2025-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/calendar/ipo', description: 'IPO calendar', params: [
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2025-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/recommendation', description: 'Analyst recommendations', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
+    { method: 'GET', path: '/stock/price-target', description: 'Price targets', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
+    { method: 'GET', path: '/stock/upgrade-downgrade', description: 'Upgrades and downgrades', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+    ]},
+    // Additional Finnhub tables
+    { method: 'GET', path: '/stock/insider-transactions', description: 'Insider transactions', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/filings', description: 'SEC filings', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/congressional-trading', description: 'Congressional trading', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/insider-sentiment', description: 'Insider sentiment', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/eps-estimate', description: 'EPS estimates', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'freq', type: 'query', required: false, description: 'Frequency (annual, quarterly)', default: 'quarterly' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/revenue-estimate', description: 'Revenue estimates', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'freq', type: 'query', required: false, description: 'Frequency (annual, quarterly)', default: 'quarterly' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/earnings', description: 'Earnings history', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/social-sentiment', description: 'Social sentiment', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/ownership', description: 'Institutional ownership', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
+    { method: 'GET', path: '/stock/financials', description: 'Standardized financials', params: [
+      { name: 'symbol', type: 'query', required: false, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'statement', type: 'query', required: false, description: 'Statement (bs, ic, cf)', default: 'bs' },
+      { name: 'freq', type: 'query', required: true, description: 'Frequency (annual, quarterly, ttm, ytd)', default: 'annual' },
+    ]},
+    { method: 'GET', path: '/stock/financials-reported', description: 'Financials reported', params: [
+      { name: 'symbol', type: 'query', required: true, description: 'Stock symbol', default: 'AAPL' },
+      { name: 'freq', type: 'query', required: false, description: 'Frequency (annual, quarterly)', default: 'annual' },
+      { name: 'from', type: 'query', required: false, description: 'From date (YYYY-MM-DD)', default: '2024-01-01' },
+      { name: 'to', type: 'query', required: false, description: 'To date (YYYY-MM-DD)', default: '2025-02-01' },
+    ]},
   ],
 };

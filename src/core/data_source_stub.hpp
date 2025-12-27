@@ -209,6 +209,157 @@ public:
         (void)limit;
         return {};
     }
+
+    std::vector<FinnhubIpoRecord> get_finnhub_ipo_calendar(Timestamp start_time,
+                                                           Timestamp end_time,
+                                                           size_t limit) override {
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<CompanyNewsRecord> get_finnhub_market_news(Timestamp start_time,
+                                                           Timestamp end_time,
+                                                           size_t limit) override {
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubInsiderTransactionRecord> get_finnhub_insider_transactions(const std::string& symbol,
+                                                                                   Timestamp start_time,
+                                                                                   Timestamp end_time,
+                                                                                   size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubSecFilingRecord> get_finnhub_sec_filings(const std::string& symbol,
+                                                                Timestamp start_time,
+                                                                Timestamp end_time,
+                                                                size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubCongressionalTradingRecord> get_finnhub_congressional_trading(const std::string& symbol,
+                                                                                      Timestamp start_time,
+                                                                                      Timestamp end_time,
+                                                                                      size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubInsiderSentimentRecord> get_finnhub_insider_sentiment(const std::string& symbol,
+                                                                              Timestamp start_time,
+                                                                              Timestamp end_time,
+                                                                              size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubEpsEstimateRecord> get_finnhub_eps_estimates(const std::string& symbol,
+                                                                    Timestamp start_time,
+                                                                    Timestamp end_time,
+                                                                    const std::string& freq,
+                                                                    size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)freq;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubRevenueEstimateRecord> get_finnhub_revenue_estimates(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            const std::string& freq,
+                                                                            size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)freq;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubEarningsHistoryRecord> get_finnhub_earnings_history(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubSocialSentimentRecord> get_finnhub_social_sentiment(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubOwnershipRecord> get_finnhub_ownership(const std::string& symbol,
+                                                              Timestamp start_time,
+                                                              Timestamp end_time,
+                                                              size_t limit) override {
+        (void)symbol;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubFinancialsStandardizedRecord> get_finnhub_financials_standardized(
+        const std::string& symbol,
+        const std::string& statement,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) override {
+        (void)symbol;
+        (void)statement;
+        (void)freq;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
+
+    std::vector<FinnhubFinancialsReportedRecord> get_finnhub_financials_reported(
+        const std::string& symbol,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) override {
+        (void)symbol;
+        (void)freq;
+        (void)start_time;
+        (void)end_time;
+        (void)limit;
+        return {};
+    }
 };
 
 } // namespace broker_sim

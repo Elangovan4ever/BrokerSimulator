@@ -46,32 +46,13 @@ export class FinnhubClient {
     this.httpsAgent.destroy();
   }
 
-  // ============ Quote & Trades ============
-
-  async getQuote(symbol: string): Promise<AxiosResponse> {
-    return this.client.get('/quote', { params: { symbol } });
-  }
-
-  async getTrades(symbol: string): Promise<AxiosResponse> {
-    return this.client.get('/stock/trade', { params: { symbol } });
-  }
-
-  // ============ Candles ============
-
-  async getCandles(
-    symbol: string,
-    options: { resolution: string; from: number; to: number }
-  ): Promise<AxiosResponse> {
-    return this.client.get('/stock/candle', { params: { symbol, ...options } });
-  }
-
   // ============ Company ============
 
-  async getCompanyProfile(symbol: string): Promise<AxiosResponse> {
+  async getCompanyProfile(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/stock/profile2', { params: { symbol } });
   }
 
-  async getCompanyPeers(symbol: string): Promise<AxiosResponse> {
+  async getCompanyPeers(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/stock/peers', { params: { symbol } });
   }
 
@@ -89,35 +70,81 @@ export class FinnhubClient {
     return this.client.get('/news', { params: { category } });
   }
 
-  async getNewsSentiment(symbol: string): Promise<AxiosResponse> {
+  async getNewsSentiment(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/news-sentiment', { params: { symbol } });
   }
 
   // ============ Corporate Actions ============
 
-  async getDividends(symbol: string, from: string, to: string): Promise<AxiosResponse> {
-    return this.client.get('/stock/dividend', { params: { symbol, from, to } });
-  }
-
-  async getSplits(symbol: string, from: string, to: string): Promise<AxiosResponse> {
-    return this.client.get('/stock/split', { params: { symbol, from, to } });
+  async getDividends(symbol: string, params: { from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/dividend', { params: { symbol, ...params } });
   }
 
   // ============ Analyst ============
 
-  async getEarningsCalendar(options: { symbol?: string; from: string; to: string }): Promise<AxiosResponse> {
+  async getEarningsCalendar(options: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
     return this.client.get('/calendar/earnings', { params: options });
   }
 
-  async getRecommendation(symbol: string): Promise<AxiosResponse> {
+  async getIpoCalendar(options: { from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/calendar/ipo', { params: options });
+  }
+
+  async getRecommendation(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/stock/recommendation', { params: { symbol } });
   }
 
-  async getPriceTarget(symbol: string): Promise<AxiosResponse> {
+  async getPriceTarget(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/stock/price-target', { params: { symbol } });
   }
 
-  async getUpgradeDowngrade(symbol: string): Promise<AxiosResponse> {
+  async getUpgradeDowngrade(symbol?: string): Promise<AxiosResponse> {
     return this.client.get('/stock/upgrade-downgrade', { params: { symbol } });
+  }
+
+  // ============ Additional Finnhub ============
+
+  async getInsiderTransactions(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/insider-transactions', { params });
+  }
+
+  async getSecFilings(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/filings', { params });
+  }
+
+  async getCongressionalTrading(params: { symbol: string; from?: string; to?: string }): Promise<AxiosResponse> {
+    return this.client.get('/stock/congressional-trading', { params });
+  }
+
+  async getInsiderSentiment(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/insider-sentiment', { params });
+  }
+
+  async getEpsEstimate(params: { symbol: string; freq?: string; from?: string; to?: string }): Promise<AxiosResponse> {
+    return this.client.get('/stock/eps-estimate', { params });
+  }
+
+  async getRevenueEstimate(params: { symbol: string; freq?: string; from?: string; to?: string }): Promise<AxiosResponse> {
+    return this.client.get('/stock/revenue-estimate', { params });
+  }
+
+  async getEarningsHistory(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/earnings', { params });
+  }
+
+  async getSocialSentiment(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/social-sentiment', { params });
+  }
+
+  async getOwnership(params: { symbol?: string; from?: string; to?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/ownership', { params });
+  }
+
+  async getFinancials(params: { symbol?: string; statement?: string; freq?: string } = {}): Promise<AxiosResponse> {
+    return this.client.get('/stock/financials', { params });
+  }
+
+  async getFinancialsReported(params: { symbol: string; freq?: string; from?: string; to?: string }): Promise<AxiosResponse> {
+    return this.client.get('/stock/financials-reported', { params });
   }
 }

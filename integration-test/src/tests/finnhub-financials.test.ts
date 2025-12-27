@@ -1,6 +1,7 @@
 /**
- * Integration tests for Finnhub analyst endpoints
- * Tests: /calendar/earnings, /calendar/ipo, /stock/recommendation, /stock/price-target, /stock/upgrade-downgrade
+ * Integration tests for Finnhub financials endpoints
+ * Tests: /stock/eps-estimate, /stock/revenue-estimate, /stock/earnings,
+ *        /stock/financials, /stock/financials-reported
  */
 
 import { finnhubClient, finnhubSimulatorClient, config, logTestResult, finnhubApiAvailable } from './setup';
@@ -16,24 +17,25 @@ function skipIfUnavailable(): boolean {
   return false;
 }
 
-describeIfKey('Finnhub Analyst API', () => {
-  const from = config.finnhubTestStartDate;
+describeIfKey('Finnhub Financials API', () => {
+  const symbol = config.testSymbols[0] || 'AAPL';
+  const from = '2024-01-01';
   const to = config.finnhubTestEndDate;
 
-  describe('GET /calendar/earnings', () => {
-    it.each(config.testSymbols)('should return matching schema for %s earnings calendar', async (symbol) => {
+  describe('GET /stock/eps-estimate', () => {
+    it('should return matching schema for EPS estimates', async () => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getEarningsCalendar({ symbol, from, to });
-      const simulatorResponse = await finnhubSimulatorClient.getEarningsCalendar({ symbol, from, to });
+      const finnhubResponse = await finnhubClient.getEpsEstimate({ symbol, freq: 'quarterly' });
+      const simulatorResponse = await finnhubSimulatorClient.getEpsEstimate({ symbol, freq: 'quarterly' });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(finnhubSchema, simulatorSchema);
 
       logTestResult(
-        `Finnhub earnings calendar ${symbol}`,
+        'Finnhub EPS estimate',
         finnhubResponse.status,
         simulatorResponse.status,
         comparison.match
@@ -48,20 +50,20 @@ describeIfKey('Finnhub Analyst API', () => {
     });
   });
 
-  describe('GET /calendar/ipo', () => {
-    it('should return matching schema for IPO calendar', async () => {
+  describe('GET /stock/revenue-estimate', () => {
+    it('should return matching schema for revenue estimates', async () => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getIpoCalendar({ from, to });
-      const simulatorResponse = await finnhubSimulatorClient.getIpoCalendar({ from, to });
+      const finnhubResponse = await finnhubClient.getRevenueEstimate({ symbol, freq: 'quarterly' });
+      const simulatorResponse = await finnhubSimulatorClient.getRevenueEstimate({ symbol, freq: 'quarterly' });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(finnhubSchema, simulatorSchema);
 
       logTestResult(
-        'Finnhub IPO calendar',
+        'Finnhub revenue estimate',
         finnhubResponse.status,
         simulatorResponse.status,
         comparison.match
@@ -76,20 +78,20 @@ describeIfKey('Finnhub Analyst API', () => {
     });
   });
 
-  describe('GET /stock/recommendation', () => {
-    it.each(config.testSymbols)('should return matching schema for %s recommendations', async (symbol) => {
+  describe('GET /stock/earnings', () => {
+    it('should return matching schema for earnings history', async () => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getRecommendation(symbol);
-      const simulatorResponse = await finnhubSimulatorClient.getRecommendation(symbol);
+      const finnhubResponse = await finnhubClient.getEarningsHistory({ symbol, from, to });
+      const simulatorResponse = await finnhubSimulatorClient.getEarningsHistory({ symbol, from, to });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(finnhubSchema, simulatorSchema);
 
       logTestResult(
-        `Finnhub recommendations ${symbol}`,
+        'Finnhub earnings history',
         finnhubResponse.status,
         simulatorResponse.status,
         comparison.match
@@ -104,20 +106,20 @@ describeIfKey('Finnhub Analyst API', () => {
     });
   });
 
-  describe('GET /stock/price-target', () => {
-    it.each(config.testSymbols)('should return matching schema for %s price targets', async (symbol) => {
+  describe('GET /stock/financials', () => {
+    it('should return matching schema for standardized financials', async () => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getPriceTarget(symbol);
-      const simulatorResponse = await finnhubSimulatorClient.getPriceTarget(symbol);
+      const finnhubResponse = await finnhubClient.getFinancials({ symbol, statement: 'bs', freq: 'annual' });
+      const simulatorResponse = await finnhubSimulatorClient.getFinancials({ symbol, statement: 'bs', freq: 'annual' });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(finnhubSchema, simulatorSchema);
 
       logTestResult(
-        `Finnhub price targets ${symbol}`,
+        'Finnhub financials',
         finnhubResponse.status,
         simulatorResponse.status,
         comparison.match
@@ -132,20 +134,20 @@ describeIfKey('Finnhub Analyst API', () => {
     });
   });
 
-  describe('GET /stock/upgrade-downgrade', () => {
-    it.each(config.testSymbols)('should return matching schema for %s upgrades/downgrades', async (symbol) => {
+  describe('GET /stock/financials-reported', () => {
+    it('should return matching schema for reported financials', async () => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getUpgradeDowngrade(symbol);
-      const simulatorResponse = await finnhubSimulatorClient.getUpgradeDowngrade(symbol);
+      const finnhubResponse = await finnhubClient.getFinancialsReported({ symbol, freq: 'annual', from, to });
+      const simulatorResponse = await finnhubSimulatorClient.getFinancialsReported({ symbol, freq: 'annual', from, to });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
       const comparison = compareSchemas(finnhubSchema, simulatorSchema);
 
       logTestResult(
-        `Finnhub upgrades/downgrades ${symbol}`,
+        'Finnhub financials reported',
         finnhubResponse.status,
         simulatorResponse.status,
         comparison.match

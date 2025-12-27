@@ -1,6 +1,6 @@
 /**
  * Integration tests for Finnhub corporate actions endpoints
- * Tests: /stock/dividend, /stock/split
+ * Tests: /stock/dividend
  */
 
 import { finnhubClient, finnhubSimulatorClient, config, logTestResult, finnhubApiAvailable } from './setup';
@@ -17,16 +17,16 @@ function skipIfUnavailable(): boolean {
 }
 
 describeIfKey('Finnhub Corporate Actions API', () => {
-  const from = config.testStartDate;
-  const to = config.testEndDate;
+  const from = config.finnhubTestStartDate;
+  const to = config.finnhubTestEndDate;
 
   describe('GET /stock/dividend', () => {
     it.each(config.testSymbols)('should return matching schema for %s dividends', async (symbol) => {
       if (skipIfUnavailable()) {
         return;
       }
-      const finnhubResponse = await finnhubClient.getDividends(symbol, from, to);
-      const simulatorResponse = await finnhubSimulatorClient.getDividends(symbol, from, to);
+      const finnhubResponse = await finnhubClient.getDividends(symbol, { from, to });
+      const simulatorResponse = await finnhubSimulatorClient.getDividends(symbol, { from, to });
 
       const finnhubSchema = extractSchema(finnhubResponse.data);
       const simulatorSchema = extractSchema(simulatorResponse.data);
@@ -48,31 +48,4 @@ describeIfKey('Finnhub Corporate Actions API', () => {
     });
   });
 
-  describe('GET /stock/split', () => {
-    it.each(config.testSymbols)('should return matching schema for %s splits', async (symbol) => {
-      if (skipIfUnavailable()) {
-        return;
-      }
-      const finnhubResponse = await finnhubClient.getSplits(symbol, from, to);
-      const simulatorResponse = await finnhubSimulatorClient.getSplits(symbol, from, to);
-
-      const finnhubSchema = extractSchema(finnhubResponse.data);
-      const simulatorSchema = extractSchema(simulatorResponse.data);
-      const comparison = compareSchemas(finnhubSchema, simulatorSchema);
-
-      logTestResult(
-        `Finnhub splits ${symbol}`,
-        finnhubResponse.status,
-        simulatorResponse.status,
-        comparison.match
-      );
-
-      if (!comparison.match) {
-        console.log(formatComparisonResult(comparison));
-      }
-
-      expect(finnhubResponse.status).toBe(simulatorResponse.status);
-      expect(comparison.match).toBe(true);
-    });
-  });
 });

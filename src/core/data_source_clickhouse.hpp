@@ -109,6 +109,76 @@ public:
                                                                Timestamp end_time,
                                                                size_t limit) override;
 
+    std::vector<FinnhubIpoRecord> get_finnhub_ipo_calendar(Timestamp start_time,
+                                                           Timestamp end_time,
+                                                           size_t limit) override;
+
+    std::vector<CompanyNewsRecord> get_finnhub_market_news(Timestamp start_time,
+                                                           Timestamp end_time,
+                                                           size_t limit) override;
+
+    std::vector<FinnhubInsiderTransactionRecord> get_finnhub_insider_transactions(const std::string& symbol,
+                                                                                   Timestamp start_time,
+                                                                                   Timestamp end_time,
+                                                                                   size_t limit) override;
+
+    std::vector<FinnhubSecFilingRecord> get_finnhub_sec_filings(const std::string& symbol,
+                                                                Timestamp start_time,
+                                                                Timestamp end_time,
+                                                                size_t limit) override;
+
+    std::vector<FinnhubCongressionalTradingRecord> get_finnhub_congressional_trading(const std::string& symbol,
+                                                                                      Timestamp start_time,
+                                                                                      Timestamp end_time,
+                                                                                      size_t limit) override;
+
+    std::vector<FinnhubInsiderSentimentRecord> get_finnhub_insider_sentiment(const std::string& symbol,
+                                                                              Timestamp start_time,
+                                                                              Timestamp end_time,
+                                                                              size_t limit) override;
+
+    std::vector<FinnhubEpsEstimateRecord> get_finnhub_eps_estimates(const std::string& symbol,
+                                                                    Timestamp start_time,
+                                                                    Timestamp end_time,
+                                                                    const std::string& freq,
+                                                                    size_t limit) override;
+
+    std::vector<FinnhubRevenueEstimateRecord> get_finnhub_revenue_estimates(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            const std::string& freq,
+                                                                            size_t limit) override;
+
+    std::vector<FinnhubEarningsHistoryRecord> get_finnhub_earnings_history(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            size_t limit) override;
+
+    std::vector<FinnhubSocialSentimentRecord> get_finnhub_social_sentiment(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            size_t limit) override;
+
+    std::vector<FinnhubOwnershipRecord> get_finnhub_ownership(const std::string& symbol,
+                                                              Timestamp start_time,
+                                                              Timestamp end_time,
+                                                              size_t limit) override;
+
+    std::vector<FinnhubFinancialsStandardizedRecord> get_finnhub_financials_standardized(
+        const std::string& symbol,
+        const std::string& statement,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) override;
+
+    std::vector<FinnhubFinancialsReportedRecord> get_finnhub_financials_reported(
+        const std::string& symbol,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) override;
+
 private:
     static std::string build_symbol_list(const std::vector<std::string>& symbols);
     static std::string format_timestamp(Timestamp ts);
@@ -118,6 +188,7 @@ private:
     static Timestamp extract_ts_any(const clickhouse::ColumnRef& col, size_t row);
     static std::optional<double> get_nullable_float(const clickhouse::ColumnRef& col, size_t row);
     static std::optional<uint32_t> get_nullable_uint32(const clickhouse::ColumnRef& col, size_t row);
+    static std::optional<uint64_t> get_nullable_uint64(const clickhouse::ColumnRef& col, size_t row);
     static std::optional<uint16_t> get_nullable_uint16(const clickhouse::ColumnRef& col, size_t row);
     static std::optional<int> get_nullable_int32(const clickhouse::ColumnRef& col, size_t row);
     static std::optional<std::string> get_nullable_string(const clickhouse::ColumnRef& col, size_t row);

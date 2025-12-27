@@ -56,6 +56,7 @@ struct CompanyNewsRecord {
     std::string category;
     std::string related;
     int64_t id{0};
+    std::string raw_json;
 };
 
 struct CompanyProfileRecord {
@@ -117,6 +118,7 @@ struct DividendRecord {
     std::string currency;
     int frequency{0};
     std::string dividend_type;
+    std::string raw_json;
 };
 
 struct StockDividendsQuery {
@@ -445,6 +447,138 @@ struct UpgradeDowngradeRecord {
     std::string action;
 };
 
+struct FinnhubIpoRecord {
+    std::string symbol;
+    Timestamp date;
+    std::string exchange;
+    std::string name;
+    std::optional<uint64_t> number_of_shares;
+    std::string price_range;
+    std::string status;
+    std::optional<uint64_t> total_shares_value;
+    std::string raw_json;
+};
+
+struct FinnhubInsiderTransactionRecord {
+    std::string symbol;
+    std::string filing_id;
+    Timestamp transaction_date;
+    std::string name;
+    std::optional<double> share;
+    std::optional<double> change;
+    std::optional<double> transaction_price;
+    std::string transaction_code;
+    std::string raw_json;
+};
+
+struct FinnhubSecFilingRecord {
+    std::string symbol;
+    Timestamp filed_date;
+    Timestamp accepted_datetime;
+    std::string form;
+    std::string access_number;
+    std::string report_url;
+    std::string raw_json;
+};
+
+struct FinnhubCongressionalTradingRecord {
+    std::string symbol;
+    Timestamp transaction_date;
+    std::string name;
+    std::string position;
+    std::string owner_type;
+    std::string transaction_type;
+    std::optional<uint64_t> amount_from;
+    std::optional<uint64_t> amount_to;
+    std::string asset_name;
+    Timestamp filing_date;
+    std::string raw_json;
+};
+
+struct FinnhubInsiderSentimentRecord {
+    std::string symbol;
+    uint16_t year{0};
+    uint8_t month{0};
+    std::optional<double> change;
+    std::optional<double> mspr;
+};
+
+struct FinnhubEpsEstimateRecord {
+    std::string symbol;
+    Timestamp period;
+    std::optional<uint16_t> quarter;
+    std::optional<uint16_t> year;
+    std::optional<double> eps_avg;
+    std::optional<double> eps_high;
+    std::optional<double> eps_low;
+    std::optional<uint16_t> number_analysts;
+    std::string freq;
+};
+
+struct FinnhubRevenueEstimateRecord {
+    std::string symbol;
+    Timestamp period;
+    std::optional<uint16_t> quarter;
+    std::optional<uint16_t> year;
+    std::optional<double> revenue_avg;
+    std::optional<double> revenue_high;
+    std::optional<double> revenue_low;
+    std::optional<uint16_t> number_analysts;
+    std::string freq;
+};
+
+struct FinnhubEarningsHistoryRecord {
+    std::string symbol;
+    Timestamp period;
+    std::optional<uint16_t> quarter;
+    std::optional<uint16_t> year;
+    std::optional<double> actual;
+    std::optional<double> estimate;
+    std::optional<double> surprise;
+    std::optional<double> surprise_percent;
+};
+
+struct FinnhubSocialSentimentRecord {
+    std::string symbol;
+    Timestamp at_time;
+    std::optional<uint32_t> mention;
+    std::optional<double> positive_score;
+    std::optional<double> negative_score;
+    std::optional<uint32_t> positive_mention;
+    std::optional<uint32_t> negative_mention;
+    std::optional<double> score;
+};
+
+struct FinnhubOwnershipRecord {
+    std::string symbol;
+    Timestamp report_date;
+    std::string organization;
+    std::optional<double> position;
+    std::optional<double> position_change;
+    std::optional<double> percent_held;
+    std::string raw_json;
+};
+
+struct FinnhubFinancialsStandardizedRecord {
+    std::string symbol;
+    std::string statement;
+    Timestamp period;
+    std::string freq;
+    std::string currency;
+    std::string data_json;
+};
+
+struct FinnhubFinancialsReportedRecord {
+    std::string symbol;
+    Timestamp period;
+    std::string freq;
+    std::string access_number;
+    std::string form;
+    Timestamp filed_date;
+    Timestamp accepted_datetime;
+    std::string data_json;
+};
+
 enum class MarketEventType : uint8_t { TRADE = 0, QUOTE = 1 };
 
 struct MarketEvent {
@@ -543,6 +677,76 @@ public:
                                                                        Timestamp start_time,
                                                                        Timestamp end_time,
                                                                        size_t limit) = 0;
+
+    virtual std::vector<FinnhubIpoRecord> get_finnhub_ipo_calendar(Timestamp start_time,
+                                                                   Timestamp end_time,
+                                                                   size_t limit) = 0;
+
+    virtual std::vector<CompanyNewsRecord> get_finnhub_market_news(Timestamp start_time,
+                                                                   Timestamp end_time,
+                                                                   size_t limit) = 0;
+
+    virtual std::vector<FinnhubInsiderTransactionRecord> get_finnhub_insider_transactions(const std::string& symbol,
+                                                                                           Timestamp start_time,
+                                                                                           Timestamp end_time,
+                                                                                           size_t limit) = 0;
+
+    virtual std::vector<FinnhubSecFilingRecord> get_finnhub_sec_filings(const std::string& symbol,
+                                                                        Timestamp start_time,
+                                                                        Timestamp end_time,
+                                                                        size_t limit) = 0;
+
+    virtual std::vector<FinnhubCongressionalTradingRecord> get_finnhub_congressional_trading(const std::string& symbol,
+                                                                                              Timestamp start_time,
+                                                                                              Timestamp end_time,
+                                                                                              size_t limit) = 0;
+
+    virtual std::vector<FinnhubInsiderSentimentRecord> get_finnhub_insider_sentiment(const std::string& symbol,
+                                                                                      Timestamp start_time,
+                                                                                      Timestamp end_time,
+                                                                                      size_t limit) = 0;
+
+    virtual std::vector<FinnhubEpsEstimateRecord> get_finnhub_eps_estimates(const std::string& symbol,
+                                                                            Timestamp start_time,
+                                                                            Timestamp end_time,
+                                                                            const std::string& freq,
+                                                                            size_t limit) = 0;
+
+    virtual std::vector<FinnhubRevenueEstimateRecord> get_finnhub_revenue_estimates(const std::string& symbol,
+                                                                                    Timestamp start_time,
+                                                                                    Timestamp end_time,
+                                                                                    const std::string& freq,
+                                                                                    size_t limit) = 0;
+
+    virtual std::vector<FinnhubEarningsHistoryRecord> get_finnhub_earnings_history(const std::string& symbol,
+                                                                                    Timestamp start_time,
+                                                                                    Timestamp end_time,
+                                                                                    size_t limit) = 0;
+
+    virtual std::vector<FinnhubSocialSentimentRecord> get_finnhub_social_sentiment(const std::string& symbol,
+                                                                                    Timestamp start_time,
+                                                                                    Timestamp end_time,
+                                                                                    size_t limit) = 0;
+
+    virtual std::vector<FinnhubOwnershipRecord> get_finnhub_ownership(const std::string& symbol,
+                                                                      Timestamp start_time,
+                                                                      Timestamp end_time,
+                                                                      size_t limit) = 0;
+
+    virtual std::vector<FinnhubFinancialsStandardizedRecord> get_finnhub_financials_standardized(
+        const std::string& symbol,
+        const std::string& statement,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) = 0;
+
+    virtual std::vector<FinnhubFinancialsReportedRecord> get_finnhub_financials_reported(
+        const std::string& symbol,
+        const std::string& freq,
+        Timestamp start_time,
+        Timestamp end_time,
+        size_t limit) = 0;
 };
 
 } // namespace broker_sim

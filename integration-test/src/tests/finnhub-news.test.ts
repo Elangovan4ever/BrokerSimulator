@@ -17,8 +17,8 @@ function skipIfUnavailable(): boolean {
 }
 
 describeIfKey('Finnhub News API', () => {
-  const from = config.testStartDate;
-  const to = config.testEndDate;
+  const from = config.finnhubTestStartDate;
+  const to = config.finnhubTestEndDate;
 
   describe('GET /company-news', () => {
     it.each(config.testSymbols)('should return matching schema for %s company news', async (symbol) => {
