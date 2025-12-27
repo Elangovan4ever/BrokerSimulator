@@ -102,6 +102,7 @@ std::shared_ptr<Session> SessionManager::create_session(const SessionConfig& con
         }
 
         if (exec_cfg_.enable_wal) {
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
             session->wal = std::make_unique<WalLogger>(wal_path(wal_dir, id));
         }
 
@@ -167,8 +168,9 @@ void SessionManager::pause_session(const std::string& session_id) {
     if (session) {
         session->time_engine->pause();
         session->status = SessionStatus::PAUSED;
+        nlohmann::json w{{"event","session_paused"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
-            nlohmann::json w{{"event","session_paused"},{"session_id",session_id}};
             session->wal->append(w);
         }
     }
@@ -179,8 +181,9 @@ void SessionManager::resume_session(const std::string& session_id) {
     if (session) {
         session->time_engine->resume();
         session->status = SessionStatus::RUNNING;
+        nlohmann::json w{{"event","session_resumed"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
-            nlohmann::json w{{"event","session_resumed"},{"session_id",session_id}};
             session->wal->append(w);
         }
     }
@@ -189,14 +192,13 @@ void SessionManager::resume_session(const std::string& session_id) {
 void SessionManager::stop_session(const std::string& session_id) {
     auto session = get_session(session_id);
     if (session) {
-        // Save checkpoint before stopping
-        save_session_checkpoint(session_id);
-
         session->stop();
         session->status = SessionStatus::STOPPED;
+        save_session_checkpoint(session_id);
 
+        nlohmann::json w{{"event","session_stopped"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
-            nlohmann::json w{{"event","session_stopped"},{"session_id",session_id}};
             session->wal->append(w);
         }
     }
@@ -216,10 +218,13 @@ void SessionManager::stop_session(const std::string& session_id) {
 }
 
 void SessionManager::destroy_session(const std::string& session_id) {
-    // Save checkpoint before destroying
-    save_session_checkpoint(session_id);
+    auto session = get_session(session_id);
+    if (session) {
+        session->stop();
+        session->status = SessionStatus::STOPPED;
+        save_session_checkpoint(session_id);
+    }
 
-    std::shared_ptr<Session> session;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = sessions_.find(session_id);
@@ -418,7 +423,7 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
                        << "\n";
         }
     }
-    if (session->wal) {
+    {
         nlohmann::json w{
             {"ts_ns", session->last_event_ns.load(std::memory_order_acquire)},
             {"event", "order_submitted"},
@@ -431,7 +436,10 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
             {"limit", order.limit_price.value_or(0.0)},
             {"stop", order.stop_price.value_or(0.0)}
         };
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     if (fill && fill->fill_qty > 0.0) process_fill(session, *fill);
 
@@ -488,13 +496,16 @@ bool SessionManager::cancel_order(const std::string& session_id, const std::stri
             it->second << R"({"event":"order_canceled","id":")" << order_id << "\"}\n";
         }
     }
-    if (canceled && session && session->wal) {
+    if (canceled) {
         nlohmann::json w{
             {"ts_ns", session->last_event_ns.load(std::memory_order_acquire)},
             {"event","order_canceled"},
             {"id", order_id}
         };
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     if (canceled) {
         Event ev;
@@ -575,7 +586,7 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
                     static_cast<int>(ev.event_type)));
     session->last_event_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
                                  std::memory_order_release);
-    if (session->wal) {
+    {
         nlohmann::json w{
             {"ts_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count()},
             {"event","market_event"},
@@ -598,7 +609,10 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             w["exchange"] = t.exchange;
             w["conditions"] = t.conditions;
         }
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     if (ev.event_type == EventType::QUOTE) {
         const auto& q = std::get<QuoteData>(ev.data);
@@ -681,12 +695,13 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             const auto& d = std::get<DividendData>(ev.data);
             session->account_manager->apply_dividend(ev.symbol, d.amount_per_share);
             session->cash = session->account_manager->state().cash;
+            nlohmann::json w{
+                {"event", "dividend"},
+                {"symbol", ev.symbol},
+                {"amount_per_share", d.amount_per_share}
+            };
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
             if (session->wal) {
-                nlohmann::json w{
-                    {"event", "dividend"},
-                    {"symbol", ev.symbol},
-                    {"amount_per_share", d.amount_per_share}
-                };
                 session->wal->append(w);
             }
             spdlog::info("Applied dividend for {}: ${:.4f}/share", ev.symbol, d.amount_per_share);
@@ -698,12 +713,13 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             double ratio = s.ratio();
             session->account_manager->apply_split(ev.symbol, ratio);
             session->cash = session->account_manager->state().cash;
+            nlohmann::json w{
+                {"event", "split"},
+                {"symbol", ev.symbol},
+                {"ratio", ratio}
+            };
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
             if (session->wal) {
-                nlohmann::json w{
-                    {"event", "split"},
-                    {"symbol", ev.symbol},
-                    {"ratio", ratio}
-                };
                 session->wal->append(w);
             }
             spdlog::info("Applied split for {}: {}:{} (ratio {:.4f})",
@@ -793,7 +809,7 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
                  order.side == OrderSide::BUY ? "BUY" : "SELL",
                  applied_fill.fill_qty, applied_fill.fill_price,
                  session->cash, session->equity);
-    if (session->wal) {
+    {
         nlohmann::json w{
             {"ts_ns", fill.timestamp},
             {"event","fill"},
@@ -803,7 +819,10 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
             {"qty", applied_fill.fill_qty},
             {"price", applied_fill.fill_price}
         };
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     append_event_log(session->id,
         fmt::format(R"({{"event":"fill","order_id":"{}","symbol":"{}","side":"{}","qty":{},"price":{},"ts":{}}})",
@@ -836,13 +855,16 @@ bool SessionManager::apply_dividend(const std::string& session_id, const std::st
     session->account_manager->apply_dividend(symbol, amount_per_share);
     session->cash = session->account_manager->state().cash;
     session->equity = session->account_manager->state().equity;
-    if (session->wal) {
+    {
         nlohmann::json w{
             {"event","dividend"},
             {"symbol", symbol},
             {"amount_per_share", amount_per_share}
         };
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     append_event_log(session_id,
         fmt::format(R"({{"event":"dividend","symbol":"{}","amount_per_share":{}}})",
@@ -856,13 +878,16 @@ bool SessionManager::apply_split(const std::string& session_id, const std::strin
     session->account_manager->apply_split(symbol, split_ratio);
     session->cash = session->account_manager->state().cash;
     session->equity = session->account_manager->state().equity;
-    if (session->wal) {
+    {
         nlohmann::json w{
             {"event","split"},
             {"symbol", symbol},
             {"ratio", split_ratio}
         };
-        session->wal->append(w);
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
     }
     append_event_log(session_id,
         fmt::format(R"({{"event":"split","symbol":"{}","ratio":{}}})",
@@ -1240,6 +1265,7 @@ void SessionManager::save_session_checkpoint(const std::string& session_id) {
 
     // Recreate WAL logger for new entries
     if (exec_cfg_.enable_wal) {
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
         session->wal = std::make_unique<WalLogger>(wal_path(wal_dir, session_id));
     }
 
