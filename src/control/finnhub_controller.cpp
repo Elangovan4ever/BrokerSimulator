@@ -3,6 +3,7 @@
 #include <drogon/drogon.h>
 #include <iomanip>
 #include <sstream>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -49,6 +50,13 @@ bool FinnhubController::authorize(const drogon::HttpRequestPtr& req) {
     auto auth = req->getHeader("authorization");
     std::string expected = "Bearer " + cfg_.auth.token;
     return auth == expected;
+}
+
+static bool env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value) return false;
+    std::string v(value);
+    return v == "1" || v == "true" || v == "TRUE";
 }
 
 std::shared_ptr<Session> FinnhubController::default_session() {
@@ -109,6 +117,14 @@ void FinnhubController::quote(const drogon::HttpRequestPtr& req,
 void FinnhubController::trades(const drogon::HttpRequestPtr& req,
                                std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!env_enabled("FINNHUB_ENABLE_TRADES")) {
+        auto resp = drogon::HttpResponse::newHttpResponse();
+        resp->setStatusCode(drogon::k200OK);
+        resp->setContentTypeCode(drogon::CT_TEXT_HTML);
+        resp->setBody("<!DOCTYPE html><html><body>Not Found</body></html>");
+        cb(resp);
+        return;
+    }
     auto session = default_session();
     if (!session) { cb(json_resp(json{{"error","session not found"}},404)); return; }
     auto sym = symbol_param(req);
@@ -138,6 +154,10 @@ void FinnhubController::trades(const drogon::HttpRequestPtr& req,
 void FinnhubController::candle(const drogon::HttpRequestPtr& req,
                                std::function<void (const drogon::HttpResponsePtr &)> &&cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    if (!env_enabled("FINNHUB_ENABLE_CANDLES")) {
+        cb(json_resp(json{{"error","You don't have access to this resource."}},403));
+        return;
+    }
     if (!data_source_) { cb(json_resp(json{{"s","no_data"}},200)); return; }
 
     auto sym = symbol_param(req);
@@ -214,6 +234,14 @@ void FinnhubController::company_profile(const drogon::HttpRequestPtr& req,
         cb(json_resp(json{{"error","profile not found"}},404));
         return;
     }
+    if (!profile->raw_json.empty()) {
+        try {
+            auto j = json::parse(profile->raw_json);
+            cb(json_resp(j));
+            return;
+        } catch (...) {
+        }
+    }
 
     // Finnhub company profile format
     json out{
@@ -258,6 +286,14 @@ void FinnhubController::basic_financials(const drogon::HttpRequestPtr& req,
     if (!financials) {
         cb(json_resp(json{{"metric", json::object()}, {"symbol", sym}}));
         return;
+    }
+    if (!financials->raw_json.empty()) {
+        try {
+            auto j = json::parse(financials->raw_json);
+            cb(json_resp(j));
+            return;
+        } catch (...) {
+        }
     }
 
     // Finnhub basic financials format
@@ -369,6 +405,14 @@ void FinnhubController::news_sentiment(const drogon::HttpRequestPtr& req,
     if (!sentiment) {
         cb(json_resp(json{{"symbol", sym}, {"buzz", json::object()}, {"sentiment", json::object()}}));
         return;
+    }
+    if (!sentiment->raw_json.empty()) {
+        try {
+            auto j = json::parse(sentiment->raw_json);
+            cb(json_resp(j));
+            return;
+        } catch (...) {
+        }
     }
 
     json out{

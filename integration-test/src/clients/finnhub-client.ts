@@ -25,6 +25,7 @@ export class FinnhubClient {
       timeout: 30000,
       httpAgent: this.httpAgent,
       httpsAgent: this.httpsAgent,
+      validateStatus: () => true,
       headers: {
         'Content-Type': 'application/json',
       },

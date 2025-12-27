@@ -17,6 +17,7 @@ export class FinnhubSimulatorClient {
     this.client = axios.create({
       baseURL: `http://${config.host}:${config.port}`,
       timeout: 30000,
+      validateStatus: () => true,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -30,7 +31,7 @@ export class FinnhubSimulatorClient {
   }
 
   async getTrades(symbol: string): Promise<AxiosResponse> {
-    return this.client.get('/trades', { params: { symbol } });
+    return this.client.get('/stock/trade', { params: { symbol } });
   }
 
   // ============ Candles ============

@@ -16,6 +16,7 @@ public:
     // Real-time data
     ADD_METHOD_TO(FinnhubController::quote, "/quote", drogon::Get);
     ADD_METHOD_TO(FinnhubController::trades, "/trades", drogon::Get);
+    ADD_METHOD_TO(FinnhubController::trades, "/stock/trade", drogon::Get);
     // Historical data
     ADD_METHOD_TO(FinnhubController::candle, "/stock/candle", drogon::Get);
     // Company information
@@ -86,4 +87,3 @@ private:
 };
 
 } // namespace broker_sim
-
