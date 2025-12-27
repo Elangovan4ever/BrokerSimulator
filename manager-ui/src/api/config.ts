@@ -50,6 +50,22 @@ export function getBaseUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub'
 export function getWsUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub', config = defaultConfig): string {
   const { host, controlPort, alpacaPort, polygonPort, finnhubPort } = config;
 
+  if (isDev) {
+    const devHost = window.location.host;
+    switch (service) {
+      case 'control':
+        return `ws://${devHost}/api/control/ws`;
+      case 'alpaca':
+        return `ws://${devHost}/api/alpaca/stream`;
+      case 'polygon':
+        return `ws://${devHost}/api/polygon/polygon/ws`;
+      case 'finnhub':
+        return `ws://${devHost}/api/finnhub/finnhub/ws`;
+      default:
+        throw new Error(`Unknown service: ${service}`);
+    }
+  }
+
   // WebSocket paths must match server's WS_PATH_ADD registrations
   switch (service) {
     case 'control':
@@ -67,5 +83,8 @@ export function getWsUrl(service: 'control' | 'alpaca' | 'polygon' | 'finnhub', 
 
 export function getStatusWsUrl(config = defaultConfig): string {
   const { host, controlPort } = config;
+  if (isDev) {
+    return `ws://${window.location.host}/api/control/ws/status`;
+  }
   return `ws://${host}:${controlPort}/ws/status`;
 }

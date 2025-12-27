@@ -5,11 +5,16 @@ import { getStatusWsUrl } from '@/api/config';
 import { StatusIndicator } from './StatusIndicator';
 import { cn } from '@/lib/utils';
 
+const ET_TIMEZONE = 'America/New_York';
+
 function formatSimTime(isoString: string | undefined): string {
   if (!isoString) return '--:--:--';
   try {
-    const date = new Date(isoString);
+    // Treat timestamp as UTC and convert to ET
+    const utcString = isoString.endsWith('Z') ? isoString : isoString + 'Z';
+    const date = new Date(utcString);
     return date.toLocaleTimeString('en-US', {
+      timeZone: ET_TIMEZONE,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -23,8 +28,11 @@ function formatSimTime(isoString: string | undefined): string {
 function formatSimDate(isoString: string | undefined): string {
   if (!isoString) return '----------';
   try {
-    const date = new Date(isoString);
+    // Treat timestamp as UTC and convert to ET
+    const utcString = isoString.endsWith('Z') ? isoString : isoString + 'Z';
+    const date = new Date(utcString);
     return date.toLocaleDateString('en-US', {
+      timeZone: ET_TIMEZONE,
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',

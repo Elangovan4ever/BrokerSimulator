@@ -35,7 +35,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { StatusIndicator } from '@/components/common/StatusIndicator';
 import { useSessionStore } from '@/stores/sessionStore';
-import { formatCurrency, formatTimestamp, formatPercent } from '@/lib/utils';
+import { formatCurrency, formatTimestamp, formatPercent, etToUtc, formatTimestampET, getDefaultStartTimeET, getDefaultEndTimeET } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { Session, SessionConfig } from '@/types';
 
@@ -58,13 +58,13 @@ export function Sessions() {
   } = useSessionStore();
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newSession, setNewSession] = useState<SessionConfig>({
+  const [newSession, setNewSession] = useState<SessionConfig>(() => ({
     symbols: ['AAPL'],
-    start_time: '2025-01-13T09:30:00',
-    end_time: '2025-01-13T16:00:00',
+    start_time: getDefaultStartTimeET(),
+    end_time: getDefaultEndTimeET(),
     initial_capital: 100000,
     speed_factor: 1.0,
-  });
+  }));
 
   useEffect(() => {
     fetchSessions();
@@ -81,12 +81,11 @@ export function Sessions() {
 
   const handleCreate = async () => {
     try {
-      // Format times without 'Z' suffix and milliseconds for C++ server
-      const formatTime = (iso: string) => iso.replace('Z', '').split('.')[0];
+      // Convert ET times to UTC for backend
       const config = {
         ...newSession,
-        start_time: formatTime(newSession.start_time),
-        end_time: formatTime(newSession.end_time),
+        start_time: etToUtc(newSession.start_time),
+        end_time: etToUtc(newSession.end_time),
       };
       const session = await createSession(config);
       toast.success(`Session ${session.id.slice(0, 8)} created`);
@@ -160,7 +159,7 @@ export function Sessions() {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="start_time">Start Time</Label>
+                    <Label htmlFor="start_time">Start Time (ET)</Label>
                     <Input
                       id="start_time"
                       type="datetime-local"
@@ -172,7 +171,7 @@ export function Sessions() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="end_time">End Time</Label>
+                    <Label htmlFor="end_time">End Time (ET)</Label>
                     <Input
                       id="end_time"
                       type="datetime-local"
@@ -373,11 +372,11 @@ export function Sessions() {
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Start Time</dt>
-                        <dd>{formatTimestamp(selectedSession.start_time)}</dd>
+                        <dd>{formatTimestampET(selectedSession.start_time)}</dd>
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">End Time</dt>
-                        <dd>{formatTimestamp(selectedSession.end_time)}</dd>
+                        <dd>{formatTimestampET(selectedSession.end_time)}</dd>
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Initial Capital</dt>
@@ -390,7 +389,7 @@ export function Sessions() {
                     <dl className="space-y-2 text-sm">
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Current Time</dt>
-                        <dd>{selectedSession.current_time ? formatTimestamp(selectedSession.current_time) : '-'}</dd>
+                        <dd>{selectedSession.current_time ? formatTimestampET(selectedSession.current_time) : '-'}</dd>
                       </div>
                       <div className="flex justify-between">
                         <dt className="text-muted-foreground">Events Processed</dt>
