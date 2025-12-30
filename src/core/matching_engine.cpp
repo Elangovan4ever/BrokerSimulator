@@ -196,6 +196,7 @@ std::optional<Fill> MatchingEngine::try_fill(Order& order, const NBBO& nbbo) {
     // Check fill probability
     if (!should_fill()) {
         if (tif_allows_enqueue(order)) {
+            order.status = OrderStatus::ACCEPTED;
             pending_orders_[order.id] = order;
         }
         return std::nullopt;
