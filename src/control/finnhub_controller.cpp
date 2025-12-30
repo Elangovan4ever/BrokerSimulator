@@ -509,7 +509,16 @@ void FinnhubController::price_target(const drogon::HttpRequestPtr& req,
 
     auto target = data_source_->get_price_targets(sym);
     if (!target) {
-        cb(json_resp(json{{"symbol", sym}}));
+        json out{
+            {"lastUpdated", ""},
+            {"numberAnalysts", nullptr},
+            {"symbol", sym},
+            {"targetHigh", nullptr},
+            {"targetLow", nullptr},
+            {"targetMean", nullptr},
+            {"targetMedian", nullptr}
+        };
+        cb(json_resp(out));
         return;
     }
 
