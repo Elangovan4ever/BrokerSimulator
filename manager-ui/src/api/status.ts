@@ -21,8 +21,8 @@ export async function checkServiceStatus(service: ApiService): Promise<Simulator
   const port = getServicePort(service);
 
   try {
-    // Try to reach health endpoint or root
-    await axios.get(`${baseUrl}/health`, { timeout: 5000 });
+    const statusPath = service === 'control' ? '/sessions' : '/health';
+    await axios.get(`${baseUrl}${statusPath}`, { timeout: 5000 });
 
     return {
       service,
