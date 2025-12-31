@@ -161,17 +161,13 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         ORDER BY ts ASC, kind ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str);
 
-    // Batch events to avoid blocking TCP read with slow callback processing.
-    // This prevents ClickHouse send timeout from TCP backpressure.
-    std::vector<MarketEvent> batch;
-    batch.reserve(1000000);  // Pre-allocate for large result sets (1M events)
-
     spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
     auto query_start = std::chrono::steady_clock::now();
+    size_t total_events = 0;
 
     // Execute query with auto-reconnect on network errors
     auto execute_query = [&]() {
-        client_->Select(query, [&batch](const clickhouse::Block& block) {
+        client_->Select(query, [&](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 MarketEvent ev;
                 ev.timestamp = extract_ts(block[0], row);
@@ -208,7 +204,8 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                     ev.quote.ask_exchange = ask_exch;
                     ev.quote.tape = tape;
                 }
-                batch.push_back(std::move(ev));
+                cb(ev);
+                ++total_events;
             }
         });
     };
@@ -217,23 +214,13 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         execute_query();
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse query failed: {}, reconnecting and retrying...", e.what());
-        batch.clear();
         connect();  // Reconnect
         execute_query();  // Retry once
     }
 
     auto query_end = std::chrono::steady_clock::now();
     auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
-    spdlog::info("ClickHouse query completed: {} events in {}ms", batch.size(), query_ms);
-
-    // Process batched events after query completes (no TCP backpressure)
-    auto process_start = std::chrono::steady_clock::now();
-    for (const auto& ev : batch) {
-        cb(ev);
-    }
-    auto process_end = std::chrono::steady_clock::now();
-    auto process_ms = std::chrono::duration_cast<std::chrono::milliseconds>(process_end - process_start).count();
-    spdlog::info("Event processing completed: {} events in {}ms", batch.size(), process_ms);
+    spdlog::info("ClickHouse query completed: {} events in {}ms", total_events, query_ms);
 }
 
 std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& symbol,
