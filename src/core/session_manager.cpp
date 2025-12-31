@@ -156,7 +156,9 @@ void SessionManager::start_session(const std::string& session_id) {
     } else if (exec_cfg_.poll_interval_seconds > 0) {
         start_polling_feeder(session);
     } else {
-        preload_events(session);
+        session->feed_threads.push_back(std::make_unique<std::thread>(
+            [this, session]() { preload_events(session); }
+        ));
     }
     session->worker_thread = std::make_unique<std::thread>(
         [this, session]() { run_session_loop(session); }
