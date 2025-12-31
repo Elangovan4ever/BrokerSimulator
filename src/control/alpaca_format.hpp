@@ -134,8 +134,10 @@ inline nlohmann::json format_position(const Position& p) {
 inline nlohmann::json format_account(const AccountState& st, const std::string& session_id) {
     const double position_market_value = st.long_market_value + st.short_market_value;
     const auto now = std::chrono::system_clock::now();
+    const std::string account_id =
+        session_id.size() >= 32 ? session_id.substr(0, 32) : session_id;
     nlohmann::json result;
-    result["id"] = session_id;
+    result["id"] = account_id;
     result["account_number"] = session_id;
     result["status"] = "ACTIVE";
     result["crypto_status"] = "ACTIVE";
