@@ -78,13 +78,34 @@ get_pid() {
     fi
 }
 
-# Check if process is running
+# Find any broker_simulator process (orphan detection)
+find_orphan_pid() {
+    pgrep -f "broker_simulator" 2>/dev/null | head -1 || echo ""
+}
+
+# Check if process is running (by PID file or orphan)
 is_running() {
     local pid=$(get_pid)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         return 0
     fi
+    # Also check for orphan processes
+    local orphan=$(find_orphan_pid)
+    if [ -n "$orphan" ]; then
+        return 0
+    fi
     return 1
+}
+
+# Get effective PID (from file or orphan)
+get_effective_pid() {
+    local pid=$(get_pid)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "$pid"
+        return
+    fi
+    # Check for orphan
+    find_orphan_pid
 }
 
 # Wait for startup with progress
@@ -124,10 +145,17 @@ wait_for_startup() {
 do_start() {
     parse_config_ports
 
-    # Check if already running
-    if is_running; then
-        local pid=$(get_pid)
-        log_warn "Broker Simulator is already running (PID: $pid)"
+    # Check if already running (by PID or orphan process)
+    local existing_pid=$(get_effective_pid)
+    if [ -n "$existing_pid" ]; then
+        log_warn "Broker Simulator is already running (PID: $existing_pid)"
+        return 1
+    fi
+
+    # Check if ports are in use (extra safety check)
+    if is_port_listening "$CONTROL_PORT"; then
+        log_error "Port $CONTROL_PORT is already in use by another process"
+        log_error "Run 'ss -tlnp | grep $CONTROL_PORT' to find the process"
         return 1
     fi
 
@@ -173,13 +201,20 @@ do_start() {
 
 # Stop the simulator
 do_stop() {
-    if ! is_running; then
+    local pid=$(get_effective_pid)
+
+    if [ -z "$pid" ]; then
         log_warn "Broker Simulator is not running"
         rm -f "$PID_FILE"
         return 0
     fi
 
-    local pid=$(get_pid)
+    # Check if this is an orphan (not from our PID file)
+    local file_pid=$(get_pid)
+    if [ "$pid" != "$file_pid" ]; then
+        log_warn "Found orphan broker_simulator process (PID: $pid)"
+    fi
+
     log_info "Stopping Broker Simulator (PID: $pid)..."
 
     # Graceful shutdown with SIGTERM
@@ -201,6 +236,10 @@ do_stop() {
     # Force kill if still running
     log_warn "Process didn't stop gracefully, sending SIGKILL..."
     kill -9 "$pid" 2>/dev/null || true
+
+    # Also kill any other orphan processes
+    pkill -9 -f "broker_simulator" 2>/dev/null || true
+
     rm -f "$PID_FILE"
     log_info "Broker Simulator killed"
     return 0
@@ -210,9 +249,14 @@ do_stop() {
 do_status() {
     parse_config_ports
 
-    if is_running; then
-        local pid=$(get_pid)
-        log_info "Broker Simulator is running (PID: $pid)"
+    local pid=$(get_effective_pid)
+    if [ -n "$pid" ]; then
+        local file_pid=$(get_pid)
+        if [ "$pid" != "$file_pid" ]; then
+            log_warn "Broker Simulator is running as ORPHAN (PID: $pid)"
+        else
+            log_info "Broker Simulator is running (PID: $pid)"
+        fi
 
         echo ""
         echo "Port Status:"
