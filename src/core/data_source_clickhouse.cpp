@@ -411,14 +411,14 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
         if (!table.empty()) {
             query = fmt::format(R"(
                 SELECT
-                    timestamp,
+                    toDateTime64(timestamp, 9) AS ts,
                     toFloat64(open) AS open,
                     toFloat64(high) AS high,
                     toFloat64(low) AS low,
                     toFloat64(close) AS close,
                     toInt64(volume) AS volume,
                     toFloat64(vwap) AS vwap,
-                    toUInt64(trades) AS trade_count
+                    toUInt64(transactions) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
                   AND timestamp >= '{}'
@@ -431,14 +431,14 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
             auto interval = interval_expr(mult, normalized_span);
             query = fmt::format(R"(
                 SELECT
-                    toDateTime64(toStartOfInterval(timestamp, {}), 3) AS bucket,
+                    toDateTime64(toStartOfInterval(timestamp, {}), 9) AS bucket,
                     toFloat64(argMin(open, timestamp)) AS open,
                     toFloat64(max(high)) AS high,
                     toFloat64(min(low)) AS low,
                     toFloat64(argMax(close, timestamp)) AS close,
                     toInt64(sum(volume)) AS volume,
                     toFloat64(if(sum(volume) = 0, 0, sum(vwap * volume) / sum(volume))) AS vwap,
-                    toUInt64(sum(trades)) AS trade_count
+                    toUInt64(sum(transactions)) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
                   AND timestamp >= '{}'
