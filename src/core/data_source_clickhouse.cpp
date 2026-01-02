@@ -2,6 +2,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <nlohmann/json.hpp>
 
@@ -346,26 +347,107 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
 
         auto start_str = format_timestamp(start_time);
         auto end_str = format_timestamp(end_time);
-        auto interval = interval_expr(multiplier, timespan);
+        auto normalized_span = timespan;
+        std::transform(normalized_span.begin(), normalized_span.end(), normalized_span.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (normalized_span == "sec") normalized_span = "second";
+        if (normalized_span == "s") normalized_span = "second";
+        if (normalized_span == "min") normalized_span = "minute";
+        if (normalized_span == "m") normalized_span = "minute";
+        if (normalized_span == "h") normalized_span = "hour";
+        if (normalized_span == "d") normalized_span = "day";
+        if (normalized_span == "w") normalized_span = "week";
+        if (normalized_span == "q") normalized_span = "quarter";
+        if (normalized_span == "y") normalized_span = "year";
+
+        auto resolve_bar_table = [&](const std::string& span, int mult) -> std::string {
+            if (span == "second") {
+                if (mult == 1) return "stock_second_bars";
+                if (mult == 5) return "stock_5s_bars";
+                if (mult == 10) return "stock_10s_bars";
+                if (mult == 15) return "stock_15s_bars";
+                if (mult == 30) return "stock_30s_bars";
+            } else if (span == "minute") {
+                if (mult == 1) return "stock_minute_bars";
+                if (mult == 3) return "stock_3m_bars";
+                if (mult == 5) return "stock_5m_bars";
+                if (mult == 10) return "stock_10m_bars";
+                if (mult == 15) return "stock_15m_bars";
+                if (mult == 30) return "stock_30m_bars";
+            } else if (span == "hour") {
+                if (mult == 1) return "stock_1h_bars";
+                if (mult == 4) return "stock_4h_bars";
+            } else if (span == "day") {
+                if (mult == 1) return "stock_daily_bars";
+            } else if (span == "week") {
+                if (mult == 1) return "stock_weekly_bars";
+            } else if (span == "month") {
+                if (mult == 1) return "stock_monthly_bars";
+            } else if (span == "quarter") {
+                if (mult == 1) return "stock_quarterly_bars";
+            } else if (span == "year") {
+                if (mult == 1) return "stock_yearly_bars";
+            }
+            return "";
+        };
+
+        auto base_table_for = [&](const std::string& span) -> std::string {
+            if (span == "second") return "stock_second_bars";
+            if (span == "minute") return "stock_minute_bars";
+            if (span == "hour") return "stock_minute_bars";
+            if (span == "day") return "stock_daily_bars";
+            if (span == "week" || span == "month" || span == "quarter" || span == "year") {
+                return "stock_daily_bars";
+            }
+            return "stock_minute_bars";
+        };
+
+        int mult = std::max(1, multiplier);
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
-        std::string query = fmt::format(R"(
-            SELECT
-                toDateTime64(toStartOfInterval(timestamp, {}), 9) AS bucket,
-                toFloat64(argMin(price, timestamp)) AS open,
-                toFloat64(max(price)) AS high,
-                toFloat64(min(price)) AS low,
-                toFloat64(argMax(price, timestamp)) AS close,
-                toInt64(sum(size)) AS volume,
-                toFloat64(if(sum(size) = 0, 0, sum(price * size) / sum(size))) AS vwap,
-                toUInt64(count()) AS trade_count
-            FROM stock_trades
-            WHERE symbol = '{}'
-              AND timestamp >= '{}'
-              AND timestamp < '{}'
-            GROUP BY bucket
-            ORDER BY bucket ASC
-            {}
-        )", interval, symbol, start_str, end_str, limit_clause);
+        std::string table = resolve_bar_table(normalized_span, mult);
+        std::string query;
+
+        if (!table.empty()) {
+            query = fmt::format(R"(
+                SELECT
+                    timestamp,
+                    toFloat64(open) AS open,
+                    toFloat64(high) AS high,
+                    toFloat64(low) AS low,
+                    toFloat64(close) AS close,
+                    toInt64(volume) AS volume,
+                    toFloat64(vwap) AS vwap,
+                    toUInt64(trades) AS trade_count
+                FROM {}.{}
+                WHERE symbol = '{}'
+                  AND timestamp >= '{}'
+                  AND timestamp < '{}'
+                ORDER BY timestamp ASC
+                {}
+            )", cfg_.database, table, symbol, start_str, end_str, limit_clause);
+        } else {
+            auto base_table = base_table_for(normalized_span);
+            auto interval = interval_expr(mult, normalized_span);
+            query = fmt::format(R"(
+                SELECT
+                    toDateTime64(toStartOfInterval(timestamp, {}), 3) AS bucket,
+                    toFloat64(argMin(open, timestamp)) AS open,
+                    toFloat64(max(high)) AS high,
+                    toFloat64(min(low)) AS low,
+                    toFloat64(argMax(close, timestamp)) AS close,
+                    toInt64(sum(volume)) AS volume,
+                    toFloat64(if(sum(volume) = 0, 0, sum(vwap * volume) / sum(volume))) AS vwap,
+                    toUInt64(sum(trades)) AS trade_count
+                FROM {}.{}
+                WHERE symbol = '{}'
+                  AND timestamp >= '{}'
+                  AND timestamp < '{}'
+                GROUP BY bucket
+                ORDER BY bucket ASC
+                {}
+            )", interval, cfg_.database, base_table, symbol, start_str, end_str, limit_clause);
+        }
 
         client.Select(query, [&out, &symbol](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
