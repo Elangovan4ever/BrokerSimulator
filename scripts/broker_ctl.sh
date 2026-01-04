@@ -27,6 +27,7 @@ CONTROL_PORT=8000
 ALPACA_PORT=8100
 POLYGON_PORT=8200
 FINNHUB_PORT=8300
+WS_PORT=8400
 
 # Colors for output
 RED='\033[0;31m'
@@ -45,6 +46,7 @@ parse_config_ports() {
         ALPACA_PORT=$(grep -o '"alpaca_port"[[:space:]]*:[[:space:]]*[0-9]*' "$CONFIG" | grep -o '[0-9]*' || echo "8100")
         POLYGON_PORT=$(grep -o '"polygon_port"[[:space:]]*:[[:space:]]*[0-9]*' "$CONFIG" | grep -o '[0-9]*' || echo "8200")
         FINNHUB_PORT=$(grep -o '"finnhub_port"[[:space:]]*:[[:space:]]*[0-9]*' "$CONFIG" | grep -o '[0-9]*' || echo "8300")
+        WS_PORT=$(grep -o '"ws_port"[[:space:]]*:[[:space:]]*[0-9]*' "$CONFIG" | grep -o '[0-9]*' || echo "8400")
     fi
 }
 
@@ -66,7 +68,8 @@ all_ports_listening() {
     is_port_listening "$CONTROL_PORT" && \
     is_port_listening "$ALPACA_PORT" && \
     is_port_listening "$POLYGON_PORT" && \
-    is_port_listening "$FINNHUB_PORT"
+    is_port_listening "$FINNHUB_PORT" && \
+    is_port_listening "$WS_PORT"
 }
 
 # Get PID from file
@@ -177,7 +180,7 @@ do_start() {
 
     log_info "Starting Broker Simulator..."
     log_info "Config: $CONFIG"
-    log_info "Ports: Control=$CONTROL_PORT, Alpaca=$ALPACA_PORT, Polygon=$POLYGON_PORT, Finnhub=$FINNHUB_PORT"
+    log_info "Ports: Control=$CONTROL_PORT, Alpaca=$ALPACA_PORT, Polygon=$POLYGON_PORT, Finnhub=$FINNHUB_PORT, WS=$WS_PORT"
 
     # Start in background
     nohup "$BINARY" "$CONFIG" >> "$LOG_FILE" 2>&1 &
