@@ -906,34 +906,6 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
     data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
         enqueue_event(session, ev);
     });
-
-    // Also enqueue 1-minute bars so websocket bar streams stay accurate at high speeds.
-    for (const auto& symbol : symbols) {
-        try {
-            auto bars = data_source_->get_bars(symbol, start, end, 1, "minute", 0);
-            for (const auto& bar : bars) {
-                const std::string& bar_symbol = bar.symbol.empty() ? symbol : bar.symbol;
-                bool ok = session->event_queue->push(
-                    bar.timestamp,
-                    EventType::BAR,
-                    bar_symbol,
-                    BarData{
-                        bar.open,
-                        bar.high,
-                        bar.low,
-                        bar.close,
-                        bar.volume,
-                        bar.vwap,
-                        bar.trade_count
-                    }
-                );
-                session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
-                if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("Preload bars failed for {}: {}", symbol, e.what());
-        }
-    }
 }
 
 void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
