@@ -19,6 +19,7 @@
     "alpaca_port": 8100,
     "polygon_port": 8200,
     "finnhub_port": 8300,
+    "ws_port": 8400,
     "bind_address": "0.0.0.0"
   },
   "defaults": {

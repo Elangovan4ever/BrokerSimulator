@@ -70,18 +70,20 @@ int main(int argc, char* argv[]) {
     drogon::app().addListener(cfg.services.bind_address, cfg.services.alpaca_port);
     drogon::app().addListener(cfg.services.bind_address, cfg.services.polygon_port);
     drogon::app().addListener(cfg.services.bind_address, cfg.services.finnhub_port);
+    drogon::app().addListener(cfg.services.bind_address, cfg.services.ws_port);
     drogon::app().registerController(api_ctrl);
     drogon::app().registerController(alpaca_ctrl);
     drogon::app().registerController(polygon_ctrl);
     drogon::app().registerController(finnhub_ctrl);
     drogon::app().registerController(std::make_shared<broker_sim::WsController>());
     drogon::app().registerController(std::make_shared<broker_sim::StatusWsController>());
-    spdlog::info("Starting Drogon listeners on {}:{} (control) / {} (alpaca) / {} (polygon) / {} (finnhub)",
+    spdlog::info("Starting Drogon listeners on {}:{} (control) / {} (alpaca) / {} (polygon) / {} (finnhub) / {} (ws)",
                  cfg.services.bind_address,
                  cfg.services.control_port,
                  cfg.services.alpaca_port,
                  cfg.services.polygon_port,
-                 cfg.services.finnhub_port);
+                 cfg.services.finnhub_port,
+                 cfg.services.ws_port);
     drogon::app().run();
 
     // Clean shutdown of WebSocket worker threads
