@@ -251,33 +251,21 @@ void StatusWsController::worker_loop() {
                     tick.status = session->status;
                     tick.speed = speed;
                     tick.initialized = true;
-                } else if (tick.status != session->status) {
-                    if (current_ns > tick.last_sent_ns) {
-                        tick.last_sent_ns = current_ns;
-                    }
-                    tick.status = session->status;
-                    tick.speed = speed;
-                } else if (tick.speed != speed) {
-                    if (current_ns > tick.last_sent_ns) {
-                        tick.last_sent_ns = current_ns;
-                    }
-                    tick.speed = speed;
                 }
 
-                if (session->status == SessionStatus::RUNNING && speed > 0.0) {
-                    int64_t step_ns = static_cast<int64_t>(std::llround(speed * 1e9));
-                    if (step_ns > 0) {
-                        int64_t next_ns = tick.last_sent_ns + step_ns;
-                        if (current_ns > next_ns) {
-                            next_ns = current_ns;
-                        }
-                        tick.last_sent_ns = next_ns;
-                    } else if (current_ns > tick.last_sent_ns) {
-                        tick.last_sent_ns = current_ns;
-                    }
+                bool allow_reset = tick.status == SessionStatus::STOPPED
+                    || tick.status == SessionStatus::COMPLETED
+                    || tick.status == SessionStatus::ERROR
+                    || tick.status == SessionStatus::CREATED;
+
+                if (allow_reset && current_ns < tick.last_sent_ns) {
+                    tick.last_sent_ns = current_ns;
                 } else if (current_ns > tick.last_sent_ns) {
                     tick.last_sent_ns = current_ns;
                 }
+
+                tick.status = session->status;
+                tick.speed = speed;
 
                 int64_t send_ns = tick.last_sent_ns;
                 broadcast_session_status(
