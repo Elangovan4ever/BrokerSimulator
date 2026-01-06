@@ -71,6 +71,7 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
             cfg.symbols = j.value("symbols", std::vector<std::string>{});
             cfg.initial_capital = j.value("initial_capital", cfg_.defaults.initial_capital);
             cfg.speed_factor = j.value("speed_factor", cfg_.defaults.speed_factor);
+            cfg.live_bar_aggr_source = j.value("live_bar_aggr_source", std::string{"trades"});
             if (j.contains("session_id") && !j["session_id"].is_null()) {
                 requested_id = j["session_id"].get<std::string>();
             }
@@ -93,7 +94,7 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
             }
         }
         auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cfg.start_time.time_since_epoch()).count();
-        spdlog::info("createSession: parsed start_time_ns={}", start_ns);
+        spdlog::info("createSession: parsed start_time_ns={}, live_bar_aggr_source={}", start_ns, cfg.live_bar_aggr_source);
         auto session = session_mgr_->create_session(cfg, requested_id);
         // Don't auto-start: preload_events blocks on ClickHouse query which can timeout the HTTP request
         // User should call POST /sessions/{id}/start separately
@@ -655,6 +656,15 @@ json ControlServer::event_to_json(const Event& ev) {
         out["size"] = t.size;
         out["exchange"] = t.exchange;
         out["conditions"] = t.conditions;
+    } else if (ev.event_type == EventType::BAR) {
+        const auto& b = std::get<BarData>(ev.data);
+        out["open"] = b.open;
+        out["high"] = b.high;
+        out["low"] = b.low;
+        out["close"] = b.close;
+        out["volume"] = b.volume;
+        if (b.vwap) out["vwap"] = *b.vwap;
+        if (b.trade_count) out["trade_count"] = *b.trade_count;
     } else if (ev.event_type == EventType::ORDER_NEW ||
                ev.event_type == EventType::ORDER_FILL ||
                ev.event_type == EventType::ORDER_CANCEL ||

@@ -224,6 +224,74 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
     spdlog::info("ClickHouse query completed: {} events in {}ms", total_events, query_ms);
 }
 
+void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& symbols,
+                                              Timestamp start_time,
+                                              Timestamp end_time,
+                                              const std::function<void(const BarRecord&)>& cb) {
+    // Note: No mutex lock here - similar to stream_events, called once at session start
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected, reconnecting...");
+        connect();
+    }
+    std::string sym_list = build_symbol_list(symbols);
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+
+    // Query 1-second bars from market_data.stock_second_bars
+    std::string query = fmt::format(R"(
+        SELECT
+            timestamp,
+            CAST(symbol AS String) as symbol,
+            toFloat64(open) as open,
+            toFloat64(high) as high,
+            toFloat64(low) as low,
+            toFloat64(close) as close,
+            toInt64(volume) as volume,
+            toFloat64(vwap) as vwap,
+            toUInt32(trades) as trade_count
+        FROM market_data.stock_second_bars
+        WHERE symbol IN ({})
+          AND timestamp >= '{}'
+          AND timestamp < '{}'
+        ORDER BY timestamp ASC
+    )", sym_list, start_str, end_str);
+
+    spdlog::info("Starting ClickHouse 1s bars query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
+    auto query_start = std::chrono::steady_clock::now();
+    size_t total_bars = 0;
+
+    auto execute_query = [&]() {
+        client_->Select(query, [&](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                BarRecord bar;
+                bar.timestamp = extract_ts(block[0], row);
+                bar.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                bar.open = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.high = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.low = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.close = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.volume = block[6]->As<clickhouse::ColumnInt64>()->At(row);
+                bar.vwap = block[7]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.trade_count = block[8]->As<clickhouse::ColumnUInt32>()->At(row);
+                cb(bar);
+                ++total_bars;
+            }
+        });
+    };
+
+    try {
+        execute_query();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse 1s bars query failed: {}, reconnecting and retrying...", e.what());
+        connect();
+        execute_query();
+    }
+
+    auto query_end = std::chrono::steady_clock::now();
+    auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+    spdlog::info("ClickHouse 1s bars query completed: {} bars in {}ms", total_bars, query_ms);
+}
+
 std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& symbol,
                                                           Timestamp start_time,
                                                           Timestamp end_time,

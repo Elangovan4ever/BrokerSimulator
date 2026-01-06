@@ -608,6 +608,12 @@ public:
                                Timestamp end_time,
                                const std::function<void(const MarketEvent&)>& cb) = 0;
 
+    // Stream 1-second bars (for live_bar_aggr_source="1s").
+    virtual void stream_second_bars(const std::vector<std::string>& symbols,
+                                    Timestamp start_time,
+                                    Timestamp end_time,
+                                    const std::function<void(const BarRecord&)>& cb) = 0;
+
     // Query helpers for API endpoints.
     virtual std::vector<TradeRecord> get_trades(const std::string& symbol,
                                                 Timestamp start_time,

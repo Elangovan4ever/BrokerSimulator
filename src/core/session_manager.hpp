@@ -34,6 +34,7 @@ struct SessionConfig {
     double speed_factor{0.0};
     size_t queue_capacity{0};
     std::string overflow_policy{"block"};
+    std::string live_bar_aggr_source{"trades"};  // "trades" or "1s"
 };
 
 enum class SessionStatus { CREATED, RUNNING, PAUSED, STOPPED, COMPLETED, ERROR };

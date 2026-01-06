@@ -903,9 +903,22 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
     auto start = session->config.start_time;
     auto end = session->config.end_time;
 
-    data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
-        enqueue_event(session, ev);
-    });
+    if (session->config.live_bar_aggr_source == "1s") {
+        // Stream 1-second bars instead of trades for bar aggregation
+        spdlog::info("Using 1s bars for live_bar_aggr_source (session {})", session->id);
+        data_source_->stream_second_bars(symbols, start, end, [this, session](const BarRecord& bar) {
+            // Enqueue as BAR event
+            BarData bd{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count};
+            bool ok = session->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
+            session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+            if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+        });
+    } else {
+        // Default: stream trades and quotes
+        data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
+            enqueue_event(session, ev);
+        });
+    }
 }
 
 void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
