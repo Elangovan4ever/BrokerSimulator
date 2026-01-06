@@ -28,6 +28,13 @@ public:
         spdlog::warn("StubDataSource: no events streamed (ClickHouse not linked)");
     }
 
+    void stream_second_bars(const std::vector<std::string>& symbols,
+                            Timestamp start_time,
+                            Timestamp end_time,
+                            const std::function<void(const BarRecord&)>& cb) override {
+        spdlog::warn("StubDataSource: no 1s bars streamed (ClickHouse not linked)");
+    }
+
     std::vector<TradeRecord> get_trades(const std::string& symbol,
                                         Timestamp start_time,
                                         Timestamp end_time,
