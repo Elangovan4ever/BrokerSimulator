@@ -238,9 +238,10 @@ void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& sy
     auto end_str = format_timestamp(end_time);
 
     // Query 1-second bars from market_data.stock_second_bars
+    // Convert timestamp from DateTime64(3) milliseconds to DateTime64(9) nanoseconds
     std::string query = fmt::format(R"(
         SELECT
-            timestamp,
+            toDateTime64(timestamp, 9) as ts,
             CAST(symbol AS String) as symbol,
             toFloat64(open) as open,
             toFloat64(high) as high,
