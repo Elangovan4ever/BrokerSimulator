@@ -43,6 +43,7 @@ struct DefaultsConfig {
     double speed_factor{0.0}; // 0 = max speed
     int max_sessions{20};
     size_t session_queue_capacity{0};  // 0 = unlimited (for backtest sessions)
+    int64_t live_aggr_bar_stream_freq_ms{500};  // milliseconds
 };
 
 struct ExecutionConfig {
@@ -423,6 +424,8 @@ inline void load_config(Config& cfg, const std::string& path) {
         cfg.defaults.speed_factor = d.value("speed_factor", cfg.defaults.speed_factor);
         cfg.defaults.max_sessions = d.value("max_sessions", cfg.defaults.max_sessions);
         cfg.defaults.session_queue_capacity = d.value("session_queue_capacity", cfg.defaults.session_queue_capacity);
+        cfg.defaults.live_aggr_bar_stream_freq_ms = d.value("live_aggr_bar_stream_freq_ms", cfg.defaults.live_aggr_bar_stream_freq_ms);
+        cfg.defaults.live_aggr_bar_stream_freq_ms = d.value("live_aggr_bar_stream_freq", cfg.defaults.live_aggr_bar_stream_freq_ms);
     }
     if (j.contains("execution")) {
         auto& e = j["execution"];

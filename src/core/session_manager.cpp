@@ -919,6 +919,11 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
             enqueue_event(session, ev);
         });
     }
+
+    if (session->event_queue) {
+        session->event_queue->stop();
+        spdlog::info("Session {} preload complete; event queue closed", session->id);
+    }
 }
 
 void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {

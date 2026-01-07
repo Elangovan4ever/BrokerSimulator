@@ -3,6 +3,7 @@
 #include <drogon/WebSocketController.h>
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
@@ -66,6 +67,9 @@ struct WsConnectionState {
     // Subscriptions by type -> set of symbols ("*" means all)
     std::unordered_map<SubscriptionType, std::unordered_set<std::string>> subscriptions;
 
+    // Bar timeframes per symbol (seconds)
+    std::unordered_map<std::string, int64_t> bar_timeframes;
+
     // Backpressure tracking
     BackpressureState backpressure;
 
@@ -73,6 +77,16 @@ struct WsConnectionState {
     uint64_t messages_sent{0};
     uint64_t messages_dropped{0};
     uint64_t bytes_sent{0};
+
+    // Bar aggregation state per symbol
+    struct AggBar {
+        int64_t bucket_start_epoch{0};
+        double open{0}, high{0}, low{0}, close{0};
+        int64_t volume{0};
+        int trade_count{0};
+        std::chrono::steady_clock::time_point last_emit_time{};
+    };
+    std::unordered_map<std::string, AggBar> agg_bars;
 
     // Check if subscribed to a symbol for a given type
     bool is_subscribed(SubscriptionType type, const std::string& symbol) const {
@@ -193,7 +207,8 @@ private:
 
     static std::string format_trade_polygon(const std::string& symbol, const TradeData& trade, Timestamp ts);
     static std::string format_quote_polygon(const std::string& symbol, const QuoteData& quote, Timestamp ts);
-    static std::string format_bar_polygon(const std::string& symbol, const BarData& bar, Timestamp ts);
+    static std::string format_bar_polygon(const std::string& symbol, const BarData& bar, Timestamp ts,
+                                          int64_t timeframe_seconds = 60);
 
     static std::string format_trade_finnhub(const std::string& symbol, const TradeData& trade, Timestamp ts);
 
@@ -213,6 +228,8 @@ private:
     static void start_worker();
     static void worker_loop();
     static void enqueue(const std::string& session_id, const std::string& msg);
+    static int64_t resolve_bar_stream_interval_ms(const WsConnectionState& state);
+
     static void send_batch(const std::string& session_id, const std::vector<std::string>& msgs);
 
     // Backpressure management

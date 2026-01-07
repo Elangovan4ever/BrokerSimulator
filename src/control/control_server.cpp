@@ -72,6 +72,7 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
             cfg.initial_capital = j.value("initial_capital", cfg_.defaults.initial_capital);
             cfg.speed_factor = j.value("speed_factor", cfg_.defaults.speed_factor);
             cfg.live_bar_aggr_source = j.value("live_bar_aggr_source", std::string{"trades"});
+            cfg.live_aggr_bar_stream_freq_ms = j.value("live_aggr_bar_stream_freq", cfg_.defaults.live_aggr_bar_stream_freq_ms);
             if (j.contains("session_id") && !j["session_id"].is_null()) {
                 requested_id = j["session_id"].get<std::string>();
             }
@@ -94,7 +95,7 @@ void ControlServer::createSession(const drogon::HttpRequestPtr& req,
             }
         }
         auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cfg.start_time.time_since_epoch()).count();
-        spdlog::info("createSession: parsed start_time_ns={}, live_bar_aggr_source={}", start_ns, cfg.live_bar_aggr_source);
+        spdlog::info("createSession: parsed start_time_ns={}, live_bar_aggr_source={}, live_aggr_bar_stream_freq_ms={}", start_ns, cfg.live_bar_aggr_source, cfg.live_aggr_bar_stream_freq_ms);
         auto session = session_mgr_->create_session(cfg, requested_id);
         // Don't auto-start: preload_events blocks on ClickHouse query which can timeout the HTTP request
         // User should call POST /sessions/{id}/start separately
