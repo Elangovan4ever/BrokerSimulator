@@ -554,6 +554,18 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
                 break;
             }
             const Event& ev = *ev_opt;
+            auto current_ts = session->time_engine->current_time();
+            auto next_open = exec_cfg_.next_market_open_after(current_ts);
+            if (next_open > current_ts && next_open <= ev.timestamp) {
+                session->time_engine->set_time(next_open);
+            }
+            if (exec_cfg_.get_market_session(ev.timestamp) == ExecutionConfig::MarketSession::CLOSED) {
+                auto next_open_event = exec_cfg_.next_market_open_after(ev.timestamp);
+                if (next_open_event > ev.timestamp) {
+                    session->time_engine->set_time(next_open_event);
+                }
+                continue;
+            }
             if (!session->time_engine->wait_for_next_event(ev.timestamp)) {
                 spdlog::info("Session {} loop: wait_for_next_event returned false", session->id);
                 break;

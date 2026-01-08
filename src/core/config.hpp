@@ -5,6 +5,8 @@
 #include <optional>
 #include <random>
 #include <cmath>
+#include <chrono>
+#include <ctime>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -151,31 +153,8 @@ struct ExecutionConfig {
      * Check if a given date is a market holiday.
      */
     bool is_market_holiday(std::chrono::system_clock::time_point ts) const {
-        auto time_t_val = std::chrono::system_clock::to_time_t(ts);
-        std::tm tm_utc = *std::gmtime(&time_t_val);
-
-        // Convert to ET (subtract 5 hours for EST)
-        int et_hour = (tm_utc.tm_hour + 24 - 5) % 24;
-        // Adjust date if we crossed midnight
-        std::tm tm_et = tm_utc;
-        if (tm_utc.tm_hour < 5) {
-            // We're still in the previous day in ET
-            auto adjusted = ts - std::chrono::hours(5);
-            time_t_val = std::chrono::system_clock::to_time_t(adjusted);
-            tm_et = *std::gmtime(&time_t_val);
-        }
-
-        // Format as MM-DD
-        char date_str[6];
-        std::snprintf(date_str, sizeof(date_str), "%02d-%02d", tm_et.tm_mon + 1, tm_et.tm_mday);
-        std::string date_key(date_str);
-
-        for (const auto& holiday : market_holidays) {
-            if (holiday == date_key) {
-                return true;
-            }
-        }
-        return false;
+        std::tm tm_et = to_et_tm(ts);
+        return is_market_holiday_date(tm_et.tm_mon + 1, tm_et.tm_mday);
     }
 
     /**
@@ -183,25 +162,20 @@ struct ExecutionConfig {
      * Assumes timestamp is in UTC, converts to Eastern Time.
      */
     MarketSession get_market_session(std::chrono::system_clock::time_point ts) const {
+        std::tm tm_et = to_et_tm(ts);
+
         // Check for market holidays first
-        if (is_market_holiday(ts)) {
+        if (is_market_holiday_date(tm_et.tm_mon + 1, tm_et.tm_mday)) {
             return MarketSession::CLOSED;
         }
 
-        // Convert to time_t and get tm struct
-        auto time_t_val = std::chrono::system_clock::to_time_t(ts);
-        std::tm tm_utc = *std::gmtime(&time_t_val);
-
-        // Simple ET offset: -5 hours (EST) or -4 hours (EDT)
-        // For simplicity, using -5 (EST). Production would use proper timezone library.
-        int et_hour = (tm_utc.tm_hour + 24 - 5) % 24;
-        int minutes_from_midnight = et_hour * 60 + tm_utc.tm_min;
-
         // Check if weekend (Saturday=6, Sunday=0)
-        int wday = tm_utc.tm_wday;
+        int wday = tm_et.tm_wday;
         if (wday == 0 || wday == 6) {
             return MarketSession::CLOSED;
         }
+
+        int minutes_from_midnight = tm_et.tm_hour * 60 + tm_et.tm_min;
 
         // Check session based on time
         if (minutes_from_midnight < premarket_start_minutes) {
@@ -237,6 +211,39 @@ struct ExecutionConfig {
                 return false;  // Never allowed when market is closed
         }
         return false;
+    }
+
+    /**
+     * Get the next market open timestamp (4:00 AM ET) after a given timestamp.
+     */
+    std::chrono::system_clock::time_point next_market_open_after(std::chrono::system_clock::time_point ts) const {
+        std::tm tm_et = to_et_tm(ts);
+        int year = tm_et.tm_year + 1900;
+        int month = tm_et.tm_mon + 1;
+        int day = tm_et.tm_mday;
+        int minutes_from_midnight = tm_et.tm_hour * 60 + tm_et.tm_min;
+
+        auto is_trading_day = [this](int y, int m, int d) {
+            int wday = day_of_week(y, m, d);
+            if (wday == 0 || wday == 6) {
+                return false;
+            }
+            return !is_market_holiday_date(m, d);
+        };
+
+        if (is_trading_day(year, month, day) && minutes_from_midnight < premarket_start_minutes) {
+            return et_local_to_utc(year, month, day,
+                                   premarket_start_minutes / 60,
+                                   premarket_start_minutes % 60);
+        }
+
+        do {
+            add_days(year, month, day, 1);
+        } while (!is_trading_day(year, month, day));
+
+        return et_local_to_utc(year, month, day,
+                               premarket_start_minutes / 60,
+                               premarket_start_minutes % 60);
     }
 
     /**
@@ -320,6 +327,128 @@ struct ExecutionConfig {
         }
         double impact_amount = price * (impact_bps / 10000.0);
         return is_buy ? impact_amount : -impact_amount;
+    }
+
+private:
+    static int day_of_week(int year, int month, int day) {
+        static int table[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+        if (month < 3) {
+            year -= 1;
+        }
+        return (year + year / 4 - year / 100 + year / 400 + table[month - 1] + day) % 7;
+    }
+
+    static int nth_weekday_of_month(int year, int month, int weekday, int nth) {
+        int first_wday = day_of_week(year, month, 1);
+        int day = 1 + ((7 + weekday - first_wday) % 7);
+        day += (nth - 1) * 7;
+        return day;
+    }
+
+    static void add_days(int& year, int& month, int& day, int delta) {
+        std::tm tm{};
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day + delta;
+        auto tt = timegm(&tm);
+        std::tm tm_out = *std::gmtime(&tt);
+        year = tm_out.tm_year + 1900;
+        month = tm_out.tm_mon + 1;
+        day = tm_out.tm_mday;
+    }
+
+    static bool is_us_dst_local(int year, int month, int day, int hour, int minute) {
+        int dst_start_day = nth_weekday_of_month(year, 3, 0, 2);
+        int dst_end_day = nth_weekday_of_month(year, 11, 0, 1);
+
+        if (month < 3 || month > 11) {
+            return false;
+        }
+        if (month > 3 && month < 11) {
+            return true;
+        }
+        if (month == 3) {
+            if (day > dst_start_day) {
+                return true;
+            }
+            if (day < dst_start_day) {
+                return false;
+            }
+            return (hour > 2) || (hour == 2 && minute >= 0);
+        }
+        if (month == 11) {
+            if (day < dst_end_day) {
+                return true;
+            }
+            if (day > dst_end_day) {
+                return false;
+            }
+            return hour < 2;
+        }
+        return false;
+    }
+
+    static std::chrono::system_clock::time_point utc_time_point(int year, int month, int day,
+                                                                int hour, int minute, int sec) {
+        std::tm tm{};
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = sec;
+        auto tt = timegm(&tm);
+        return std::chrono::system_clock::from_time_t(tt);
+    }
+
+    static bool is_us_dst_utc(std::chrono::system_clock::time_point ts) {
+        auto tt = std::chrono::system_clock::to_time_t(ts);
+        std::tm tm_utc = *std::gmtime(&tt);
+        int year = tm_utc.tm_year + 1900;
+        int dst_start_day = nth_weekday_of_month(year, 3, 0, 2);
+        int dst_end_day = nth_weekday_of_month(year, 11, 0, 1);
+
+        auto dst_start = utc_time_point(year, 3, dst_start_day, 7, 0, 0);
+        auto dst_end = utc_time_point(year, 11, dst_end_day, 6, 0, 0);
+        return ts >= dst_start && ts < dst_end;
+    }
+
+    static int et_offset_minutes(std::chrono::system_clock::time_point ts) {
+        return is_us_dst_utc(ts) ? -240 : -300;
+    }
+
+    static std::tm to_et_tm(std::chrono::system_clock::time_point ts) {
+        int offset_min = et_offset_minutes(ts);
+        auto adjusted = ts + std::chrono::minutes(offset_min);
+        auto tt = std::chrono::system_clock::to_time_t(adjusted);
+        return *std::gmtime(&tt);
+    }
+
+    static std::chrono::system_clock::time_point et_local_to_utc(int year, int month, int day,
+                                                                 int hour, int minute) {
+        std::tm tm{};
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = 0;
+        auto tt = timegm(&tm);
+        int offset_min = is_us_dst_local(year, month, day, hour, minute) ? -240 : -300;
+        return std::chrono::system_clock::from_time_t(tt) - std::chrono::minutes(offset_min);
+    }
+
+    bool is_market_holiday_date(int month, int day) const {
+        char date_str[6];
+        std::snprintf(date_str, sizeof(date_str), "%02d-%02d", month, day);
+        std::string date_key(date_str);
+
+        for (const auto& holiday : market_holidays) {
+            if (holiday == date_key) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 

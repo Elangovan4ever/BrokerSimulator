@@ -58,6 +58,7 @@ public:
 
     void pause() {
         is_paused_.store(true, std::memory_order_release);
+        pause_cv_.notify_all();
     }
 
     void resume() {
@@ -105,7 +106,43 @@ public:
 
         if (speed > 0.0 && diff_ns > 0) {
             auto sleep_time = Nanoseconds(static_cast<int64_t>(diff_ns / speed));
-            std::this_thread::sleep_for(sleep_time);
+            auto remaining = sleep_time;
+            auto start = std::chrono::steady_clock::now();
+            while (remaining.count() > 0) {
+                std::unique_lock<std::mutex> lock(pause_mutex_);
+                bool signaled = pause_cv_.wait_for(lock, remaining, [this] {
+                    return is_paused_.load(std::memory_order_acquire) ||
+                           !is_running_.load(std::memory_order_acquire);
+                });
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<Nanoseconds>(now - start);
+                if (elapsed >= remaining) {
+                    remaining = Nanoseconds(0);
+                } else {
+                    remaining -= elapsed;
+                }
+
+                if (!is_running()) {
+                    spdlog::warn("TimeEngine: stopped during sleep, returning false");
+                    return false;
+                }
+                if (is_paused()) {
+                    pause_cv_.wait(lock, [this] {
+                        return !is_paused_.load(std::memory_order_acquire) ||
+                               !is_running_.load(std::memory_order_acquire);
+                    });
+                    if (!is_running()) {
+                        spdlog::warn("TimeEngine: stopped while paused, returning false");
+                        return false;
+                    }
+                    start = std::chrono::steady_clock::now();
+                    continue;
+                }
+                if (!signaled) {
+                    break;
+                }
+                start = std::chrono::steady_clock::now();
+            }
         }
 
         // Advance time to event_time

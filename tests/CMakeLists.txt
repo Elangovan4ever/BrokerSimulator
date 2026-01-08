@@ -16,6 +16,8 @@ add_executable(broker_tests
     rate_limiter_test.cpp
     matching_engine_test.cpp
     session_manager_test.cpp
+    market_hours_test.cpp
+    time_engine_test.cpp
     performance_test.cpp
     integration_test.cpp
     stress_test.cpp
