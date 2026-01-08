@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <deque>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -84,7 +85,9 @@ struct WsConnectionState {
         double open{0}, high{0}, low{0}, close{0};
         int64_t volume{0};
         int trade_count{0};
-        std::chrono::steady_clock::time_point last_emit_time{};
+        std::optional<double> vwap;
+        int64_t last_emit_ts_ns{0};
+        bool has_data{false};
     };
     std::unordered_map<std::string, AggBar> agg_bars;
 
