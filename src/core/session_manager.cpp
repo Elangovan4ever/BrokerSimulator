@@ -1128,14 +1128,12 @@ std::string SessionManager::generate_uuid() {
     static constexpr char hex[] = "0123456789abcdef";
     uint64_t a = rng();
     uint64_t b = rng();
-    std::string s(64, '0');
+    std::string s(32, '0');
     for (int i = 0; i < 16; ++i) {
-        s[i * 2] = hex[(a >> (i * 4)) & 0xF];
-        s[i * 2 + 1] = hex[(a >> (i * 4 + 4)) & 0xF];
+        s[i] = hex[(a >> (i * 4)) & 0xF];
     }
     for (int i = 0; i < 16; ++i) {
-        s[32 + i * 2] = hex[(b >> (i * 4)) & 0xF];
-        s[32 + i * 2 + 1] = hex[(b >> (i * 4 + 4)) & 0xF];
+        s[16 + i] = hex[(b >> (i * 4)) & 0xF];
     }
     return s;
 }

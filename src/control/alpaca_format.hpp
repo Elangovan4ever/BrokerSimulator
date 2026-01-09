@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include "../core/matching_engine.hpp"
 #include "../core/account_manager.hpp"
@@ -53,6 +55,27 @@ inline nlohmann::json maybe_iso(int64_t ns) {
     return utils::ns_to_iso(ns);
 }
 
+inline std::string simple_uuid() {
+    std::string id = utils::generate_id();
+    std::string out;
+    out.reserve(32);
+    for (char c : id) {
+        if (c != '-') out.push_back(c);
+    }
+    return out;
+}
+
+inline std::string asset_id_for_symbol(const std::string& symbol) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, std::string> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = cache.find(symbol);
+    if (it != cache.end()) return it->second;
+    auto id = simple_uuid();
+    cache.emplace(symbol, id);
+    return id;
+}
+
 inline nlohmann::json format_order(const Order& o) {
     nlohmann::json result;
     result["id"] = o.id;
@@ -67,7 +90,7 @@ inline nlohmann::json format_order(const Order& o) {
     result["replaced_at"] = nullptr;
     result["replaced_by"] = nullptr;
     result["replaces"] = nullptr;
-    result["asset_id"] = o.symbol;
+    result["asset_id"] = asset_id_for_symbol(o.symbol);
     result["symbol"] = o.symbol;
     result["asset_class"] = "us_equity";
     result["notional"] = nullptr;
@@ -110,7 +133,7 @@ inline nlohmann::json format_position(const Position& p) {
     double unrealized_plpc = p.cost_basis != 0.0 ? (p.unrealized_pl / p.cost_basis) * 100.0 : 0.0;
 
     return {
-        {"asset_id", p.symbol},
+        {"asset_id", asset_id_for_symbol(p.symbol)},
         {"symbol", p.symbol},
         {"exchange", "NASDAQ"},
         {"asset_class", "us_equity"},
