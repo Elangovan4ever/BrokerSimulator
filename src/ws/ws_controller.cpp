@@ -745,8 +745,16 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
             case EventType::TRADE: {
                 const auto& trade = std::get<TradeData>(event.data);
 
-                if (state.api_type == WsApiType::POLYGON &&
-                    state.is_subscribed(SubscriptionType::BARS, event.symbol)) {
+                bool allow_trade_bar_agg = state.api_type == WsApiType::POLYGON &&
+                    state.is_subscribed(SubscriptionType::BARS, event.symbol);
+                if (allow_trade_bar_agg && !state.session_id.empty() && session_mgr_) {
+                    auto session = session_mgr_->get_session(state.session_id);
+                    if (session && session->config.live_bar_aggr_source == "1s") {
+                        allow_trade_bar_agg = false;
+                    }
+                }
+
+                if (allow_trade_bar_agg) {
                     int64_t tf_secs = 60;
                     auto tf_it = state.bar_timeframes.find(event.symbol);
                     if (tf_it != state.bar_timeframes.end()) {

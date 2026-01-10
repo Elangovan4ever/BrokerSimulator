@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
         api_data_source = data_source;  // Fallback to sharing if no separate source
     }
 
-    auto session_mgr = std::make_shared<broker_sim::SessionManager>(data_source, cfg.execution, cfg.fees, api_data_source);
+    auto session_mgr = std::make_shared<broker_sim::SessionManager>(data_source, cfg.execution, cfg.fees, api_data_source, cfg.postgres);
     broker_sim::WsController::init(session_mgr, cfg);
     broker_sim::StatusWsController::init(session_mgr);
     // Register Drogon controller for API/WS
@@ -87,6 +87,7 @@ int main(int argc, char* argv[]) {
     drogon::app().run();
 
     // Clean shutdown of WebSocket worker threads
+    broker_sim::StatusWsController::shutdown();
     broker_sim::WsController::shutdown();
 
     return 0;

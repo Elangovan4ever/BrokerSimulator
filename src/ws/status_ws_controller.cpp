@@ -236,6 +236,7 @@ void StatusWsController::worker_loop() {
     std::unordered_map<std::string, TickState> tick_states;
 
     while (worker_running_.load(std::memory_order_acquire)) {
+        try {
         auto start = steady_clock::now();
 
         if (session_mgr_) {
@@ -281,6 +282,11 @@ void StatusWsController::worker_loop() {
         auto sleep_for = seconds(1) - duration_cast<nanoseconds>(elapsed);
         if (sleep_for.count() > 0) {
             std::this_thread::sleep_for(sleep_for);
+        }
+        } catch (const std::exception& e) {
+            spdlog::error("StatusWsController worker_loop exception: {}", e.what());
+        } catch (...) {
+            spdlog::error("StatusWsController worker_loop unknown exception");
         }
     }
 }

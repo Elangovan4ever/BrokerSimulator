@@ -215,7 +215,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
         execute_query();
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse query failed: {}, reconnecting and retrying...", e.what());
-        connect();  // Reconnect
+        { std::lock_guard<std::mutex> lock(client_mutex_); connect(); }  // Reconnect
         execute_query();  // Retry once
     }
 
@@ -284,7 +284,8 @@ void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& sy
         execute_query();
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse 1s bars query failed: {}, reconnecting and retrying...", e.what());
-        connect();
+        { std::lock_guard<std::mutex> lock(client_mutex_);
+        connect(); }
         execute_query();
     }
 
@@ -587,7 +588,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse get_company_news failed: {}, reconnecting...", e.what());
         out.clear();
-        connect();
+        { std::lock_guard<std::mutex> lock(client_mutex_); connect(); }
         try {
             run_select();
         } catch (const std::exception& retry_e) {
@@ -2285,7 +2286,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_finnhub_market_news(Tim
     } catch (const std::exception& e) {
         spdlog::warn("ClickHouse get_finnhub_market_news failed: {}, reconnecting...", e.what());
         out.clear();
-        connect();
+        { std::lock_guard<std::mutex> lock(client_mutex_); connect(); }
         try {
             run_select();
         } catch (const std::exception& retry_e) {
