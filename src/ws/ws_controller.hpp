@@ -56,6 +56,11 @@ struct BackpressureState {
     static constexpr size_t LOW_WATERMARK_MESSAGES = 5000;
 };
 
+struct SessionBackpressureState {
+    bool throttled{false};
+    double original_speed{0.0};
+};
+
 /**
  * Per-connection state tracking.
  * Note: All access must be protected by conn_mutex_
@@ -176,6 +181,8 @@ private:
     // Session to connections mapping
     static std::unordered_map<std::string, std::vector<drogon::WebSocketConnectionPtr>> session_conns_;
 
+    static std::unordered_map<std::string, SessionBackpressureState> session_backpressure_;
+
     // Message queue for batched sending
     static std::mutex queue_mutex_;
     static std::condition_variable queue_cv_;
@@ -236,11 +243,7 @@ private:
     static void send_batch(const std::string& session_id, const std::vector<std::string>& msgs);
 
     // Backpressure management
-    static void update_backpressure(const drogon::WebSocketConnectionPtr& conn, size_t bytes_sent);
-    static void on_message_drained(const drogon::WebSocketConnectionPtr& conn, size_t bytes);
-    static bool should_drop_for_slow_consumer(const WsConnectionState& state);
-    static size_t count_slow_connections(const std::string& session_id);
-    static void log_backpressure_stats();
+    static void handle_session_backpressure_locked(const std::string& session_id, bool is_slow);
 };
 
 } // namespace broker_sim

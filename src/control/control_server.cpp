@@ -159,7 +159,10 @@ void ControlServer::deleteSession(const drogon::HttpRequestPtr& req,
     if (!authorize(req)) { callback(unauthorized()); return; }
     auto session = session_mgr_->get_session(session_id);
     if (!session) { callback(json_resp(json{{"error","session not found"}},404)); return; }
-    session_mgr_->destroy_session(session_id);
+    auto manager = session_mgr_;
+    std::thread([manager, session_id]() {
+        manager->destroy_session(session_id);
+    }).detach();
     callback(json_resp(json{{"status","deleted"},{"session_id",session_id}}));
 }
 
@@ -563,7 +566,10 @@ void ControlServer::stop(const drogon::HttpRequestPtr& req,
                          std::function<void (const drogon::HttpResponsePtr &)> &&callback,
                          std::string session_id) {
     if (!authorize(req)) { callback(unauthorized()); return; }
-    session_mgr_->stop_session(session_id);
+    auto manager = session_mgr_;
+    std::thread([manager, session_id]() {
+        manager->stop_session(session_id);
+    }).detach();
     callback(json_resp(json::object()));
 }
 
