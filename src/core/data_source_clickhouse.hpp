@@ -185,10 +185,6 @@ public:
         size_t limit) override;
 
 private:
-    // Helper for safe select with auto-reconnection
-    template<typename Callback>
-    bool safe_select(const std::string& query, Callback&& cb, const std::string& func_name);
-    
     static std::string build_symbol_list(const std::vector<std::string>& symbols);
     static std::string format_timestamp(Timestamp ts);
     static Timestamp extract_ts(const clickhouse::ColumnRef& col, size_t row);

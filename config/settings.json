@@ -12,7 +12,7 @@
     "port": 5432,
     "database": "broker_sim",
     "user": "postgres",
-    "password": "broker123"
+    "password": ""
   },
   "services": {
     "control_port": 8000,

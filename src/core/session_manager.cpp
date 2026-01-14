@@ -49,10 +49,8 @@ void Session::stop() {
 SessionManager::SessionManager(std::shared_ptr<DataSource> data_source,
                                ExecutionConfig exec_cfg,
                                FeeConfig fee_cfg,
-                               std::shared_ptr<DataSource> api_data_source,
-                               PostgresConfig pg_cfg)
+                               std::shared_ptr<DataSource> api_data_source)
     : exec_cfg_(exec_cfg)
-    , pg_cfg_(pg_cfg)
     , fee_cfg_(fee_cfg)
     , data_source_(std::move(data_source))
     , api_data_source_(std::move(api_data_source)) {
@@ -62,17 +60,6 @@ SessionManager::SessionManager(std::shared_ptr<DataSource> data_source,
     // If no separate API data source provided, use the main one (less safe but compatible)
     if (!api_data_source_) {
         api_data_source_ = data_source_;
-    }
-    // Initialize PostgresStore if enabled
-    if (pg_cfg_.enabled) {
-        pg_store_ = std::make_shared<PostgresStore>(pg_cfg_);
-        if (pg_store_->connect()) {
-            pg_store_->ensure_schema();
-            spdlog::info("PostgresStore connected successfully");
-        } else {
-            spdlog::warn("Failed to connect PostgresStore - running without persistence");
-            pg_store_.reset();
-        }
     }
 }
 
@@ -264,15 +251,6 @@ void SessionManager::destroy_session(const std::string& session_id) {
         }
         if (!any_running) stop_shared_feeder();
     }
-
-    // Cleanup PostgreSQL data
-    if (pg_store_) {
-        pg_store_->delete_account(session_id);
-        spdlog::info("Deleted PostgreSQL data for session {}", session_id);
-    }
-
-    // Cleanup session files (checkpoints, WAL, events)
-    cleanup_session_files(session_id);
 }
 
 std::string SessionManager::submit_order(const std::string& session_id, Order order) {
@@ -937,13 +915,8 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
     auto start = session->config.start_time;
     auto end = session->config.end_time;
 
-    // Always stream trades and quotes for accurate timelines.
-    data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
-        enqueue_event(session, ev);
-    });
-
     if (session->config.live_bar_aggr_source == "1s") {
-        // Stream 1-second bars for bar updates when configured.
+        // Stream 1-second bars instead of trades for bar aggregation
         spdlog::info("Using 1s bars for live_bar_aggr_source (session {})", session->id);
         data_source_->stream_second_bars(symbols, start, end, [this, session](const BarRecord& bar) {
             // Enqueue as BAR event
@@ -951,6 +924,11 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
             bool ok = session->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
             session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
             if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+        });
+    } else {
+        // Default: stream trades and quotes
+        data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
+            enqueue_event(session, ev);
         });
     }
 
@@ -976,14 +954,6 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                 data_source_->stream_events(symbols, cursor, window_end, [this, session](const MarketEvent& ev) {
                     enqueue_event(session, ev);
                 });
-                if (session->config.live_bar_aggr_source == "1s") {
-                    data_source_->stream_second_bars(symbols, cursor, window_end, [this, session](const BarRecord& bar) {
-                        BarData bd{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count};
-                        bool ok = session->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
-                        session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
-                        if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
-                    });
-                }
                 cursor = window_end;
                 std::this_thread::sleep_for(window);
             }
@@ -1028,16 +998,12 @@ void SessionManager::start_shared_feeder() {
 
             Timestamp min_start = running_sessions.front()->config.start_time;
             Timestamp max_end = running_sessions.front()->config.end_time;
-            std::vector<std::shared_ptr<Session>> bar_sessions;
             std::vector<std::string> symbols;
             symbols.reserve(64);
             for (const auto& s : running_sessions) {
                 if (s->config.start_time < min_start) min_start = s->config.start_time;
                 if (s->config.end_time > max_end) max_end = s->config.end_time;
                 for (const auto& sym : s->config.symbols) symbols.push_back(sym);
-                if (s->config.live_bar_aggr_source == "1s") {
-                    bar_sessions.push_back(s);
-                }
             }
             std::sort(symbols.begin(), symbols.end());
             symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
@@ -1054,23 +1020,6 @@ void SessionManager::start_shared_feeder() {
                     enqueue_event(s, ev);
                 }
             });
-            if (!bar_sessions.empty()) {
-                data_source_->stream_second_bars(symbols, min_start, max_end,
-                    [this, bar_sessions](const BarRecord& bar) {
-                    for (const auto& s : bar_sessions) {
-                        if (bar.timestamp < s->config.start_time || bar.timestamp > s->config.end_time) continue;
-                        if (!s->config.symbols.empty() &&
-                            std::find(s->config.symbols.begin(), s->config.symbols.end(),
-                                      bar.symbol) == s->config.symbols.end()) {
-                            continue;
-                        }
-                        BarData bd{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count};
-                        bool ok = s->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
-                        s->events_enqueued.fetch_add(1, std::memory_order_relaxed);
-                        if (!ok) s->events_dropped.fetch_add(1, std::memory_order_relaxed);
-                    }
-                });
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
@@ -1502,49 +1451,6 @@ void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_
 
     session->equity = session->account_manager->state().equity;
     session->cash = session->account_manager->state().cash;
-}
-
-void SessionManager::cleanup_session_files(const std::string& session_id) {
-    std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
-    std::string prefix = wal_dir + "/session_" + session_id;
-
-    // Files to cleanup: .ckpt.json, .wal.jsonl, .events.jsonl, and archived WAL files
-    std::vector<std::string> patterns = {
-        prefix + ".ckpt.json",
-        prefix + ".wal.jsonl",
-        prefix + ".events.jsonl"
-    };
-
-    int files_deleted = 0;
-    for (const auto& path : patterns) {
-        if (std::filesystem::exists(path)) {
-            std::filesystem::remove(path);
-            files_deleted++;
-        }
-    }
-
-    // Also remove archived WAL files (pattern: session_id.wal.jsonl.*.archived)
-    try {
-        for (const auto& entry : std::filesystem::directory_iterator(wal_dir)) {
-            std::string filename = entry.path().filename().string();
-            if (filename.find("session_" + session_id + ".wal.jsonl.") != std::string::npos &&
-                filename.find(".archived") != std::string::npos) {
-                std::filesystem::remove(entry.path());
-                files_deleted++;
-            }
-            // Also remove old checkpoint archives
-            if (filename.find("session_" + session_id + ".ckpt.json.") != std::string::npos) {
-                std::filesystem::remove(entry.path());
-                files_deleted++;
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("Error cleaning up session files: {}", e.what());
-    }
-
-    if (files_deleted > 0) {
-        spdlog::info("Cleaned up {} files for session {}", files_deleted, session_id);
-    }
 }
 
 } // namespace broker_sim

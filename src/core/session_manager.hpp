@@ -22,7 +22,6 @@
 #include "performance.hpp"
 #include "data_source.hpp"
 #include "config.hpp"
-#include "postgres_store.hpp"
 #include "wal_logger.hpp"
 
 namespace broker_sim {
@@ -97,8 +96,7 @@ public:
     explicit SessionManager(std::shared_ptr<DataSource> data_source = nullptr,
                             ExecutionConfig exec_cfg = {},
                             FeeConfig fee_cfg = {},
-                            std::shared_ptr<DataSource> api_data_source = nullptr,
-                            PostgresConfig pg_cfg = {});
+                            std::shared_ptr<DataSource> api_data_source = nullptr);
     ~SessionManager();
 
     std::shared_ptr<Session> create_session(const SessionConfig& config,
@@ -133,11 +131,6 @@ public:
      */
     bool restore_session(std::shared_ptr<Session> session);
 
-    /**
-     * Cleanup session files (checkpoints, WAL, events).
-     */
-    void cleanup_session_files(const std::string& session_id);
-
 private:
     void run_session_loop(std::shared_ptr<Session> session);
     void process_event(std::shared_ptr<Session> session, const Event& event, bool emit_callbacks);
@@ -166,8 +159,6 @@ private:
     std::mutex log_mutex_;
     std::vector<EventCallback> event_callbacks_;
     std::unique_ptr<std::thread> shared_feed_thread_;
-    PostgresConfig pg_cfg_;
-    std::shared_ptr<PostgresStore> pg_store_;
     std::atomic<bool> shared_feed_running_{false};
 };
 

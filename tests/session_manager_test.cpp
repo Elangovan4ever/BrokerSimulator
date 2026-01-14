@@ -2,7 +2,6 @@
 #include <condition_variable>
 #include <mutex>
 #include <chrono>
-#include <atomic>
 #include "../src/core/session_manager.hpp"
 #include "../src/core/data_source_stub.hpp"
 
@@ -163,36 +162,6 @@ private:
     std::vector<MarketEvent> events_;
 };
 
-class RecordingDataSource : public StubDataSource {
-public:
-    RecordingDataSource(std::vector<MarketEvent> events, std::vector<BarRecord> bars)
-        : events_(std::move(events))
-        , bars_(std::move(bars)) {}
-
-    void stream_events(const std::vector<std::string>&,
-                       Timestamp,
-                       Timestamp,
-                       const std::function<void(const MarketEvent&)>& cb) override {
-        stream_events_calls.fetch_add(1, std::memory_order_relaxed);
-        for (const auto& ev : events_) cb(ev);
-    }
-
-    void stream_second_bars(const std::vector<std::string>&,
-                            Timestamp,
-                            Timestamp,
-                            const std::function<void(const BarRecord&)>& cb) override {
-        stream_second_bars_calls.fetch_add(1, std::memory_order_relaxed);
-        for (const auto& bar : bars_) cb(bar);
-    }
-
-    std::atomic<int> stream_events_calls{0};
-    std::atomic<int> stream_second_bars_calls{0};
-
-private:
-    std::vector<MarketEvent> events_;
-    std::vector<BarRecord> bars_;
-};
-
 Timestamp make_ts(int64_t ns) {
     return Timestamp{} + std::chrono::nanoseconds(ns);
 }
@@ -251,70 +220,6 @@ TEST(SessionManagerTest, MarketOrderFillsAfterFirstQuote) {
     EXPECT_DOUBLE_EQ(fill_data.filled_avg_price, 101.0);
     EXPECT_EQ(fill_ts_ns, t1);
 
-    mgr.stop_session(session->id);
-}
-
-TEST(SessionManagerTest, StreamsTradesQuotesAndSecondBarsTogether) {
-    MarketEvent quote_ev;
-    quote_ev.timestamp = make_ts(1'000'000);
-    quote_ev.type = MarketEventType::QUOTE;
-    quote_ev.quote = QuoteRecord{quote_ev.timestamp, "AAPL", 100.0, 10, 101.0, 11, 1, 1, 1};
-
-    MarketEvent trade_ev;
-    trade_ev.timestamp = make_ts(2'000'000);
-    trade_ev.type = MarketEventType::TRADE;
-    trade_ev.trade = TradeRecord{trade_ev.timestamp, "AAPL", 101.5, 50, 1, "", 1};
-
-    BarRecord bar_rec;
-    bar_rec.timestamp = make_ts(1'500'000);
-    bar_rec.symbol = "AAPL";
-    bar_rec.open = 100.5;
-    bar_rec.high = 102.0;
-    bar_rec.low = 100.0;
-    bar_rec.close = 101.0;
-    bar_rec.volume = 75;
-    bar_rec.vwap = 101.0;
-    bar_rec.trade_count = 3;
-
-    auto ds = std::make_shared<RecordingDataSource>(
-        std::vector<MarketEvent>{quote_ev, trade_ev},
-        std::vector<BarRecord>{bar_rec}
-    );
-    SessionManager mgr(ds);
-
-    SessionConfig cfg;
-    cfg.symbols = {"AAPL"};
-    cfg.start_time = make_ts(0);
-    cfg.end_time = make_ts(10'000'000);
-    cfg.speed_factor = 0.0;
-    cfg.live_bar_aggr_source = "1s";
-    auto session = mgr.create_session(cfg);
-
-    std::mutex mu;
-    std::condition_variable cv;
-    int trade_count = 0;
-    int quote_count = 0;
-    int bar_count = 0;
-
-    mgr.add_event_callback([&](const std::string&, const Event& e) {
-        std::lock_guard<std::mutex> lock(mu);
-        if (e.event_type == EventType::TRADE) trade_count++;
-        if (e.event_type == EventType::QUOTE) quote_count++;
-        if (e.event_type == EventType::BAR) bar_count++;
-        if (trade_count > 0 && quote_count > 0 && bar_count > 0) {
-            cv.notify_all();
-        }
-    });
-
-    mgr.start_session(session->id);
-
-    std::unique_lock<std::mutex> lock(mu);
-    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(2), [&] {
-        return trade_count > 0 && quote_count > 0 && bar_count > 0;
-    }));
-
-    EXPECT_EQ(ds->stream_events_calls.load(), 1);
-    EXPECT_EQ(ds->stream_second_bars_calls.load(), 1);
     mgr.stop_session(session->id);
 }
 
