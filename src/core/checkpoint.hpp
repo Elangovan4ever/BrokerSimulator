@@ -114,12 +114,8 @@ inline void save_checkpoint(const Checkpoint& ckpt, const std::string& dir = "lo
     if (f.is_open()) {
         f << j.dump(2);
         f.close();
-        try {
-            std::filesystem::rename(tmp_path, path);
-            spdlog::debug("Saved checkpoint for session {} at event_ns={}", ckpt.session_id, ckpt.last_event_ns);
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to rename checkpoint for session {}: {}", ckpt.session_id, e.what());
-        }
+        std::filesystem::rename(tmp_path, path);
+        spdlog::debug("Saved checkpoint for session {} at event_ns={}", ckpt.session_id, ckpt.last_event_ns);
     } else {
         spdlog::error("Failed to save checkpoint for session {}", ckpt.session_id);
     }

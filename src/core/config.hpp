@@ -88,13 +88,6 @@ struct ExecutionConfig {
     // Polling fallback
     int poll_interval_seconds{0};          // >0 enables polling fallback per window
 
-    // Preload/windowed streaming controls
-    int preload_window_seconds{10};        // Window size for preloading events (seconds)
-    int preload_queue_max{200000};         // Max queued events before backpressure (0 = unlimited)
-    int preload_queue_low{20000};          // Low watermark for adaptive speed (0 = disabled)
-    bool enable_adaptive_speed{true};      // Adjust speed to avoid stalls when preload lags
-    double adaptive_speed_min_factor{1.0}; // Minimum speed factor when adapting
-
     // Checkpoint/WAL settings
     int checkpoint_interval_events{10000}; // Save checkpoint every N events (0 = disabled)
     bool enable_wal{true};                 // Enable write-ahead logging
@@ -410,12 +403,7 @@ private:
 
     static bool is_us_dst_utc(std::chrono::system_clock::time_point ts) {
         auto tt = std::chrono::system_clock::to_time_t(ts);
-        std::tm tm_utc{};
-#if defined(_WIN32)
-        gmtime_s(&tm_utc, &tt);
-#else
-        gmtime_r(&tt, &tm_utc);
-#endif
+        std::tm tm_utc = *std::gmtime(&tt);
         int year = tm_utc.tm_year + 1900;
         int dst_start_day = nth_weekday_of_month(year, 3, 0, 2);
         int dst_end_day = nth_weekday_of_month(year, 11, 0, 1);
@@ -433,13 +421,7 @@ private:
         int offset_min = et_offset_minutes(ts);
         auto adjusted = ts + std::chrono::minutes(offset_min);
         auto tt = std::chrono::system_clock::to_time_t(adjusted);
-        std::tm tm_utc{};
-#if defined(_WIN32)
-        gmtime_s(&tm_utc, &tt);
-#else
-        gmtime_r(&tt, &tm_utc);
-#endif
-        return tm_utc;
+        return *std::gmtime(&tt);
     }
 
     static std::chrono::system_clock::time_point et_local_to_utc(int year, int month, int day,
@@ -496,8 +478,8 @@ struct FeeConfig {
 };
 
 struct WebsocketConfig {
-    int queue_size{0};
-    std::string overflow_policy{"block"};
+    int queue_size{1000};
+    std::string overflow_policy{"drop_oldest"};
     int batch_size{50};
     int flush_interval_ms{20};
 };
@@ -581,16 +563,6 @@ inline void load_config(Config& cfg, const std::string& path) {
         cfg.execution.enable_slippage = e.value("enable_slippage", cfg.execution.enable_slippage);
         cfg.execution.fixed_slippage_bps = e.value("fixed_slippage_bps", cfg.execution.fixed_slippage_bps);
         cfg.execution.poll_interval_seconds = e.value("poll_interval_seconds", cfg.execution.poll_interval_seconds);
-        cfg.execution.preload_window_seconds = e.value("preload_window_seconds",
-                                                      cfg.execution.preload_window_seconds);
-        cfg.execution.preload_queue_max = e.value("preload_queue_max",
-                                                  cfg.execution.preload_queue_max);
-        cfg.execution.preload_queue_low = e.value("preload_queue_low",
-                                                  cfg.execution.preload_queue_low);
-        cfg.execution.enable_adaptive_speed = e.value("enable_adaptive_speed",
-                                                      cfg.execution.enable_adaptive_speed);
-        cfg.execution.adaptive_speed_min_factor = e.value("adaptive_speed_min_factor",
-                                                          cfg.execution.adaptive_speed_min_factor);
         cfg.execution.enable_margin_call_checks = e.value("enable_margin_call_checks",
                                                          cfg.execution.enable_margin_call_checks);
         cfg.execution.enable_forced_liquidation = e.value("enable_forced_liquidation",

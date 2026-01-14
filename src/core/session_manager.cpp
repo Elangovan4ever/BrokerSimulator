@@ -1,8 +1,6 @@
 #include "session_manager.hpp"
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/fmt.h>
-#include <algorithm>
-#include <cmath>
 #include "data_source_stub.hpp"
 #include "checkpoint.hpp"
 #include "../ws/status_ws_controller.hpp"
@@ -596,25 +594,6 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
             }
             process_event(session, ev, true);
             processed++;
-            if (exec_cfg_.enable_adaptive_speed && (processed == 1 || processed % 1000 == 0)) {
-                double base_speed = session->config.speed_factor;
-                if (base_speed <= 0.0) {
-                    base_speed = exec_cfg_.adaptive_speed_min_factor;
-                }
-                double target_speed = base_speed;
-                int low_watermark = exec_cfg_.preload_queue_low;
-                if (low_watermark > 0 && session->event_queue) {
-                    size_t qsize = session->event_queue->size();
-                    if (qsize < static_cast<size_t>(low_watermark)) {
-                        double ratio = static_cast<double>(qsize) / static_cast<double>(low_watermark);
-                        ratio = std::max(0.1, ratio);
-                        target_speed = std::max(exec_cfg_.adaptive_speed_min_factor, base_speed * ratio);
-                    }
-                }
-                if (std::fabs(target_speed - session->time_engine->speed()) > 0.01) {
-                    session->time_engine->set_speed(target_speed);
-                }
-            }
             if (processed == 1 || processed % 10000 == 0) {
                 spdlog::info("Session {} processed {} events", session->id, processed);
             }
@@ -954,116 +933,31 @@ bool SessionManager::apply_split(const std::string& session_id, const std::strin
 
 void SessionManager::preload_events(std::shared_ptr<Session> session) {
     if (!data_source_) return;
-    if (!session->event_queue) return;
     auto symbols = session->config.symbols;
     auto start = session->config.start_time;
     auto end = session->config.end_time;
 
+    // Always stream trades and quotes for accurate timelines.
+    data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
+        enqueue_event(session, ev);
+    });
 
-    const int window_seconds = exec_cfg_.preload_window_seconds > 0
-        ? exec_cfg_.preload_window_seconds
-        : 10;
-    const auto window = std::chrono::seconds(window_seconds);
-    int max_queue = exec_cfg_.preload_queue_max;
-    if (session->config.queue_capacity > 0) {
-        max_queue = static_cast<int>(session->config.queue_capacity);
-
-    }
-
-    struct PendingEvent {
-        Timestamp ts;
-        EventType type;
-        std::string symbol;
-        EventPayload payload;
-    };
-
-    std::vector<PendingEvent> pending;
-    pending.reserve(10000);
-
-    auto push_trade = [&](const MarketEvent& ev) {
-        const auto& t = ev.trade;
-        pending.push_back(PendingEvent{
-            ev.timestamp,
-            EventType::TRADE,
-            t.symbol,
-            TradeData{t.price, t.size, t.exchange, t.conditions, t.tape}
-        });
-    };
-
-    auto push_quote = [&](const MarketEvent& ev) {
-        const auto& q = ev.quote;
-        pending.push_back(PendingEvent{
-            ev.timestamp,
-            EventType::QUOTE,
-            q.symbol,
-            QuoteData{q.bid_price, q.bid_size, q.ask_price, q.ask_size, q.bid_exchange, q.ask_exchange, q.tape}
-        });
-    };
-
-    auto push_bar = [&](const BarRecord& bar) {
-        pending.push_back(PendingEvent{
-            bar.timestamp,
-            EventType::BAR,
-            bar.symbol,
-            BarData{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count}
-        });
-    };
-
-    Timestamp cursor = start;
-    while (!session->should_stop.load(std::memory_order_acquire) && cursor < end) {
-        Timestamp window_end = std::min(cursor + window, end);
-        pending.clear();
-
-        if (exec_cfg_.get_market_session(cursor) == ExecutionConfig::MarketSession::CLOSED) {
-            auto next_open = exec_cfg_.next_market_open_after(cursor);
-            if (next_open > cursor) {
-                if (next_open >= end) {
-                    cursor = end;
-                    break;
-                }
-                cursor = next_open;
-                continue;
-            }
-        }
-
-        data_source_->stream_events(symbols, cursor, window_end, [&](const MarketEvent& ev) {
-            if (ev.type == MarketEventType::QUOTE) {
-                push_quote(ev);
-            } else {
-                push_trade(ev);
-            }
-        });
-
-        if (session->config.live_bar_aggr_source == "1s") {
-            data_source_->stream_second_bars(symbols, cursor, window_end, [&](const BarRecord& bar) {
-                push_bar(bar);
-            });
-        }
-
-        std::sort(pending.begin(), pending.end(),
-                  [](const PendingEvent& a, const PendingEvent& b) {
-                      return a.ts < b.ts;
-                  });
-
-        for (auto& item : pending) {
-            while (!session->should_stop.load(std::memory_order_acquire)
-                   && max_queue > 0
-                   && session->event_queue->size() >= static_cast<size_t>(max_queue)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            if (session->should_stop.load(std::memory_order_acquire)) {
-                break;
-            }
-            bool ok = session->event_queue->push(item.ts, item.type, item.symbol, std::move(item.payload));
+    if (session->config.live_bar_aggr_source == "1s") {
+        // Stream 1-second bars for bar updates when configured.
+        spdlog::info("Using 1s bars for live_bar_aggr_source (session {})", session->id);
+        data_source_->stream_second_bars(symbols, start, end, [this, session](const BarRecord& bar) {
+            // Enqueue as BAR event
+            BarData bd{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count};
+            bool ok = session->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
             session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
             if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        cursor = window_end;
+        });
     }
 
-    session->event_queue->stop();
-    spdlog::info("Session {} preload complete; event queue closed", session->id);
+    if (session->event_queue) {
+        session->event_queue->stop();
+        spdlog::info("Session {} preload complete; event queue closed", session->id);
+    }
 }
 
 void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
@@ -1421,8 +1315,6 @@ std::optional<int64_t> SessionManager::watermark_ns(const std::string& session_i
 void SessionManager::save_session_checkpoint(const std::string& session_id) {
     auto session = get_session(session_id);
     if (!session) return;
-
-    std::lock_guard<std::mutex> checkpoint_lock(session->checkpoint_mutex);
 
     std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
 

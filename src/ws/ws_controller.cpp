@@ -33,7 +33,6 @@ Config WsController::cfg_;
 std::mutex WsController::conn_mutex_;
 std::unordered_map<drogon::WebSocketConnectionPtr, WsConnectionState> WsController::conn_states_;
 std::unordered_map<std::string, std::vector<drogon::WebSocketConnectionPtr>> WsController::session_conns_;
-std::unordered_map<std::string, SessionBackpressureState> WsController::session_backpressure_;
 std::mutex WsController::queue_mutex_;
 std::condition_variable WsController::queue_cv_;
 std::unordered_map<std::string, std::deque<std::string>> WsController::outbox_;
@@ -974,18 +973,13 @@ void WsController::broadcast(const std::string& session_id, const std::string& m
 
 void WsController::enqueue(const std::string& session_id, const std::string& msg) {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
+        std::lock_guard<std::mutex> lock(queue_mutex_);
         auto& q = outbox_[session_id];
-        if (cfg_.websocket.queue_size > 0) {
-            while (q.size() >= static_cast<size_t>(cfg_.websocket.queue_size)) {
-                if (cfg_.websocket.overflow_policy == "drop_oldest") {
-                    if (!q.empty()) q.pop_front();
-                    break;
-                }
-                if (cfg_.websocket.overflow_policy == "block") {
-                    queue_cv_.wait(lock);
-                    continue;
-                }
+        if (cfg_.websocket.queue_size > 0 &&
+            q.size() >= static_cast<size_t>(cfg_.websocket.queue_size)) {
+            if (cfg_.websocket.overflow_policy == "drop_oldest") {
+                if (!q.empty()) q.pop_front();
+            } else {
                 return;  // drop_newest
             }
         }
@@ -1010,12 +1004,22 @@ void WsController::send_batch(const std::string& session_id, const std::vector<s
 
         auto& state = state_it->second;
 
-        for (const auto& msg : msgs) {
-            const size_t msg_size = msg.size();
-            conn->send(msg);
-            state.messages_sent += 1;
-            state.bytes_sent += msg_size;
+        // Check if this connection is slow - if so, drop messages
+        if (should_drop_for_slow_consumer(state)) {
+            state.messages_dropped += msgs.size();
+            continue;
         }
+
+        size_t batch_bytes = 0;
+        for (const auto& msg : msgs) {
+            batch_bytes += msg.size();
+            conn->send(msg);
+        }
+
+        // Update backpressure state
+        update_backpressure(conn, batch_bytes);
+        state.messages_sent += msgs.size();
+        state.bytes_sent += batch_bytes;
     }
 }
 
@@ -1030,134 +1034,111 @@ void WsController::worker_loop() {
         auto interval = std::chrono::milliseconds(std::max(1, cfg_.websocket.flush_interval_ms));
         auto bar_heartbeat_interval = interval;
         auto next_bar_heartbeat = std::chrono::steady_clock::now() + bar_heartbeat_interval;
-        const size_t high_watermark = std::max<size_t>(10000, static_cast<size_t>(cfg_.websocket.batch_size) * 400);
-        const size_t low_watermark = std::max<size_t>(1000, high_watermark / 4);
 
         while (worker_running_.load()) {
-            std::unordered_map<std::string, std::vector<std::string>> to_send;
-            std::vector<std::string> slow_sessions;
-            std::vector<std::string> recover_sessions;
-            {
-                std::unique_lock<std::mutex> lock(queue_mutex_);
-                queue_cv_.wait_for(lock, interval, [] {
-                    if (!worker_running_.load()) return true;
-                    for (const auto& kv : outbox_) {
-                        if (!kv.second.empty()) return true;
-                    }
-                    return false;
-                });
-
-                if (!worker_running_.load()) break;
-
-                for (auto& kv : outbox_) {
-                    auto& q = kv.second;
-                    if (!q.empty()) {
-                        int batch = std::max(1, cfg_.websocket.batch_size);
-                        std::vector<std::string> msgs;
-                        msgs.reserve(static_cast<size_t>(batch));
-
-                        for (int i = 0; i < batch && !q.empty(); ++i) {
-                            msgs.push_back(std::move(q.front()));
-                            q.pop_front();
-                        }
-
-                        if (!msgs.empty()) {
-                            to_send.emplace(kv.first, std::move(msgs));
-                        }
-                    }
-
-                    size_t remaining = q.size();
-                    if (!kv.first.empty()) {
-                        if (remaining >= high_watermark) {
-                            slow_sessions.push_back(kv.first);
-                        } else if (remaining <= low_watermark) {
-                            recover_sessions.push_back(kv.first);
-                        }
-                    }
+        std::unordered_map<std::string, std::vector<std::string>> to_send;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait_for(lock, interval, [] {
+                if (!worker_running_.load()) return true;
+                for (const auto& kv : outbox_) {
+                    if (!kv.second.empty()) return true;
                 }
-                queue_cv_.notify_all();
-            }
+                return false;
+            });
 
-            if (!slow_sessions.empty() || !recover_sessions.empty()) {
-                std::lock_guard<std::mutex> lock(conn_mutex_);
-                for (const auto& session_id : slow_sessions) {
-                    handle_session_backpressure_locked(session_id, true);
-                }
-                for (const auto& session_id : recover_sessions) {
-                    handle_session_backpressure_locked(session_id, false);
-                }
-            }
+            if (!worker_running_.load()) break;
 
-            for (auto& kv : to_send) {
-                send_batch(kv.first, kv.second);
-            }
+            for (auto& kv : outbox_) {
+                auto& q = kv.second;
+                if (q.empty()) continue;
 
-            auto now = std::chrono::steady_clock::now();
-            if (now >= next_bar_heartbeat) {
-                int64_t fallback_ts_ns = utils::ts_to_ns(std::chrono::system_clock::now());
-                std::lock_guard<std::mutex> lock(conn_mutex_);
-                for (auto& entry : conn_states_) {
-                    const auto& conn = entry.first;
-                    auto& state = entry.second;
-                    if (!conn || !conn->connected()) continue;
-                    if (!state.authenticated) continue;
-                    if (state.api_type != WsApiType::POLYGON) continue;
+                int batch = std::max(1, cfg_.websocket.batch_size);
+                std::vector<std::string> msgs;
+                msgs.reserve(static_cast<size_t>(batch));
 
-                    int64_t now_ts_ns = fallback_ts_ns;
-                    if (!state.session_id.empty()) {
-                        auto session = session_mgr_->get_session(state.session_id);
-                        if (!session || session->status != SessionStatus::RUNNING) {
-                            continue;
-                        }
-                        now_ts_ns = utils::ts_to_ns(session->time_engine->current_time());
-                    }
-
-                    auto bars_it = state.subscriptions.find(SubscriptionType::BARS);
-                    if (bars_it == state.subscriptions.end()) continue;
-                    const auto& bar_symbols = bars_it->second;
-                    const bool all_symbols = bar_symbols.count("*") > 0;
-
-                    for (auto& agg_entry : state.agg_bars) {
-                        const auto& symbol = agg_entry.first;
-                        auto& agg = agg_entry.second;
-                        if (!all_symbols && bar_symbols.count(symbol) == 0) continue;
-                        if (!agg.has_data || agg.bucket_start_epoch == 0) continue;
-
-                        auto bar_interval_ms = resolve_bar_stream_interval_ms(state);
-                        int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
-                        int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (now_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
-                        if (elapsed_ns < 0) {
-                            elapsed_ns = bar_interval_ns;
-                        }
-                        if (elapsed_ns < bar_interval_ns) continue;
-
-                        int64_t tf_secs = 60;
-                        auto tf_it = state.bar_timeframes.find(symbol);
-                        if (tf_it != state.bar_timeframes.end()) {
-                            tf_secs = tf_it->second;
-                        }
-
-                        BarData agg_bar;
-                        agg_bar.open = agg.open;
-                        agg_bar.high = agg.high;
-                        agg_bar.low = agg.low;
-                        agg_bar.close = agg.close;
-                        agg_bar.volume = agg.volume;
-                        agg_bar.vwap = agg.vwap;
-                        agg_bar.trade_count = agg.trade_count;
-
-                        Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                        std::string bar_msg = format_bar_polygon(symbol, agg_bar, bucket_ts, tf_secs);
-                        conn->send(bar_msg);
-
-                        agg.last_emit_ts_ns = now_ts_ns;
-                        state.messages_sent += 1;
-                        state.bytes_sent += bar_msg.size();
-                    }
+                for (int i = 0; i < batch && !q.empty(); ++i) {
+                    msgs.push_back(std::move(q.front()));
+                    q.pop_front();
                 }
 
-                next_bar_heartbeat = now + bar_heartbeat_interval;
+                if (!msgs.empty()) {
+                    to_send.emplace(kv.first, std::move(msgs));
+                }
             }
+        }
+
+        for (auto& kv : to_send) {
+            send_batch(kv.first, kv.second);
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (now >= next_bar_heartbeat) {
+            int64_t fallback_ts_ns = utils::ts_to_ns(std::chrono::system_clock::now());
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            for (auto& entry : conn_states_) {
+                const auto& conn = entry.first;
+                auto& state = entry.second;
+                if (!conn || !conn->connected()) continue;
+                if (!state.authenticated) continue;
+                if (state.api_type != WsApiType::POLYGON) continue;
+
+                int64_t now_ts_ns = fallback_ts_ns;
+                if (!state.session_id.empty()) {
+                    auto session = session_mgr_->get_session(state.session_id);
+                    if (!session || session->status != SessionStatus::RUNNING) {
+                        continue;
+                    }
+                    now_ts_ns = utils::ts_to_ns(session->time_engine->current_time());
+                }
+
+                auto bars_it = state.subscriptions.find(SubscriptionType::BARS);
+                if (bars_it == state.subscriptions.end()) continue;
+                const auto& bar_symbols = bars_it->second;
+                const bool all_symbols = bar_symbols.count("*") > 0;
+
+                for (auto& agg_entry : state.agg_bars) {
+                    const auto& symbol = agg_entry.first;
+                    auto& agg = agg_entry.second;
+                    if (!all_symbols && bar_symbols.count(symbol) == 0) continue;
+                    if (!agg.has_data || agg.bucket_start_epoch == 0) continue;
+
+                    auto bar_interval_ms = resolve_bar_stream_interval_ms(state);
+                    int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
+                    int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (now_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
+                    if (elapsed_ns < 0) {
+                        elapsed_ns = bar_interval_ns;
+                    }
+                    if (elapsed_ns < bar_interval_ns) continue;
+
+                    int64_t tf_secs = 60;
+                    auto tf_it = state.bar_timeframes.find(symbol);
+                    if (tf_it != state.bar_timeframes.end()) {
+                        tf_secs = tf_it->second;
+                    }
+
+                    BarData agg_bar;
+                    agg_bar.open = agg.open;
+                    agg_bar.high = agg.high;
+                    agg_bar.low = agg.low;
+                    agg_bar.close = agg.close;
+                    agg_bar.volume = agg.volume;
+                    agg_bar.vwap = agg.vwap;
+                    agg_bar.trade_count = agg.trade_count;
+
+                    Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                    std::string bar_msg = format_bar_polygon(symbol, agg_bar, bucket_ts, tf_secs);
+                    conn->send(bar_msg);
+
+                    agg.last_emit_ts_ns = now_ts_ns;
+                    update_backpressure(conn, bar_msg.size());
+                    state.messages_sent += 1;
+                    state.bytes_sent += bar_msg.size();
+                }
+            }
+
+            next_bar_heartbeat = now + bar_heartbeat_interval;
+        }
         }  // end while
     } catch (const std::exception& e) {
         spdlog::error("WsController worker_loop exception: {}", e.what());
@@ -1171,43 +1152,102 @@ void WsController::worker_loop() {
 // Note: All functions assume conn_mutex_ is already held (or acquire it themselves)
 //
 
-void WsController::handle_session_backpressure_locked(const std::string& session_id, bool is_slow) {
-    if (session_id.empty() || !session_mgr_) return;
+void WsController::update_backpressure(const drogon::WebSocketConnectionPtr& conn, size_t bytes_sent) {
+    // Called from send_batch which already holds conn_mutex_
+    auto it = conn_states_.find(conn);
+    if (it == conn_states_.end()) return;
 
-    auto session = session_mgr_->get_session(session_id);
-    if (!session) {
-        session_backpressure_.erase(session_id);
-        return;
-    }
+    auto& state = it->second;
+    auto& bp = state.backpressure;
 
-    auto& bp_state = session_backpressure_[session_id];
-    if (is_slow) {
-        if (!bp_state.throttled) {
-            bp_state.throttled = true;
-            bp_state.original_speed = session->time_engine->speed();
-            double target_speed = bp_state.original_speed;
-            if (bp_state.original_speed <= 0.0) {
-                target_speed = std::max(1.0, cfg_.execution.adaptive_speed_min_factor);
-            } else {
-                double min_speed = cfg_.execution.adaptive_speed_min_factor;
-                if (bp_state.original_speed < min_speed) {
-                    target_speed = bp_state.original_speed;
-                } else {
-                    target_speed = std::max(min_speed, bp_state.original_speed / 10.0);
-                }
-            }
-            session_mgr_->set_speed(session_id, target_speed);
-            spdlog::warn("Backpressure throttling session {} speed from {} to {}",
-                         session_id, bp_state.original_speed, target_speed);
+    // Update pending counts
+    bp.pending_bytes += bytes_sent;
+    bp.pending_messages += 1;
+
+    // Check if we've exceeded high watermark
+    if (bp.pending_bytes > BackpressureState::HIGH_WATERMARK_BYTES ||
+        bp.pending_messages > BackpressureState::HIGH_WATERMARK_MESSAGES) {
+        if (!bp.is_slow) {
+            bp.is_slow = true;
+            spdlog::warn("WebSocket connection marked slow: pending_bytes={}, pending_msgs={}",
+                         bp.pending_bytes, bp.pending_messages);
         }
-        return;
+    }
+}
+
+void WsController::on_message_drained(const drogon::WebSocketConnectionPtr& conn, size_t bytes) {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    auto it = conn_states_.find(conn);
+    if (it == conn_states_.end()) return;
+
+    auto& state = it->second;
+    auto& bp = state.backpressure;
+
+    // Decrement pending counts
+    if (bp.pending_bytes >= bytes) {
+        bp.pending_bytes -= bytes;
+    } else {
+        bp.pending_bytes = 0;
+    }
+    if (bp.pending_messages > 0) {
+        bp.pending_messages -= 1;
     }
 
-    if (bp_state.throttled) {
-        session_mgr_->set_speed(session_id, bp_state.original_speed);
-        spdlog::info("Backpressure recovered for session {} -> speed {}",
-                     session_id, bp_state.original_speed);
-        bp_state.throttled = false;
+    // Check if we've fallen below low watermark
+    if (bp.is_slow &&
+        bp.pending_bytes < BackpressureState::LOW_WATERMARK_BYTES &&
+        bp.pending_messages < BackpressureState::LOW_WATERMARK_MESSAGES) {
+
+        bp.is_slow = false;
+        bp.last_drain_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        spdlog::info("WebSocket connection recovered: pending_bytes={}, pending_msgs={}",
+                     bp.pending_bytes, bp.pending_messages);
+    }
+}
+
+bool WsController::should_drop_for_slow_consumer(const WsConnectionState& state) {
+    // Called from send_batch which already holds conn_mutex_
+    return state.backpressure.is_slow;
+}
+
+size_t WsController::count_slow_connections(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+
+    auto it = session_conns_.find(session_id);
+    if (it == session_conns_.end()) return 0;
+
+    size_t count = 0;
+    for (const auto& conn : it->second) {
+        auto state_it = conn_states_.find(conn);
+        if (state_it != conn_states_.end() && state_it->second.backpressure.is_slow) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void WsController::log_backpressure_stats() {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+
+    size_t total_connections = conn_states_.size();
+    size_t slow_connections = 0;
+    uint64_t total_sent = 0;
+    uint64_t total_dropped = 0;
+
+    for (const auto& kv : conn_states_) {
+        const auto& state = kv.second;
+        if (state.backpressure.is_slow) {
+            ++slow_connections;
+        }
+        total_sent += state.messages_sent;
+        total_dropped += state.messages_dropped;
+    }
+
+    if (slow_connections > 0 || total_dropped > 0) {
+        spdlog::info("WebSocket backpressure stats: connections={}, slow={}, sent={}, dropped={}",
+                     total_connections, slow_connections, total_sent, total_dropped);
     }
 }
 

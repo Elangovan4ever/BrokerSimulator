@@ -1,7 +1,6 @@
 #include "data_source_clickhouse.hpp"
 #include <sstream>
 #include <iomanip>
-#include <ctime>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -2844,17 +2843,10 @@ std::string ClickHouseDataSource::build_symbol_list(const std::vector<std::strin
 
 std::string ClickHouseDataSource::format_timestamp(Timestamp ts) {
     auto tt = std::chrono::system_clock::to_time_t(ts);
-    std::tm tm{};
-#if defined(_WIN32)
-    gmtime_s(&tm, &tt);
-#else
-    gmtime_r(&tt, &tm);
-#endif
     std::stringstream ss;
-    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    ss << std::put_time(std::gmtime(&tt), "%Y-%m-%d %H:%M:%S");
     return ss.str();
 }
-
 
 Timestamp ClickHouseDataSource::extract_ts(const clickhouse::ColumnRef& col, size_t row) {
     auto c = col->As<clickhouse::ColumnDateTime64>();

@@ -67,7 +67,6 @@ struct Session {
     std::mutex orders_mutex;
     std::unique_ptr<WalLogger> wal;
     std::mutex wal_mutex;
-    std::mutex checkpoint_mutex;
     std::unique_ptr<std::thread> worker_thread;
     std::atomic<bool> should_stop{false};
 
