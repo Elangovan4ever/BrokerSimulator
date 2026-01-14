@@ -916,15 +916,14 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
     auto end = session->config.end_time;
 
     if (session->config.live_bar_aggr_source == "1s") {
-        // Stream 1-second bars instead of trades for bar aggregation
-        spdlog::info("Using 1s bars for live_bar_aggr_source (session {})", session->id);
-        data_source_->stream_second_bars(symbols, start, end, [this, session](const BarRecord& bar) {
-            // Enqueue as BAR event
-            BarData bd{bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap, bar.trade_count};
-            bool ok = session->event_queue->push(bar.timestamp, EventType::BAR, bar.symbol, bd);
-            session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
-            if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
-        });
+        // Stream trades/quotes + 1s bars in a single ordered stream.
+        spdlog::info("Using merged trade/quote/1s bar stream (session {})", session->id);
+        data_source_->stream_events_with_bars(
+            symbols, start, end,
+            [this, session](const UnifiedMarketEvent& ev) {
+                enqueue_unified_event(session, ev);
+            }
+        );
     } else {
         // Default: stream trades and quotes
         data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
@@ -951,9 +950,18 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
             auto window = std::chrono::seconds(window_secs);
             while (!session->should_stop.load() && cursor < end) {
                 Timestamp window_end = std::min(cursor + window, end);
-                data_source_->stream_events(symbols, cursor, window_end, [this, session](const MarketEvent& ev) {
-                    enqueue_event(session, ev);
-                });
+                if (session->config.live_bar_aggr_source == "1s") {
+                    data_source_->stream_events_with_bars(
+                        symbols, cursor, window_end,
+                        [this, session](const UnifiedMarketEvent& ev) {
+                            enqueue_unified_event(session, ev);
+                        }
+                    );
+                } else {
+                    data_source_->stream_events(symbols, cursor, window_end, [this, session](const MarketEvent& ev) {
+                        enqueue_event(session, ev);
+                    });
+                }
                 cursor = window_end;
                 std::this_thread::sleep_for(window);
             }
@@ -1008,18 +1016,47 @@ void SessionManager::start_shared_feeder() {
             std::sort(symbols.begin(), symbols.end());
             symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
 
-            data_source_->stream_events(symbols, min_start, max_end,
-                [this, running_sessions, symbols](const MarketEvent& ev) {
-                for (const auto& s : running_sessions) {
-                    if (ev.timestamp < s->config.start_time || ev.timestamp > s->config.end_time) continue;
-                    if (!s->config.symbols.empty() &&
-                        std::find(s->config.symbols.begin(), s->config.symbols.end(),
-                                  (ev.type == MarketEventType::QUOTE ? ev.quote.symbol : ev.trade.symbol)) == s->config.symbols.end()) {
-                        continue;
-                    }
-                    enqueue_event(s, ev);
+            bool any_bar_source = std::any_of(
+                running_sessions.begin(), running_sessions.end(),
+                [](const std::shared_ptr<Session>& s) {
+                    return s->config.live_bar_aggr_source == "1s";
                 }
-            });
+            );
+
+            if (any_bar_source) {
+                data_source_->stream_events_with_bars(symbols, min_start, max_end,
+                    [this, running_sessions](const UnifiedMarketEvent& ev) {
+                        const std::string& symbol =
+                            (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                            (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                            ev.bar.symbol;
+                        for (const auto& s : running_sessions) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp > s->config.end_time) continue;
+                            if (!s->config.symbols.empty() &&
+                                std::find(s->config.symbols.begin(), s->config.symbols.end(), symbol) == s->config.symbols.end()) {
+                                continue;
+                            }
+                            if (ev.type == UnifiedEventType::BAR && s->config.live_bar_aggr_source != "1s") {
+                                continue;
+                            }
+                            enqueue_unified_event(s, ev);
+                        }
+                    }
+                );
+            } else {
+                data_source_->stream_events(symbols, min_start, max_end,
+                    [this, running_sessions, symbols](const MarketEvent& ev) {
+                        for (const auto& s : running_sessions) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp > s->config.end_time) continue;
+                            if (!s->config.symbols.empty() &&
+                                std::find(s->config.symbols.begin(), s->config.symbols.end(),
+                                          (ev.type == MarketEventType::QUOTE ? ev.quote.symbol : ev.trade.symbol)) == s->config.symbols.end()) {
+                                continue;
+                            }
+                            enqueue_event(s, ev);
+                        }
+                    });
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
@@ -1042,6 +1079,24 @@ bool SessionManager::enqueue_event(std::shared_ptr<Session> session, const Marke
     } else {
         ok = session->event_queue->push(ev.timestamp, EventType::TRADE, ev.trade.symbol,
             TradeData{ev.trade.price, ev.trade.size, ev.trade.exchange, ev.trade.conditions, ev.trade.tape});
+    }
+    session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+    if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+bool SessionManager::enqueue_unified_event(std::shared_ptr<Session> session, const UnifiedMarketEvent& ev) {
+    bool ok = false;
+    if (ev.type == UnifiedEventType::QUOTE) {
+        ok = session->event_queue->push(ev.timestamp, EventType::QUOTE, ev.quote.symbol,
+            QuoteData{ev.quote.bid_price, ev.quote.bid_size, ev.quote.ask_price, ev.quote.ask_size,
+                      ev.quote.bid_exchange, ev.quote.ask_exchange, ev.quote.tape});
+    } else if (ev.type == UnifiedEventType::TRADE) {
+        ok = session->event_queue->push(ev.timestamp, EventType::TRADE, ev.trade.symbol,
+            TradeData{ev.trade.price, ev.trade.size, ev.trade.exchange, ev.trade.conditions, ev.trade.tape});
+    } else {
+        BarData bd{ev.bar.open, ev.bar.high, ev.bar.low, ev.bar.close, ev.bar.volume, ev.bar.vwap, ev.bar.trade_count};
+        ok = session->event_queue->push(ev.timestamp, EventType::BAR, ev.bar.symbol, bd);
     }
     session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
     if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);

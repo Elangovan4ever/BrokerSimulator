@@ -64,6 +64,7 @@ struct WsConnectionState {
     std::string session_id;
     WsApiType api_type = WsApiType::GENERIC;
     bool authenticated = false;
+    std::string live_bar_aggr_source{"trades"};
 
     // Subscriptions by type -> set of symbols ("*" means all)
     std::unordered_map<SubscriptionType, std::unordered_set<std::string>> subscriptions;
@@ -78,6 +79,9 @@ struct WsConnectionState {
     uint64_t messages_sent{0};
     uint64_t messages_dropped{0};
     uint64_t bytes_sent{0};
+
+    std::vector<std::string> pending_msgs;
+    std::chrono::steady_clock::time_point last_flush{std::chrono::steady_clock::now()};
 
     // Bar aggregation state per symbol
     struct AggBar {
@@ -214,6 +218,15 @@ private:
                                           int64_t timeframe_seconds = 60);
 
     static std::string format_trade_finnhub(const std::string& symbol, const TradeData& trade, Timestamp ts);
+
+    static std::string merge_json_array_batch(const std::vector<std::string>& msgs);
+    static void enqueue_event_message(const drogon::WebSocketConnectionPtr& conn,
+                                      WsConnectionState& state,
+                                      std::string msg,
+                                      bool force_flush);
+    static void flush_pending_messages(const drogon::WebSocketConnectionPtr& conn,
+                                       WsConnectionState& state,
+                                       bool force_flush);
 
     // Send confirmation messages
     static void send_alpaca_auth_success(const drogon::WebSocketConnectionPtr& conn);

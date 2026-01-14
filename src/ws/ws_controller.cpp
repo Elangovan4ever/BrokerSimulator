@@ -142,6 +142,12 @@ void WsController::handleNewConnection(const drogon::HttpRequestPtr& req,
     WsConnectionState state;
     state.api_type = api_type;
     state.session_id = session_id;
+    if (!session_id.empty()) {
+        auto session = session_mgr_->get_session(session_id);
+        if (session) {
+            state.live_bar_aggr_source = session->config.live_bar_aggr_source;
+        }
+    }
 
     // For Finnhub with token, consider authenticated
     if (api_type == WsApiType::FINNHUB && !req->getParameter("token").empty()) {
@@ -266,6 +272,7 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
                 auto session = session_mgr_->get_session(key);
                 if (session) {
                     state.session_id = key;
+                    state.live_bar_aggr_source = session->config.live_bar_aggr_source;
                     session_conns_[key].push_back(conn);
                 }
             }
@@ -720,6 +727,83 @@ std::string WsController::format_trade_finnhub(const std::string& symbol, const 
     return msg.dump();
 }
 
+std::string WsController::merge_json_array_batch(const std::vector<std::string>& msgs) {
+    size_t total = 2;
+    for (const auto& msg : msgs) {
+        total += msg.size();
+    }
+    std::string combined;
+    combined.reserve(total);
+    combined.push_back('[');
+    bool first = true;
+    for (const auto& msg : msgs) {
+        if (msg.size() < 2 || msg.front() != '[' || msg.back() != ']') {
+            return {};
+        }
+        if (msg.size() == 2) {
+            continue;
+        }
+        if (!first) {
+            combined.push_back(',');
+        }
+        combined.append(msg, 1, msg.size() - 2);
+        first = false;
+    }
+    combined.push_back(']');
+    return combined;
+}
+
+void WsController::flush_pending_messages(const drogon::WebSocketConnectionPtr& conn,
+                                         WsConnectionState& state,
+                                         bool force_flush) {
+    if (state.pending_msgs.empty()) {
+        return;
+    }
+    auto now = std::chrono::steady_clock::now();
+    auto interval = std::chrono::milliseconds(std::max(1, cfg_.websocket.flush_interval_ms));
+    auto batch_target = std::max(1, cfg_.websocket.batch_size);
+
+    if (!force_flush) {
+        if (state.pending_msgs.size() < static_cast<size_t>(batch_target) && now - state.last_flush < interval) {
+            return;
+        }
+    }
+
+    if (state.api_type == WsApiType::POLYGON || state.api_type == WsApiType::ALPACA) {
+        std::string combined = merge_json_array_batch(state.pending_msgs);
+        if (!combined.empty()) {
+            conn->send(combined);
+            update_backpressure(conn, combined.size());
+            state.bytes_sent += combined.size();
+        } else {
+            for (const auto& msg : state.pending_msgs) {
+                conn->send(msg);
+                update_backpressure(conn, msg.size());
+                state.bytes_sent += msg.size();
+            }
+        }
+    } else {
+        for (const auto& msg : state.pending_msgs) {
+            conn->send(msg);
+            update_backpressure(conn, msg.size());
+            state.bytes_sent += msg.size();
+        }
+    }
+
+    state.messages_sent += state.pending_msgs.size();
+    state.pending_msgs.clear();
+    state.last_flush = now;
+}
+
+void WsController::enqueue_event_message(const drogon::WebSocketConnectionPtr& conn,
+                                       WsConnectionState& state,
+                                       std::string msg,
+                                       bool force_flush) {
+    state.pending_msgs.push_back(std::move(msg));
+    flush_pending_messages(conn, state, force_flush);
+}
+
+
 // ============================================================================
 // Event Broadcasting
 // ============================================================================
@@ -746,6 +830,7 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
                 const auto& trade = std::get<TradeData>(event.data);
 
                 if (state.api_type == WsApiType::POLYGON &&
+                    state.live_bar_aggr_source != "1s" &&
                     state.is_subscribed(SubscriptionType::BARS, event.symbol)) {
                     int64_t tf_secs = 60;
                     auto tf_it = state.bar_timeframes.find(event.symbol);
@@ -954,7 +1039,7 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
         }
 
         if (!msg.empty()) {
-            conn->send(msg);
+            enqueue_event_message(conn, state, std::move(msg), event.event_type == EventType::BAR);
         }
     }
 }
@@ -965,12 +1050,20 @@ void WsController::broadcast(const std::string& session_id, const std::string& m
 
 void WsController::enqueue(const std::string& session_id, const std::string& msg) {
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
+        std::unique_lock<std::mutex> lock(queue_mutex_);
         auto& q = outbox_[session_id];
         if (cfg_.websocket.queue_size > 0 &&
             q.size() >= static_cast<size_t>(cfg_.websocket.queue_size)) {
             if (cfg_.websocket.overflow_policy == "drop_oldest") {
                 if (!q.empty()) q.pop_front();
+            } else if (cfg_.websocket.overflow_policy == "block") {
+                queue_cv_.wait(lock, [&] {
+                    return !worker_running_.load() ||
+                           q.size() < static_cast<size_t>(cfg_.websocket.queue_size);
+                });
+                if (!worker_running_.load()) {
+                    return;
+                }
             } else {
                 return;  // drop_newest
             }
@@ -996,11 +1089,7 @@ void WsController::send_batch(const std::string& session_id, const std::vector<s
 
         auto& state = state_it->second;
 
-        // Check if this connection is slow - if so, drop messages
-        if (should_drop_for_slow_consumer(state)) {
-            state.messages_dropped += msgs.size();
-            continue;
-        }
+        // Do not drop for slow consumers; backpressure is handled via queue blocking.
 
         size_t batch_bytes = 0;
         for (const auto& msg : msgs) {
@@ -1059,6 +1148,7 @@ void WsController::worker_loop() {
                 }
             }
         }
+        queue_cv_.notify_all();
 
         for (auto& kv : to_send) {
             send_batch(kv.first, kv.second);
@@ -1130,6 +1220,20 @@ void WsController::worker_loop() {
             }
 
             next_bar_heartbeat = now + bar_heartbeat_interval;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(conn_mutex_);
+            for (auto it = conn_states_.begin(); it != conn_states_.end(); ++it) {
+                const auto& conn = it->first;
+                auto& state = it->second;
+                if (!conn || !conn->connected()) {
+                    continue;
+                }
+                if (!state.pending_msgs.empty()) {
+                    flush_pending_messages(conn, state, false);
+                }
+            }
         }
         }  // end while
     } catch (const std::exception& e) {

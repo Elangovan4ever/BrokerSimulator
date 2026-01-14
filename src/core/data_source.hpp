@@ -581,11 +581,21 @@ struct FinnhubFinancialsReportedRecord {
 
 enum class MarketEventType : uint8_t { TRADE = 0, QUOTE = 1 };
 
+enum class UnifiedEventType : uint8_t { QUOTE = 0, TRADE = 1, BAR = 2 };
+
 struct MarketEvent {
     Timestamp timestamp;
     MarketEventType type;
     TradeRecord trade;
     QuoteRecord quote;
+};
+
+struct UnifiedMarketEvent {
+    Timestamp timestamp;
+    UnifiedEventType type;
+    TradeRecord trade;
+    QuoteRecord quote;
+    BarRecord bar;
 };
 
 class DataSource {
@@ -613,6 +623,12 @@ public:
                                     Timestamp start_time,
                                     Timestamp end_time,
                                     const std::function<void(const BarRecord&)>& cb) = 0;
+
+    // Chronological merged stream of trades+quotes+1s bars (for live_bar_aggr_source="1s").
+    virtual void stream_events_with_bars(const std::vector<std::string>& symbols,
+                                         Timestamp start_time,
+                                         Timestamp end_time,
+                                         const std::function<void(const UnifiedMarketEvent&)>& cb) = 0;
 
     // Query helpers for API endpoints.
     virtual std::vector<TradeRecord> get_trades(const std::string& symbol,

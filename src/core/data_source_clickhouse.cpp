@@ -293,6 +293,182 @@ void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& sy
     spdlog::info("ClickHouse 1s bars query completed: {} bars in {}ms", total_bars, query_ms);
 }
 
+void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string>& symbols,
+                                                   Timestamp start_time,
+                                                   Timestamp end_time,
+                                                   const std::function<void(const UnifiedMarketEvent&)>& cb) {
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected, reconnecting...");
+        connect();
+    }
+    std::string sym_list = build_symbol_list(symbols);
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+
+    std::string query = fmt::format(R"(
+        SELECT ts, symbol, kind,
+               price, size, bid_price, bid_size, ask_price, ask_size,
+               exchange, conditions, tape, bid_exch, ask_exch,
+               open, high, low, close, volume, vwap, trade_count
+        FROM (
+            SELECT timestamp as ts,
+                   CAST(symbol AS String) as symbol,
+                   toUInt8(1) as kind,
+                   toFloat64(price) as price,
+                   toInt64(size) as size,
+                   toFloat64(price) as bid_price,
+                   toInt64(size) as bid_size,
+                   toFloat64(price) as ask_price,
+                   toInt64(size) as ask_size,
+                   toInt32(exchange) as exchange,
+                   conditions,
+                   toInt32(tape) as tape,
+                   toInt32(exchange) as bid_exch,
+                   toInt32(exchange) as ask_exch,
+                   toFloat64(0) as open,
+                   toFloat64(0) as high,
+                   toFloat64(0) as low,
+                   toFloat64(0) as close,
+                   toInt64(0) as volume,
+                   toFloat64(0) as vwap,
+                   toUInt32(0) as trade_count
+            FROM stock_trades
+            WHERE symbol IN ({})
+              AND timestamp >= '{}'
+              AND timestamp < '{}'
+            UNION ALL
+            SELECT sip_timestamp as ts,
+                   CAST(symbol AS String) as symbol,
+                   toUInt8(0) as kind,
+                   toFloat64(bid_price) as price,
+                   toInt64(bid_size) as size,
+                   toFloat64(bid_price) as bid_price,
+                   toInt64(bid_size) as bid_size,
+                   toFloat64(ask_price) as ask_price,
+                   toInt64(ask_size) as ask_size,
+                   toInt32(bid_exchange) as exchange,
+                   '' as conditions,
+                   toInt32(tape) as tape,
+                   toInt32(bid_exchange) as bid_exch,
+                   toInt32(ask_exchange) as ask_exch,
+                   toFloat64(0) as open,
+                   toFloat64(0) as high,
+                   toFloat64(0) as low,
+                   toFloat64(0) as close,
+                   toInt64(0) as volume,
+                   toFloat64(0) as vwap,
+                   toUInt32(0) as trade_count
+            FROM stock_quotes
+            WHERE symbol IN ({})
+              AND sip_timestamp >= '{}'
+              AND sip_timestamp < '{}'
+            UNION ALL
+            SELECT
+                   toDateTime64(timestamp, 9) as ts,
+                   CAST(symbol AS String) as symbol,
+                   toUInt8(2) as kind,
+                   toFloat64(close) as price,
+                   toInt64(volume) as size,
+                   toFloat64(0) as bid_price,
+                   toInt64(0) as bid_size,
+                   toFloat64(0) as ask_price,
+                   toInt64(0) as ask_size,
+                   toInt32(0) as exchange,
+                   '' as conditions,
+                   toInt32(0) as tape,
+                   toInt32(0) as bid_exch,
+                   toInt32(0) as ask_exch,
+                   toFloat64(open) as open,
+                   toFloat64(high) as high,
+                   toFloat64(low) as low,
+                   toFloat64(close) as close,
+                   toInt64(volume) as volume,
+                   toFloat64(vwap) as vwap,
+                   toUInt32(trades) as trade_count
+            FROM market_data.stock_second_bars
+            WHERE symbol IN ({})
+              AND timestamp >= '{}'
+              AND timestamp < '{}'
+        )
+        ORDER BY ts ASC, kind ASC
+    )", sym_list, start_str, end_str, sym_list, start_str, end_str, sym_list, start_str, end_str);
+
+    spdlog::info("Starting ClickHouse merged stream for {} symbols, {} to {}", symbols.size(), start_str, end_str);
+    auto query_start = std::chrono::steady_clock::now();
+    size_t total_events = 0;
+
+    auto execute_query = [&]() {
+        client_->Select(query, [&](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                UnifiedMarketEvent ev;
+                ev.timestamp = extract_ts(block[0], row);
+                ev.trade.timestamp = ev.timestamp;
+                ev.quote.timestamp = ev.timestamp;
+                ev.bar.timestamp = ev.timestamp;
+
+                auto symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                auto kind = block[2]->As<clickhouse::ColumnUInt8>()->At(row);
+                ev.type = static_cast<UnifiedEventType>(kind);
+
+                if (ev.type == UnifiedEventType::TRADE) {
+                    double price = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
+                    int64_t size = block[4]->As<clickhouse::ColumnInt64>()->At(row);
+                    int exchange = block[9]->As<clickhouse::ColumnInt32>()->At(row);
+                    auto cond_sv = block[10]->As<clickhouse::ColumnString>()->At(row);
+                    std::string conditions(cond_sv.data(), cond_sv.size());
+                    int tape = block[11]->As<clickhouse::ColumnInt32>()->At(row);
+                    ev.trade.symbol = std::string(symbol.data(), symbol.size());
+                    ev.trade.price = price;
+                    ev.trade.size = size;
+                    ev.trade.exchange = exchange;
+                    ev.trade.conditions = conditions;
+                    ev.trade.tape = tape;
+                } else if (ev.type == UnifiedEventType::QUOTE) {
+                    double bid_price = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
+                    int64_t bid_size = block[6]->As<clickhouse::ColumnInt64>()->At(row);
+                    double ask_price = block[7]->As<clickhouse::ColumnFloat64>()->At(row);
+                    int64_t ask_size = block[8]->As<clickhouse::ColumnInt64>()->At(row);
+                    int bid_exch = block[12]->As<clickhouse::ColumnInt32>()->At(row);
+                    int ask_exch = block[13]->As<clickhouse::ColumnInt32>()->At(row);
+                    int tape = block[11]->As<clickhouse::ColumnInt32>()->At(row);
+                    ev.quote.symbol = std::string(symbol.data(), symbol.size());
+                    ev.quote.bid_price = bid_price;
+                    ev.quote.bid_size = bid_size;
+                    ev.quote.ask_price = ask_price;
+                    ev.quote.ask_size = ask_size;
+                    ev.quote.bid_exchange = bid_exch;
+                    ev.quote.ask_exchange = ask_exch;
+                    ev.quote.tape = tape;
+                } else {
+                    ev.bar.symbol = std::string(symbol.data(), symbol.size());
+                    ev.bar.open = block[14]->As<clickhouse::ColumnFloat64>()->At(row);
+                    ev.bar.high = block[15]->As<clickhouse::ColumnFloat64>()->At(row);
+                    ev.bar.low = block[16]->As<clickhouse::ColumnFloat64>()->At(row);
+                    ev.bar.close = block[17]->As<clickhouse::ColumnFloat64>()->At(row);
+                    ev.bar.volume = block[18]->As<clickhouse::ColumnInt64>()->At(row);
+                    ev.bar.vwap = block[19]->As<clickhouse::ColumnFloat64>()->At(row);
+                    ev.bar.trade_count = block[20]->As<clickhouse::ColumnUInt32>()->At(row);
+                }
+
+                cb(ev);
+                ++total_events;
+            }
+        });
+    };
+
+    try {
+        execute_query();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse merged stream failed: {}, reconnecting and retrying...", e.what());
+        connect();
+        execute_query();
+    }
+
+    auto query_end = std::chrono::steady_clock::now();
+    auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+    spdlog::info("ClickHouse merged stream completed: {} events in {}ms", total_events, query_ms);
+}
+
 std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& symbol,
                                                           Timestamp start_time,
                                                           Timestamp end_time,

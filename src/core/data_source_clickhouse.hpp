@@ -45,6 +45,11 @@ public:
                             Timestamp end_time,
                             const std::function<void(const BarRecord&)>& cb) override;
 
+    void stream_events_with_bars(const std::vector<std::string>& symbols,
+                                 Timestamp start_time,
+                                 Timestamp end_time,
+                                 const std::function<void(const UnifiedMarketEvent&)>& cb) override;
+
     std::vector<TradeRecord> get_trades(const std::string& symbol,
                                         Timestamp start_time,
                                         Timestamp end_time,

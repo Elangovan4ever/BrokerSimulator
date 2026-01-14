@@ -35,7 +35,7 @@
   },
   "websocket": {
     "queue_size": 1000,
-    "overflow_policy": "drop_oldest",
+    "overflow_policy": "block",
     "batch_size": 50
   },
   "logging": {

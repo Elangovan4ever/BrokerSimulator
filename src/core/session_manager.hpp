@@ -141,6 +141,7 @@ private:
     void start_shared_feeder();
     void stop_shared_feeder();
     bool enqueue_event(std::shared_ptr<Session> session, const MarketEvent& ev);
+    bool enqueue_unified_event(std::shared_ptr<Session> session, const UnifiedMarketEvent& ev);
     std::optional<Order> find_order(std::shared_ptr<Session> session, const std::string& order_id);
     void upsert_order(std::shared_ptr<Session> session, const Order& order);
     void append_event_log(const std::string& session_id, const std::string& payload);
