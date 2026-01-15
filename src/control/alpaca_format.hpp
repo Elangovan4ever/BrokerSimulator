@@ -138,7 +138,7 @@ inline nlohmann::json format_position(const Position& p) {
         {"exchange", "NASDAQ"},
         {"asset_class", "us_equity"},
         {"asset_marginable", true},
-        {"avg_entry_price", p.avg_entry_price},
+        {"avg_entry_price", std::to_string(p.avg_entry_price)},
         {"qty", std::to_string(static_cast<int64_t>(std::abs(p.qty)))},
         {"side", p.qty >= 0 ? "long" : "short"},
         {"market_value", std::to_string(p.market_value)},
