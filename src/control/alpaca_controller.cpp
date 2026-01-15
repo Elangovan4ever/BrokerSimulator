@@ -289,10 +289,6 @@ void AlpacaController::orders(const drogon::HttpRequestPtr& req,
         if (static_cast<int>(arr.size()) >= limit) break;
     }
 
-    spdlog::info("Alpaca orders session={} status_filter={} count={}",
-                 session->id,
-                 status_filter.empty() ? "all" : status_filter,
-                 arr.size());
     cb(json_resp(arr));
 }
 
@@ -402,14 +398,6 @@ void AlpacaController::submitOrder(const drogon::HttpRequestPtr& req,
             cb(error_resp("order submission failed", 422));
             return;
         }
-        const double qty_value = order.qty.value_or(0.0);
-        spdlog::info("Alpaca order submitted session={} id={} symbol={} side={} qty={}",
-                     session->id,
-                     order_id,
-                     order.symbol,
-                     order.side == OrderSide::BUY ? "buy" : "sell",
-                     qty_value);
-
         // Return the created order
         auto orders = session_mgr_->get_orders(session->id);
         auto it = orders.find(order_id);
