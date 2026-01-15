@@ -64,6 +64,7 @@ struct WsConnectionState {
     std::string session_id;
     WsApiType api_type = WsApiType::GENERIC;
     bool authenticated = false;
+    bool is_alpaca_trading = false;
     std::string live_bar_aggr_source{"trades"};
 
     // Subscriptions by type -> set of symbols ("*" means all)

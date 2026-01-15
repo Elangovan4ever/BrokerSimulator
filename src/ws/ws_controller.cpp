@@ -142,6 +142,8 @@ void WsController::handleNewConnection(const drogon::HttpRequestPtr& req,
     WsConnectionState state;
     state.api_type = api_type;
     state.session_id = session_id;
+    state.is_alpaca_trading = (api_type == WsApiType::ALPACA &&
+                               path.find("/alpaca/stream") != std::string::npos);
     if (!session_id.empty()) {
         auto session = session_mgr_->get_session(session_id);
         if (session) {
@@ -170,9 +172,11 @@ void WsController::handleNewConnection(const drogon::HttpRequestPtr& req,
     // Send welcome message based on API type
     json welcome;
     if (api_type == WsApiType::ALPACA) {
-        welcome = json::array();
-        welcome.push_back({{"T", "success"}, {"msg", "connected"}});
-        conn->send(welcome.dump());
+        if (!state.is_alpaca_trading) {
+            welcome = json::array();
+            welcome.push_back({{"T", "success"}, {"msg", "connected"}});
+            conn->send(welcome.dump());
+        }
     } else if (api_type == WsApiType::POLYGON) {
         welcome = json::array();
         welcome.push_back({{"ev", "status"}, {"status", "connected"}, {"message", "Connected Successfully"}});
@@ -255,10 +259,19 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
                                          const json& msg) {
     std::string action = msg.value("action", "");
 
-    if (action == "auth") {
-        // Alpaca auth: {"action":"auth","key":"...","secret":"..."}
-        std::string key = msg.value("key", "");
-        std::string secret = msg.value("secret", "");
+    if (action == "auth" || action == "authenticate") {
+        // Alpaca auth (data): {"action":"auth","key":"...","secret":"..."}
+        // Alpaca trading auth: {"action":"authenticate","data":{"key_id":"...","secret_key":"..."}}
+        std::string key;
+        std::string secret;
+        if (action == "authenticate" && msg.contains("data")) {
+            const auto& data = msg.at("data");
+            key = data.value("key_id", "");
+            secret = data.value("secret_key", "");
+        } else {
+            key = msg.value("key", "");
+            secret = msg.value("secret", "");
+        }
 
         // Validate against config (key can be session_id, secret is token)
         bool valid = cfg_.auth.token.empty() ||
@@ -276,11 +289,25 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
                     session_conns_[key].push_back(conn);
                 }
             }
-            send_alpaca_auth_success(conn);
+            if (state.is_alpaca_trading) {
+                json resp;
+                resp["stream"] = "authorization";
+                resp["data"] = {{"status", "authorized"}, {"action", "authenticate"}};
+                conn->send(resp.dump());
+            } else {
+                send_alpaca_auth_success(conn);
+            }
         } else {
-            json err = json::array();
-            err.push_back({{"T", "error"}, {"code", 401}, {"msg", "auth failed"}});
-            conn->send(err.dump());
+            if (state.is_alpaca_trading) {
+                json err;
+                err["stream"] = "authorization";
+                err["data"] = {{"status", "unauthorized"}, {"action", "authenticate"}, {"message", "auth failed"}};
+                conn->send(err.dump());
+            } else {
+                json err = json::array();
+                err.push_back({{"T", "error"}, {"code", 401}, {"msg", "auth failed"}});
+                conn->send(err.dump());
+            }
         }
     }
     else if (action == "subscribe") {
