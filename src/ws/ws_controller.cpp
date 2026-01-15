@@ -696,6 +696,11 @@ std::string WsController::format_order_alpaca(const OrderData& order, const std:
     json data;
     data["event"] = event_name;
     data["timestamp"] = utils::ts_to_iso(ts);
+    if (event_name == "fill" || event_name == "partial_fill") {
+        data["price"] = order.filled_avg_price;
+        data["qty"] = order.filled_qty;
+        data["position_qty"] = order.position_qty;
+    }
 
     json order_obj;
     order_obj["id"] = order.order_id;
@@ -704,6 +709,9 @@ std::string WsController::format_order_alpaca(const OrderData& order, const std:
     order_obj["filled_qty"] = order.filled_qty;
     order_obj["filled_avg_price"] = order.filled_avg_price;
     order_obj["status"] = order.status;
+    if (!order.side.empty()) {
+        order_obj["side"] = order.side;
+    }
     if (!symbol.empty()) {
         order_obj["symbol"] = symbol;
     }

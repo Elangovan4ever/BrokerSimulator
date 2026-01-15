@@ -65,6 +65,8 @@ struct OrderData {
     double filled_qty;
     double filled_avg_price;
     std::string status;
+    std::string side;
+    double position_qty{0.0};
 };
 
 struct DividendData {

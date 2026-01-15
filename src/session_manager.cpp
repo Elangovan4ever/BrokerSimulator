@@ -394,8 +394,14 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
         ev.sequence = 0;
         ev.event_type = EventType::ORDER_NEW;
         ev.symbol = order.symbol;
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
         ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0),
-                            order.filled_qty, 0.0, "new"};
+                            order.filled_qty, 0.0, "new",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
         std::vector<EventCallback> callbacks_copy;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -449,8 +455,14 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
             ev.sequence = 0;
             ev.event_type = EventType::ORDER_CANCEL;
             ev.symbol = order.symbol;
+            double pos_qty = 0.0;
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(order.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
             ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0),
-                                order.filled_qty, 0.0, "canceled"};
+                                order.filled_qty, 0.0, "canceled",
+                                order.side == OrderSide::BUY ? "buy" : "sell",
+                                pos_qty};
             std::vector<EventCallback> callbacks_copy;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -504,8 +516,17 @@ bool SessionManager::cancel_order(const std::string& session_id, const std::stri
         ev.symbol = order_opt ? order_opt->symbol : "";
         double qty = order_opt ? order_opt->qty.value_or(0.0) : 0.0;
         double filled_qty = order_opt ? order_opt->filled_qty : 0.0;
+        std::string side = order_opt ? (order_opt->side == OrderSide::BUY ? "buy" : "sell") : "buy";
+        double pos_qty = 0.0;
+        if (!ev.symbol.empty()) {
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(ev.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        }
         ev.data = OrderData{order_id, order_opt ? order_opt->client_order_id : order_id,
-                            qty, filled_qty, 0.0, "canceled"};
+                            qty, filled_qty, 0.0, "canceled",
+                            side,
+                            pos_qty};
         std::vector<EventCallback> callbacks_copy;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -650,8 +671,14 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             oe.sequence = ev.sequence;
             oe.event_type = EventType::ORDER_EXPIRE;
             oe.symbol = o.symbol;
+            double pos_qty = 0.0;
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(o.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
             oe.data = OrderData{o.id, o.client_order_id.empty() ? o.id : o.client_order_id,
-                                o.qty.value_or(0.0), o.filled_qty, 0.0, "expired"};
+                                o.qty.value_or(0.0), o.filled_qty, 0.0, "expired",
+                                o.side == OrderSide::BUY ? "buy" : "sell",
+                                pos_qty};
             std::vector<EventCallback> callbacks_copy;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -850,9 +877,17 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
     ev.sequence = 0;
     ev.event_type = EventType::ORDER_FILL;
     ev.symbol = order.symbol;
+    double pos_qty = 0.0;
+    {
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+    }
     ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0), order.filled_qty,
                         applied_fill.fill_price,
-                        order.status == OrderStatus::FILLED ? "filled" : "partially_filled"};
+                        order.status == OrderStatus::FILLED ? "filled" : "partially_filled",
+                        order.side == OrderSide::BUY ? "buy" : "sell",
+                        pos_qty};
     std::vector<EventCallback> callbacks_copy;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1067,7 +1102,13 @@ void SessionManager::enforce_margin(std::shared_ptr<Session> session) {
         ev.sequence = 0;
         ev.event_type = EventType::ORDER_NEW;
         ev.symbol = order.symbol;
-        ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0), 0.0, 0.0, "liquidation_new"};
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0), 0.0, 0.0, "liquidation_new",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
         std::vector<EventCallback> callbacks_copy;
         {
             std::lock_guard<std::mutex> lock(mutex_);
