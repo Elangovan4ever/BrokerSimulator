@@ -210,7 +210,7 @@ private:
     static std::string format_trade_alpaca(const std::string& symbol, const TradeData& trade, Timestamp ts);
     static std::string format_quote_alpaca(const std::string& symbol, const QuoteData& quote, Timestamp ts);
     static std::string format_bar_alpaca(const std::string& symbol, const BarData& bar, Timestamp ts);
-    static std::string format_order_alpaca(const OrderData& order, Timestamp ts);
+    static std::string format_order_alpaca(const OrderData& order, const std::string& symbol, Timestamp ts);
 
     static std::string format_trade_polygon(const std::string& symbol, const TradeData& trade, Timestamp ts);
     static std::string format_quote_polygon(const std::string& symbol, const QuoteData& quote, Timestamp ts);

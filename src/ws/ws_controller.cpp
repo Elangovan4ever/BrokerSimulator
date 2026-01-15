@@ -332,15 +332,28 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
     }
     else if (action == "listen") {
         // Order updates subscription: {"action":"listen","data":{"streams":["trade_updates"]}}
-        if (msg.contains("data") && msg["data"].contains("streams")) {
-            for (const auto& stream : msg["data"]["streams"]) {
-                if (stream == "trade_updates") {
-                    state.subscriptions[SubscriptionType::ORDER_UPDATES].insert("*");
+        if (msg.contains("data") && msg["data"].contains("streams") && msg["data"]["streams"].is_array()) {
+            auto streams = msg["data"]["streams"];
+            if (streams.empty()) {
+                state.subscriptions[SubscriptionType::ORDER_UPDATES].erase("*");
+            } else {
+                for (const auto& stream : streams) {
+                    if (stream == "trade_updates") {
+                        state.subscriptions[SubscriptionType::ORDER_UPDATES].insert("*");
+                    }
                 }
             }
         }
-        json resp = json::array();
-        resp.push_back({{"T", "success"}, {"msg", "listening"}});
+        json resp;
+        resp["stream"] = "listening";
+        json data;
+        json streams = json::array();
+        auto sub_it = state.subscriptions.find(SubscriptionType::ORDER_UPDATES);
+        if (sub_it != state.subscriptions.end() && sub_it->second.count("*") > 0) {
+            streams.push_back("trade_updates");
+        }
+        data["streams"] = streams;
+        resp["data"] = data;
         conn->send(resp.dump());
     }
 }
@@ -642,11 +655,21 @@ std::string WsController::format_bar_alpaca(const std::string& symbol, const Bar
     return msg.dump();
 }
 
-std::string WsController::format_order_alpaca(const OrderData& order, Timestamp ts) {
-    json msg = json::array();
-    json item;
-    item["T"] = "trade_update";
-    item["event"] = order.status;
+std::string WsController::format_order_alpaca(const OrderData& order, const std::string& symbol, Timestamp ts) {
+    std::string event_name = order.status;
+    if (event_name == "filled") {
+        event_name = "fill";
+    } else if (event_name == "partially_filled") {
+        event_name = "partial_fill";
+    }
+
+    json msg;
+    msg["stream"] = "trade_updates";
+
+    json data;
+    data["event"] = event_name;
+    data["timestamp"] = utils::ts_to_iso(ts);
+
     json order_obj;
     order_obj["id"] = order.order_id;
     order_obj["client_order_id"] = order.client_order_id;
@@ -654,11 +677,15 @@ std::string WsController::format_order_alpaca(const OrderData& order, Timestamp 
     order_obj["filled_qty"] = order.filled_qty;
     order_obj["filled_avg_price"] = order.filled_avg_price;
     order_obj["status"] = order.status;
-    item["order"] = order_obj;
-    item["timestamp"] = utils::ts_to_iso(ts);
-    msg.push_back(item);
+    if (!symbol.empty()) {
+        order_obj["symbol"] = symbol;
+    }
+    data["order"] = order_obj;
+
+    msg["data"] = data;
     return msg.dump();
 }
+
 
 std::string WsController::format_trade_polygon(const std::string& symbol, const TradeData& trade, Timestamp ts) {
     json msg = json::array();
@@ -799,6 +826,18 @@ void WsController::enqueue_event_message(const drogon::WebSocketConnectionPtr& c
                                        WsConnectionState& state,
                                        std::string msg,
                                        bool force_flush) {
+    bool is_array = !msg.empty() && msg.front() == '[';
+    if (!is_array) {
+        if (!state.pending_msgs.empty()) {
+            flush_pending_messages(conn, state, true);
+        }
+        conn->send(msg);
+        update_backpressure(conn, msg.size());
+        state.messages_sent += 1;
+        state.bytes_sent += msg.size();
+        state.last_flush = std::chrono::steady_clock::now();
+        return;
+    }
     state.pending_msgs.push_back(std::move(msg));
     flush_pending_messages(conn, state, force_flush);
 }
@@ -1029,7 +1068,7 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
                 if (!state.is_subscribed(SubscriptionType::ORDER_UPDATES, "*")) continue;
                 const auto& order = std::get<OrderData>(event.data);
                 if (state.api_type == WsApiType::ALPACA) {
-                    msg = format_order_alpaca(order, event.timestamp);
+                    msg = format_order_alpaca(order, event.symbol, event.timestamp);
                 } else {
                     msg = json{{"type", "order_update"}, {"order_id", order.order_id},
                                {"status", order.status}, {"filled_qty", order.filled_qty}}.dump();
