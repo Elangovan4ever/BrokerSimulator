@@ -951,10 +951,15 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
     auto end = session->config.end_time;
 
     if (session->config.live_bar_aggr_source == "1s") {
-        // Stream trades/quotes + 1s bars in a single ordered stream.
-        spdlog::info("Using merged trade/quote/1s bar stream (session {})", session->id);
+        // Stream trades/quotes + 1s bars in a single ordered stream, but only a small
+        // initial window to avoid preloading the entire session and overwhelming the
+        // event queue. The polling feeder will load subsequent windows.
+        int window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 300;
+        Timestamp window_end = std::min(start + std::chrono::seconds(window_secs), end);
+
+        spdlog::info("Using merged trade/quote/1s bar stream (session {}), initial window {}s", session->id, window_secs);
         data_source_->stream_events_with_bars(
-            symbols, start, end,
+            symbols, start, window_end,
             [this, session](const UnifiedMarketEvent& ev) {
                 enqueue_unified_event(session, ev);
             }
@@ -1024,6 +1029,8 @@ void SessionManager::start_shared_feeder() {
         return;
     }
     shared_feed_thread_ = std::make_unique<std::thread>([this]() {
+        // Track per-session cursors so we only stream a bounded window ahead.
+        std::unordered_map<std::string, Timestamp> shared_cursors;
         while (shared_feed_running_.load(std::memory_order_acquire)) {
             std::vector<std::shared_ptr<Session>> running_sessions;
             {
@@ -1059,7 +1066,16 @@ void SessionManager::start_shared_feeder() {
             );
 
             if (any_bar_source) {
-                data_source_->stream_events_with_bars(symbols, min_start, max_end,
+                // Stream in bounded windows to avoid flooding queues.
+                int window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 300;
+                Timestamp cursor = min_start;
+                auto it = shared_cursors.find("__global");
+                if (it != shared_cursors.end()) {
+                    cursor = std::max(cursor, it->second);
+                }
+                Timestamp window_end = std::min(cursor + std::chrono::seconds(window_secs), max_end);
+
+                data_source_->stream_events_with_bars(symbols, cursor, window_end,
                     [this, running_sessions](const UnifiedMarketEvent& ev) {
                         const std::string& symbol =
                             (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
@@ -1078,6 +1094,8 @@ void SessionManager::start_shared_feeder() {
                         }
                     }
                 );
+
+                shared_cursors["__global"] = window_end;
             } else {
                 data_source_->stream_events(symbols, min_start, max_end,
                     [this, running_sessions, symbols](const MarketEvent& ev) {
