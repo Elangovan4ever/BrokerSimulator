@@ -122,6 +122,35 @@ public:
     bool apply_split(const std::string& session_id, const std::string& symbol, double split_ratio);
 
     /**
+     * Update stream subscriptions for a session.
+     * Called by WsController when clients subscribe/unsubscribe to symbols.
+     * @param session_id Session ID
+     * @param symbols Symbols to subscribe/unsubscribe
+     * @param subscribe true to subscribe, false to unsubscribe
+     */
+    void update_stream_subscriptions(const std::string& session_id,
+                                     const std::vector<std::string>& symbols,
+                                     bool subscribe);
+
+    /**
+     * Get symbols currently subscribed for streaming in a session.
+     * Returns only symbols with at least one subscriber.
+     * If no subscriptions, returns all session symbols (fallback for backward compat).
+     */
+    std::vector<std::string> get_stream_symbols(std::shared_ptr<Session> session) const;
+
+    /**
+     * Check if a symbol is subscribed for streaming in a session.
+     */
+    bool is_stream_symbol_subscribed(const std::string& session_id, const std::string& symbol) const;
+
+    /**
+     * Clear all stream subscriptions for a session.
+     * Called when session stops or all connections close.
+     */
+    void clear_stream_subscriptions(const std::string& session_id);
+
+    /**
      * Save checkpoint for a session (for crash recovery).
      */
     void save_session_checkpoint(const std::string& session_id);
@@ -161,6 +190,11 @@ private:
     std::vector<EventCallback> event_callbacks_;
     std::unique_ptr<std::thread> shared_feed_thread_;
     std::atomic<bool> shared_feed_running_{false};
+
+    // Subscription-based streaming tracking
+    // Maps session_id -> symbol -> reference count
+    mutable std::mutex stream_mutex_;
+    std::unordered_map<std::string, std::unordered_map<std::string, int>> stream_symbol_counts_;
 };
 
 } // namespace broker_sim

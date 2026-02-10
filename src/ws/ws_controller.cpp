@@ -200,16 +200,56 @@ void WsController::handleConnectionClosed(const drogon::WebSocketConnectionPtr& 
 
     auto it = conn_states_.find(conn);
     if (it != conn_states_.end()) {
-        const auto& session_id = it->second.session_id;
+        const auto& state = it->second;
+        const auto& session_id = state.session_id;
+        
+        // Collect all subscribed symbols from this connection to unsubscribe
+        if (!session_id.empty() && session_mgr_) {
+            std::vector<std::string> symbols_to_unsubscribe;
+            for (const auto& sub_kv : state.subscriptions) {
+                for (const auto& symbol : sub_kv.second) {
+                    if (symbol != "*") {
+                        symbols_to_unsubscribe.push_back(symbol);
+                    }
+                }
+            }
+            
+            if (!symbols_to_unsubscribe.empty()) {
+                // Deduplicate
+                std::sort(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end());
+                symbols_to_unsubscribe.erase(std::unique(symbols_to_unsubscribe.begin(), 
+                                                          symbols_to_unsubscribe.end()),
+                                              symbols_to_unsubscribe.end());
+                
+                std::string symbols_str;
+                for (const auto& s : symbols_to_unsubscribe) {
+                    if (!symbols_str.empty()) symbols_str += ",";
+                    symbols_str += s;
+                }
+                spdlog::info("[WsController] Connection closed session={} unsubscribing {} symbols: [{}]",
+                             session_id, symbols_to_unsubscribe.size(), symbols_str);
+                
+                session_mgr_->update_stream_subscriptions(session_id, symbols_to_unsubscribe, false);
+            }
+        }
+        
         if (!session_id.empty()) {
             auto& conns = session_conns_[session_id];
             conns.erase(std::remove(conns.begin(), conns.end(), conn), conns.end());
             if (conns.empty()) {
                 session_conns_.erase(session_id);
+                // Clear all subscriptions when last connection closes
+                if (session_mgr_) {
+                    spdlog::info("[WsController] Last connection closed for session={}, clearing subscriptions",
+                                 session_id);
+                    session_mgr_->clear_stream_subscriptions(session_id);
+                }
             }
         }
         conn_states_.erase(it);
     }
+    
+    spdlog::debug("[WsController] Connection closed, remaining connections: {}", conn_states_.size());
 }
 
 void WsController::handleNewMessage(const drogon::WebSocketConnectionPtr& conn,
@@ -319,40 +359,98 @@ void WsController::handle_alpaca_message(const drogon::WebSocketConnectionPtr& c
         }
 
         // Handle subscriptions: {"action":"subscribe","trades":["AAPL"],"quotes":["MSFT"],"bars":["*"]}
+        std::vector<std::string> symbols_to_subscribe;
+        
         if (msg.contains("trades") && msg["trades"].is_array()) {
             for (const auto& sym : msg["trades"]) {
-                state.subscriptions[SubscriptionType::TRADES].insert(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::TRADES].insert(symbol);
+                if (symbol != "*") {
+                    symbols_to_subscribe.push_back(symbol);
+                }
             }
         }
         if (msg.contains("quotes") && msg["quotes"].is_array()) {
             for (const auto& sym : msg["quotes"]) {
-                state.subscriptions[SubscriptionType::QUOTES].insert(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::QUOTES].insert(symbol);
+                if (symbol != "*") {
+                    symbols_to_subscribe.push_back(symbol);
+                }
             }
         }
         if (msg.contains("bars") && msg["bars"].is_array()) {
             for (const auto& sym : msg["bars"]) {
-                state.subscriptions[SubscriptionType::BARS].insert(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::BARS].insert(symbol);
+                if (symbol != "*") {
+                    symbols_to_subscribe.push_back(symbol);
+                }
             }
+        }
+
+        // Update session manager subscriptions
+        if (!state.session_id.empty() && session_mgr_ && !symbols_to_subscribe.empty()) {
+            std::sort(symbols_to_subscribe.begin(), symbols_to_subscribe.end());
+            symbols_to_subscribe.erase(std::unique(symbols_to_subscribe.begin(), symbols_to_subscribe.end()), 
+                                       symbols_to_subscribe.end());
+            std::string symbols_str;
+            for (const auto& s : symbols_to_subscribe) {
+                if (!symbols_str.empty()) symbols_str += ",";
+                symbols_str += s;
+            }
+            spdlog::info("[WsController] Alpaca subscribe session={} symbols=[{}]",
+                         state.session_id, symbols_str);
+            session_mgr_->update_stream_subscriptions(state.session_id, symbols_to_subscribe, true);
         }
 
         send_alpaca_subscription_update(conn, state);
     }
     else if (action == "unsubscribe") {
         // Handle unsubscriptions
+        std::vector<std::string> symbols_to_unsubscribe;
+        
         if (msg.contains("trades") && msg["trades"].is_array()) {
             for (const auto& sym : msg["trades"]) {
-                state.subscriptions[SubscriptionType::TRADES].erase(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::TRADES].erase(symbol);
+                if (symbol != "*") {
+                    symbols_to_unsubscribe.push_back(symbol);
+                }
             }
         }
         if (msg.contains("quotes") && msg["quotes"].is_array()) {
             for (const auto& sym : msg["quotes"]) {
-                state.subscriptions[SubscriptionType::QUOTES].erase(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::QUOTES].erase(symbol);
+                if (symbol != "*") {
+                    symbols_to_unsubscribe.push_back(symbol);
+                }
             }
         }
         if (msg.contains("bars") && msg["bars"].is_array()) {
             for (const auto& sym : msg["bars"]) {
-                state.subscriptions[SubscriptionType::BARS].erase(sym.get<std::string>());
+                std::string symbol = sym.get<std::string>();
+                state.subscriptions[SubscriptionType::BARS].erase(symbol);
+                if (symbol != "*") {
+                    symbols_to_unsubscribe.push_back(symbol);
+                }
             }
+        }
+
+        // Update session manager subscriptions
+        if (!state.session_id.empty() && session_mgr_ && !symbols_to_unsubscribe.empty()) {
+            std::sort(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end());
+            symbols_to_unsubscribe.erase(std::unique(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end()),
+                                         symbols_to_unsubscribe.end());
+            std::string symbols_str;
+            for (const auto& s : symbols_to_unsubscribe) {
+                if (!symbols_str.empty()) symbols_str += ",";
+                symbols_str += s;
+            }
+            spdlog::info("[WsController] Alpaca unsubscribe session={} symbols=[{}]",
+                         state.session_id, symbols_str);
+            session_mgr_->update_stream_subscriptions(state.session_id, symbols_to_unsubscribe, false);
         }
 
         send_alpaca_subscription_update(conn, state);
@@ -455,6 +553,7 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
         // Polygon subscribe: {"action":"subscribe","params":"T.AAPL,Q.AAPL,AM.AAPL"}
         std::string params = msg.value("params", "");
         std::vector<std::string> subscribed;
+        std::vector<std::string> symbols_to_subscribe;
 
         std::stringstream ss(params);
         std::string token;
@@ -478,10 +577,13 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
 
             if (prefix == "T") {
                 state.subscriptions[SubscriptionType::TRADES].insert(symbol);
+                symbols_to_subscribe.push_back(symbol);
             } else if (prefix == "Q") {
                 state.subscriptions[SubscriptionType::QUOTES].insert(symbol);
+                symbols_to_subscribe.push_back(symbol);
             } else if (prefix == "AM" || prefix == "A") {
                 state.subscriptions[SubscriptionType::BARS].insert(symbol);
+                symbols_to_subscribe.push_back(symbol);
                 if (!timeframe_str.empty()) {
                     state.bar_timeframes[symbol] = parse_timeframe(timeframe_str);
                 }
@@ -489,10 +591,27 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
             subscribed.push_back(token);
         }
 
+        // Update session manager subscriptions
+        if (!state.session_id.empty() && session_mgr_ && !symbols_to_subscribe.empty()) {
+            std::sort(symbols_to_subscribe.begin(), symbols_to_subscribe.end());
+            symbols_to_subscribe.erase(std::unique(symbols_to_subscribe.begin(), symbols_to_subscribe.end()), 
+                                       symbols_to_subscribe.end());
+            std::string symbols_str;
+            for (const auto& s : symbols_to_subscribe) {
+                if (!symbols_str.empty()) symbols_str += ",";
+                symbols_str += s;
+            }
+            spdlog::info("[WsController] Polygon subscribe session={} symbols=[{}]",
+                         state.session_id, symbols_str);
+            session_mgr_->update_stream_subscriptions(state.session_id, symbols_to_subscribe, true);
+        }
+
         send_polygon_subscription_update(conn, subscribed);
     }
     else if (action == "unsubscribe") {
         std::string params = msg.value("params", "");
+        std::vector<std::string> symbols_to_unsubscribe;
+        
         std::stringstream ss(params);
         std::string token;
         while (std::getline(ss, token, ',')) {
@@ -509,12 +628,30 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
 
             if (prefix == "T") {
                 state.subscriptions[SubscriptionType::TRADES].erase(symbol);
+                symbols_to_unsubscribe.push_back(symbol);
             } else if (prefix == "Q") {
                 state.subscriptions[SubscriptionType::QUOTES].erase(symbol);
+                symbols_to_unsubscribe.push_back(symbol);
             } else if (prefix == "AM" || prefix == "A") {
                 state.subscriptions[SubscriptionType::BARS].erase(symbol);
                 state.bar_timeframes.erase(symbol);
+                symbols_to_unsubscribe.push_back(symbol);
             }
+        }
+
+        // Update session manager subscriptions
+        if (!state.session_id.empty() && session_mgr_ && !symbols_to_unsubscribe.empty()) {
+            std::sort(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end());
+            symbols_to_unsubscribe.erase(std::unique(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end()),
+                                         symbols_to_unsubscribe.end());
+            std::string symbols_str;
+            for (const auto& s : symbols_to_unsubscribe) {
+                if (!symbols_str.empty()) symbols_str += ",";
+                symbols_str += s;
+            }
+            spdlog::info("[WsController] Polygon unsubscribe session={} symbols=[{}]",
+                         state.session_id, symbols_str);
+            session_mgr_->update_stream_subscriptions(state.session_id, symbols_to_unsubscribe, false);
         }
 
         json resp = json::array();

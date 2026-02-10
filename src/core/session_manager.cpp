@@ -979,32 +979,78 @@ void SessionManager::preload_events(std::shared_ptr<Session> session) {
 
 void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
     if (!data_source_) return;
-    auto symbols = session->config.symbols;
     auto start = session->config.start_time;
     auto end = session->config.end_time;
     int window_secs = exec_cfg_.poll_interval_seconds;
     if (window_secs <= 0) return;
+    
+    auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+    auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} window_secs={}",
+                 session->id, start_ns, end_ns, window_secs);
+    
     session->polling_thread = std::make_unique<std::thread>(
-        [this, session, symbols, start, end, window_secs]() {
+        [this, session, start, end, window_secs]() {
             Timestamp cursor = start;
             auto window = std::chrono::seconds(window_secs);
+            
             while (!session->should_stop.load() && cursor < end) {
+                // Get currently subscribed symbols (dynamic, not captured at start)
+                auto symbols = get_stream_symbols(session);
+                
+                if (symbols.empty()) {
+                    spdlog::debug("[PollingFeeder] session={} no symbols subscribed, sleeping", session->id);
+                    std::this_thread::sleep_for(window);
+                    continue;
+                }
+                
+                std::string symbols_str;
+                for (const auto& s : symbols) {
+                    if (!symbols_str.empty()) symbols_str += ",";
+                    symbols_str += s;
+                }
+                spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
+                              session->id, symbols.size(), symbols_str);
+                
                 Timestamp window_end = std::min(cursor + window, end);
+                
                 if (session->config.live_bar_aggr_source == "1s") {
                     data_source_->stream_events_with_bars(
                         symbols, cursor, window_end,
                         [this, session](const UnifiedMarketEvent& ev) {
+                            const std::string& symbol =
+                                (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                                (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                                ev.bar.symbol;
+                            
+                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                              session->id, symbol);
+                                return;
+                            }
                             enqueue_unified_event(session, ev);
                         }
                     );
                 } else {
-                    data_source_->stream_events(symbols, cursor, window_end, [this, session](const MarketEvent& ev) {
-                        enqueue_event(session, ev);
-                    });
+                    data_source_->stream_events(symbols, cursor, window_end, 
+                        [this, session](const MarketEvent& ev) {
+                            const std::string& symbol = 
+                                (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
+                            
+                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                              session->id, symbol);
+                                return;
+                            }
+                            enqueue_event(session, ev);
+                        }
+                    );
                 }
                 cursor = window_end;
                 std::this_thread::sleep_for(window);
             }
+            
+            spdlog::info("[PollingFeeder] session={} polling feeder stopped", session->id);
         }
     );
 }
@@ -1565,6 +1611,107 @@ void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_
 
     session->equity = session->account_manager->state().equity;
     session->cash = session->account_manager->state().cash;
+}
+
+// ============================================================================
+// Subscription-based streaming methods
+// ============================================================================
+
+void SessionManager::update_stream_subscriptions(const std::string& session_id,
+                                                  const std::vector<std::string>& symbols,
+                                                  bool subscribe) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto& symbol_counts = stream_symbol_counts_[session_id];
+    
+    for (const auto& symbol : symbols) {
+        if (subscribe) {
+            symbol_counts[symbol]++;
+            spdlog::debug("[StreamSub] session={} symbol={} subscribe count={}", 
+                          session_id, symbol, symbol_counts[symbol]);
+        } else {
+            auto it = symbol_counts.find(symbol);
+            if (it != symbol_counts.end()) {
+                it->second--;
+                spdlog::debug("[StreamSub] session={} symbol={} unsubscribe count={}", 
+                              session_id, symbol, it->second);
+                if (it->second <= 0) {
+                    symbol_counts.erase(it);
+                    spdlog::debug("[StreamSub] session={} symbol={} fully unsubscribed", 
+                                  session_id, symbol);
+                }
+            }
+        }
+    }
+    
+    // Log current subscription state
+    std::string symbols_str;
+    for (const auto& s : symbols) {
+        if (!symbols_str.empty()) symbols_str += ",";
+        symbols_str += s;
+    }
+    spdlog::info("[StreamSub] session={} action={} symbols=[{}] active_count={}", 
+                 session_id, subscribe ? "subscribe" : "unsubscribe",
+                 symbols_str, symbol_counts.size());
+}
+
+std::vector<std::string> SessionManager::get_stream_symbols(std::shared_ptr<Session> session) const {
+    if (!session) {
+        spdlog::warn("[StreamSub] get_stream_symbols called with null session");
+        return {};
+    }
+    
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto it = stream_symbol_counts_.find(session->id);
+    
+    if (it == stream_symbol_counts_.end() || it->second.empty()) {
+        // Fallback: return session config symbols for backward compatibility
+        spdlog::debug("[StreamSub] session={} no active subscriptions, falling back to config symbols (count={})",
+                      session->id, session->config.symbols.size());
+        return session->config.symbols;
+    }
+    
+    std::vector<std::string> result;
+    result.reserve(it->second.size());
+    for (const auto& kv : it->second) {
+        if (kv.second > 0) {
+            result.push_back(kv.first);
+        }
+    }
+    
+    spdlog::debug("[StreamSub] session={} returning {} subscribed symbols", 
+                  session->id, result.size());
+    return result;
+}
+
+bool SessionManager::is_stream_symbol_subscribed(const std::string& session_id, 
+                                                  const std::string& symbol) const {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto session_it = stream_symbol_counts_.find(session_id);
+    
+    if (session_it == stream_symbol_counts_.end() || session_it->second.empty()) {
+        // No subscriptions for this session - fallback behavior (stream everything)
+        spdlog::trace("[StreamSub] session={} symbol={} no subscriptions, allowing (fallback)", 
+                      session_id, symbol);
+        return true;
+    }
+    
+    auto symbol_it = session_it->second.find(symbol);
+    bool subscribed = (symbol_it != session_it->second.end() && symbol_it->second > 0);
+    
+    spdlog::trace("[StreamSub] session={} symbol={} subscribed={}", 
+                  session_id, symbol, subscribed);
+    return subscribed;
+}
+
+void SessionManager::clear_stream_subscriptions(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto it = stream_symbol_counts_.find(session_id);
+    if (it != stream_symbol_counts_.end()) {
+        size_t count = it->second.size();
+        stream_symbol_counts_.erase(it);
+        spdlog::info("[StreamSub] session={} cleared {} symbol subscriptions", 
+                     session_id, count);
+    }
 }
 
 } // namespace broker_sim
