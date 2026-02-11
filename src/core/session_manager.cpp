@@ -151,14 +151,10 @@ void SessionManager::start_session(const std::string& session_id) {
     session->started_at = std::chrono::system_clock::now();
     session->time_engine->start();
     session->should_stop.store(false);
+    // Data loads when symbols are subscribed via WebSocket
+    spdlog::info("[StartSession] session={} waiting for subscriptions", session->id);
     if (exec_cfg_.enable_shared_feed) {
         start_shared_feeder();
-    } else if (exec_cfg_.poll_interval_seconds > 0) {
-        start_polling_feeder(session);
-    } else {
-        session->feed_threads.push_back(std::make_unique<std::thread>(
-            [this, session]() { preload_events(session); }
-        ));
     }
     session->worker_thread = std::make_unique<std::thread>(
         [this, session]() { run_session_loop(session); }
@@ -1620,38 +1616,58 @@ void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_
 void SessionManager::update_stream_subscriptions(const std::string& session_id,
                                                   const std::vector<std::string>& symbols,
                                                   bool subscribe) {
-    std::lock_guard<std::mutex> lock(stream_mutex_);
-    auto& symbol_counts = stream_symbol_counts_[session_id];
+    auto session = get_session(session_id);
+    if (!session) {
+        spdlog::warn("[StreamSub] session={} not found", session_id);
+        return;
+    }
     
-    for (const auto& symbol : symbols) {
-        if (subscribe) {
-            symbol_counts[symbol]++;
-            spdlog::debug("[StreamSub] session={} symbol={} subscribe count={}", 
-                          session_id, symbol, symbol_counts[symbol]);
-        } else {
-            auto it = symbol_counts.find(symbol);
-            if (it != symbol_counts.end()) {
-                it->second--;
-                spdlog::debug("[StreamSub] session={} symbol={} unsubscribe count={}", 
-                              session_id, symbol, it->second);
-                if (it->second <= 0) {
-                    symbol_counts.erase(it);
-                    spdlog::debug("[StreamSub] session={} symbol={} fully unsubscribed", 
-                                  session_id, symbol);
+    std::vector<std::string> new_symbols;
+    
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& symbol_counts = stream_symbol_counts_[session_id];
+        
+        for (const auto& symbol : symbols) {
+            if (subscribe) {
+                int prev = symbol_counts[symbol];
+                symbol_counts[symbol]++;
+                spdlog::info("[StreamSub] session={} symbol={} count {} -> {}", 
+                              session_id, symbol, prev, symbol_counts[symbol]);
+                if (prev == 0) {
+                    new_symbols.push_back(symbol);
+                }
+            } else {
+                auto it = symbol_counts.find(symbol);
+                if (it != symbol_counts.end()) {
+                    it->second--;
+                    spdlog::info("[StreamSub] session={} symbol={} count={}", 
+                                  session_id, symbol, it->second);
+                    if (it->second <= 0) {
+                        symbol_counts.erase(it);
+                    }
                 }
             }
         }
     }
     
-    // Log current subscription state
-    std::string symbols_str;
-    for (const auto& s : symbols) {
-        if (!symbols_str.empty()) symbols_str += ",";
-        symbols_str += s;
+    // Load data for new subscriptions
+    for (const auto& symbol : new_symbols) {
+        if (session->status != SessionStatus::RUNNING) continue;
+        spdlog::info("[StreamSub] session={} LOADING DATA for symbol={}", session_id, symbol);
+        session->feed_threads.push_back(std::make_unique<std::thread>(
+            [this, session, symbol]() {
+                if (!data_source_) return;
+                std::vector<std::string> syms = {symbol};
+                spdlog::info("[StreamSub] session={} symbol={} query start", session->id, symbol);
+                data_source_->stream_events(syms, session->config.start_time, session->config.end_time,
+                    [this, session](const MarketEvent& ev) {
+                        enqueue_event(session, ev);
+                    });
+                spdlog::info("[StreamSub] session={} symbol={} query done", session->id, symbol);
+            }
+        ));
     }
-    spdlog::info("[StreamSub] session={} action={} symbols=[{}] active_count={}", 
-                 session_id, subscribe ? "subscribe" : "unsubscribe",
-                 symbols_str, symbol_counts.size());
 }
 
 std::vector<std::string> SessionManager::get_stream_symbols(std::shared_ptr<Session> session) const {
