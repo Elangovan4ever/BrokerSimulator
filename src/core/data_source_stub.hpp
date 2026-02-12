@@ -242,6 +242,26 @@ public:
         return {};
     }
 
+    void stream_company_news(const std::vector<std::string>& symbols,
+                             Timestamp start_time,
+                             Timestamp end_time,
+                             const std::function<void(const CompanyNewsRecord&)>& cb) override {
+        (void)symbols;
+        (void)start_time;
+        (void)end_time;
+        (void)cb;
+        spdlog::warn("StubDataSource: no company news stream (ClickHouse not linked)");
+    }
+
+    void stream_finnhub_market_news(Timestamp start_time,
+                                    Timestamp end_time,
+                                    const std::function<void(const CompanyNewsRecord&)>& cb) override {
+        (void)start_time;
+        (void)end_time;
+        (void)cb;
+        spdlog::warn("StubDataSource: no finnhub market news stream (ClickHouse not linked)");
+    }
+
     std::vector<FinnhubInsiderTransactionRecord> get_finnhub_insider_transactions(const std::string& symbol,
                                                                                    Timestamp start_time,
                                                                                    Timestamp end_time,

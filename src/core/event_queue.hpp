@@ -27,7 +27,8 @@ enum class EventType {
     DIVIDEND,       // Corporate action: dividend payment
     SPLIT,          // Corporate action: stock split
     HALT,           // Trading halt (circuit breaker, news, etc.)
-    RESUME          // Trading resume after halt
+    RESUME,         // Trading resume after halt
+    NEWS            // News event (e.g., Finnhub company/market news)
 };
 
 struct TradeData {
@@ -88,7 +89,19 @@ struct HaltData {
     bool is_halted;             // true = halt, false = resume
 };
 
-using EventPayload = std::variant<TradeData, QuoteData, BarData, OrderData, DividendData, SplitData, HaltData>;
+struct NewsData {
+    std::string category;
+    std::string headline;
+    std::string summary;
+    std::string source;
+    std::string url;
+    std::string image;
+    std::string related;        // Comma-separated related symbols/categories
+    int64_t id{0};
+    std::string raw_json;       // Original provider payload when available
+};
+
+using EventPayload = std::variant<TradeData, QuoteData, BarData, OrderData, DividendData, SplitData, HaltData, NewsData>;
 
 struct Event {
     Timestamp timestamp;

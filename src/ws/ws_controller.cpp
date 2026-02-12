@@ -1,6 +1,7 @@
 #include "ws_controller.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 using json = nlohmann::json;
@@ -25,6 +26,91 @@ int64_t parse_timeframe(const std::string& tf) {
         default: return 60;
     }
 }
+
+std::string trim_copy(const std::string& input) {
+    size_t first = 0;
+    while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first]))) {
+        ++first;
+    }
+    size_t last = input.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(input[last - 1]))) {
+        --last;
+    }
+    return input.substr(first, last - first);
+}
+
+std::string to_upper_copy(std::string value) {
+    for (char& c : value) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+std::vector<std::string> split_csv(const std::string& raw) {
+    std::vector<std::string> out;
+    std::stringstream ss(raw);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token = trim_copy(token);
+        if (!token.empty()) out.push_back(token);
+    }
+    return out;
+}
+
+bool is_news_topic_value(const std::string& raw) {
+    auto v = to_upper_copy(trim_copy(raw));
+    return v == "NEWS" || v == "GENERAL" || v == "MARKET" || v == "MARKET_NEWS" || v == "*";
+}
+
+void append_news_filters(const json& node, std::vector<std::string>& out) {
+    if (node.is_string()) {
+        auto s = trim_copy(node.get<std::string>());
+        if (!s.empty()) out.push_back(s);
+        return;
+    }
+    if (node.is_array()) {
+        for (const auto& item : node) {
+            append_news_filters(item, out);
+        }
+        return;
+    }
+    if (node.is_boolean()) {
+        if (node.get<bool>()) out.push_back("*");
+    }
+}
+
+std::vector<std::string> extract_related_tokens(const NewsData& news, const std::string& fallback_symbol) {
+    std::vector<std::string> tokens;
+
+    if (!news.related.empty()) {
+        auto related = split_csv(news.related);
+        tokens.insert(tokens.end(), related.begin(), related.end());
+    }
+
+    if (!news.category.empty()) {
+        tokens.push_back(news.category);
+    }
+
+    if (!fallback_symbol.empty()) {
+        tokens.push_back(fallback_symbol);
+    }
+
+    if (tokens.empty()) {
+        tokens.push_back("*");
+    }
+
+    for (auto& token : tokens) {
+        token = to_upper_copy(trim_copy(token));
+    }
+
+    tokens.erase(std::remove_if(tokens.begin(), tokens.end(), [](const std::string& t) {
+        return t.empty();
+    }), tokens.end());
+    std::sort(tokens.begin(), tokens.end());
+    tokens.erase(std::unique(tokens.begin(), tokens.end()), tokens.end());
+    return tokens;
+}
+
 }  // namespace
 
 // Static member definitions
@@ -206,21 +292,29 @@ void WsController::handleConnectionClosed(const drogon::WebSocketConnectionPtr& 
         // Collect all subscribed symbols from this connection to unsubscribe
         if (!session_id.empty() && session_mgr_) {
             std::vector<std::string> symbols_to_unsubscribe;
-            for (const auto& sub_kv : state.subscriptions) {
-                for (const auto& symbol : sub_kv.second) {
-                    if (symbol != "*") {
-                        symbols_to_unsubscribe.push_back(symbol);
-                    }
+            std::vector<std::string> news_to_unsubscribe;
+
+            auto collect_symbols = [&](SubscriptionType type, std::vector<std::string>& out, bool keep_wildcard) {
+                auto sub_it = state.subscriptions.find(type);
+                if (sub_it == state.subscriptions.end()) return;
+                for (const auto& symbol : sub_it->second) {
+                    if (!keep_wildcard && symbol == "*") continue;
+                    out.push_back(symbol);
                 }
-            }
-            
+            };
+
+            collect_symbols(SubscriptionType::TRADES, symbols_to_unsubscribe, false);
+            collect_symbols(SubscriptionType::QUOTES, symbols_to_unsubscribe, false);
+            collect_symbols(SubscriptionType::BARS, symbols_to_unsubscribe, false);
+            collect_symbols(SubscriptionType::NEWS, news_to_unsubscribe, true);
+
+            auto dedupe = [](std::vector<std::string>& values) {
+                std::sort(values.begin(), values.end());
+                values.erase(std::unique(values.begin(), values.end()), values.end());
+            };
+
             if (!symbols_to_unsubscribe.empty()) {
-                // Deduplicate
-                std::sort(symbols_to_unsubscribe.begin(), symbols_to_unsubscribe.end());
-                symbols_to_unsubscribe.erase(std::unique(symbols_to_unsubscribe.begin(), 
-                                                          symbols_to_unsubscribe.end()),
-                                              symbols_to_unsubscribe.end());
-                
+                dedupe(symbols_to_unsubscribe);
                 std::string symbols_str;
                 for (const auto& s : symbols_to_unsubscribe) {
                     if (!symbols_str.empty()) symbols_str += ",";
@@ -228,8 +322,19 @@ void WsController::handleConnectionClosed(const drogon::WebSocketConnectionPtr& 
                 }
                 spdlog::info("[WsController] Connection closed session={} unsubscribing {} symbols: [{}]",
                              session_id, symbols_to_unsubscribe.size(), symbols_str);
-                
                 session_mgr_->update_stream_subscriptions(session_id, symbols_to_unsubscribe, false);
+            }
+
+            if (!news_to_unsubscribe.empty()) {
+                dedupe(news_to_unsubscribe);
+                std::string news_str;
+                for (const auto& s : news_to_unsubscribe) {
+                    if (!news_str.empty()) news_str += ",";
+                    news_str += s;
+                }
+                spdlog::info("[WsController] Connection closed session={} unsubscribing {} news tokens: [{}]",
+                             session_id, news_to_unsubscribe.size(), news_str);
+                session_mgr_->update_news_subscriptions(session_id, news_to_unsubscribe, false);
             }
         }
         
@@ -243,6 +348,7 @@ void WsController::handleConnectionClosed(const drogon::WebSocketConnectionPtr& 
                     spdlog::info("[WsController] Last connection closed for session={}, clearing subscriptions",
                                  session_id);
                     session_mgr_->clear_stream_subscriptions(session_id);
+                    session_mgr_->clear_news_subscriptions(session_id);
                 }
             }
         }
@@ -682,23 +788,111 @@ void WsController::send_polygon_subscription_update(const drogon::WebSocketConne
 void WsController::handle_finnhub_message(const drogon::WebSocketConnectionPtr& conn,
                                           WsConnectionState& state,
                                           const json& msg) {
-    std::string type = msg.value("type", "");
+    std::string type = to_upper_copy(msg.value("type", ""));
 
-    if (type == "subscribe") {
-        // Finnhub: {"type":"subscribe","symbol":"AAPL"}
-        std::string symbol = msg.value("symbol", "");
-        if (!symbol.empty()) {
-            state.subscriptions[SubscriptionType::TRADES].insert(symbol);
-            // Finnhub doesn't send confirmation, just starts sending data
+    const bool subscribe = (type == "SUBSCRIBE" || type == "SUBSCRIBE_NEWS");
+    const bool unsubscribe = (type == "UNSUBSCRIBE" || type == "UNSUBSCRIBE_NEWS");
+
+    if (subscribe || unsubscribe) {
+        std::vector<std::string> symbols_changed;
+        std::vector<std::string> news_tokens_changed;
+
+        auto apply_trade_symbol = [&](const std::string& raw_symbol) {
+            auto symbol = to_upper_copy(trim_copy(raw_symbol));
+            if (symbol.empty()) return;
+
+            if (subscribe) {
+                if (state.subscriptions[SubscriptionType::TRADES].insert(symbol).second) {
+                    symbols_changed.push_back(symbol);
+                }
+            } else {
+                if (state.subscriptions[SubscriptionType::TRADES].erase(symbol) > 0) {
+                    symbols_changed.push_back(symbol);
+                }
+            }
+        };
+
+        auto apply_news_token = [&](const std::string& raw_token) {
+            auto token = to_upper_copy(trim_copy(raw_token));
+            if (token.empty()) return;
+            if (is_news_topic_value(token)) token = "*";
+
+            if (subscribe) {
+                if (state.subscriptions[SubscriptionType::NEWS].insert(token).second) {
+                    news_tokens_changed.push_back(token);
+                }
+            } else {
+                if (state.subscriptions[SubscriptionType::NEWS].erase(token) > 0) {
+                    news_tokens_changed.push_back(token);
+                }
+            }
+        };
+
+        bool explicit_news_topic = (type == "SUBSCRIBE_NEWS" || type == "UNSUBSCRIBE_NEWS");
+
+        for (const auto* field : {"topic", "stream", "channel"}) {
+            if (msg.contains(field) && msg[field].is_string() && is_news_topic_value(msg[field].get<std::string>())) {
+                explicit_news_topic = true;
+            }
         }
-    }
-    else if (type == "unsubscribe") {
-        std::string symbol = msg.value("symbol", "");
-        if (!symbol.empty()) {
-            state.subscriptions[SubscriptionType::TRADES].erase(symbol);
+
+        if (msg.contains("news")) {
+            explicit_news_topic = true;
+            std::vector<std::string> filters;
+            append_news_filters(msg["news"], filters);
+            for (const auto& token : filters) {
+                apply_news_token(token);
+            }
         }
+
+        if (msg.contains("category") && msg["category"].is_string()) {
+            apply_news_token(msg["category"].get<std::string>());
+        }
+
+        auto apply_symbol_value = [&](const std::string& symbol_value) {
+            if (explicit_news_topic || is_news_topic_value(symbol_value)) {
+                apply_news_token(symbol_value);
+            } else {
+                apply_trade_symbol(symbol_value);
+            }
+        };
+
+        if (msg.contains("symbol") && msg["symbol"].is_string()) {
+            apply_symbol_value(msg["symbol"].get<std::string>());
+        }
+
+        if (msg.contains("symbols") && msg["symbols"].is_array()) {
+            for (const auto& item : msg["symbols"]) {
+                if (!item.is_string()) continue;
+                apply_symbol_value(item.get<std::string>());
+            }
+        }
+
+        auto dedupe = [](std::vector<std::string>& values) {
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end()), values.end());
+        };
+
+        if (!symbols_changed.empty()) {
+            dedupe(symbols_changed);
+        }
+        if (!news_tokens_changed.empty()) {
+            dedupe(news_tokens_changed);
+        }
+
+        if (!state.session_id.empty() && session_mgr_) {
+            if (!symbols_changed.empty()) {
+                session_mgr_->update_stream_subscriptions(state.session_id, symbols_changed, subscribe);
+            }
+            if (!news_tokens_changed.empty()) {
+                session_mgr_->update_news_subscriptions(state.session_id, news_tokens_changed, subscribe);
+            }
+        }
+
+        return;
     }
-    else if (type == "ping") {
+
+    if (type == "PING") {
         // Respond to ping with pong
         conn->send(R"({"type":"pong"})");
     }
@@ -727,6 +921,7 @@ void WsController::handle_generic_message(const drogon::WebSocketConnectionPtr& 
             if (t == "trades") st = SubscriptionType::TRADES;
             else if (t == "quotes") st = SubscriptionType::QUOTES;
             else if (t == "bars") st = SubscriptionType::BARS;
+            else if (t == "news") st = SubscriptionType::NEWS;
             else if (t == "orders") st = SubscriptionType::ORDER_UPDATES;
             else continue;
 
@@ -922,6 +1117,42 @@ std::string WsController::format_trade_finnhub(const std::string& symbol, const 
             {"t", utils::ts_to_ms(ts)},
             {"c", json::array()}  // conditions
         }})}
+    };
+    return msg.dump();
+}
+
+std::string WsController::format_news_finnhub(const NewsData& news, Timestamp ts) {
+    json article;
+    bool parsed_raw = false;
+
+    if (!news.raw_json.empty()) {
+        try {
+            article = json::parse(news.raw_json);
+            parsed_raw = true;
+        } catch (...) {
+            parsed_raw = false;
+        }
+    }
+
+    if (!parsed_raw) {
+        article = {
+            {"category", news.category},
+            {"datetime", utils::ts_to_sec(ts)},
+            {"headline", news.headline},
+            {"id", news.id},
+            {"image", news.image},
+            {"related", news.related},
+            {"source", news.source},
+            {"summary", news.summary},
+            {"url", news.url}
+        };
+    } else if (!article.contains("datetime")) {
+        article["datetime"] = utils::ts_to_sec(ts);
+    }
+
+    json msg = {
+        {"type", "news"},
+        {"data", json::array({article})}
     };
     return msg.dump();
 }
@@ -1230,6 +1461,47 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
                     msg = json{{"type", "bar"}, {"symbol", event.symbol},
                                {"o", bar.open}, {"h", bar.high}, {"l", bar.low}, {"c", bar.close},
                                {"v", bar.volume}}.dump();
+                }
+                break;
+            }
+            case EventType::NEWS: {
+                auto news_it = state.subscriptions.find(SubscriptionType::NEWS);
+                if (news_it == state.subscriptions.end() || news_it->second.empty()) continue;
+
+                const auto& news = std::get<NewsData>(event.data);
+
+                bool matches = false;
+                std::vector<std::string> normalized_filters;
+                normalized_filters.reserve(news_it->second.size());
+                for (const auto& filter : news_it->second) {
+                    auto normalized = to_upper_copy(trim_copy(filter));
+                    if (normalized.empty()) continue;
+                    if (is_news_topic_value(normalized)) {
+                        matches = true;
+                        break;
+                    }
+                    normalized_filters.push_back(normalized);
+                }
+
+                if (!matches) {
+                    auto related_tokens = extract_related_tokens(news, event.symbol);
+                    for (const auto& token : related_tokens) {
+                        if (std::find(normalized_filters.begin(), normalized_filters.end(), token) != normalized_filters.end()) {
+                            matches = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!matches) continue;
+
+                if (state.api_type == WsApiType::FINNHUB) {
+                    msg = format_news_finnhub(news, event.timestamp);
+                } else {
+                    msg = json{{"type", "news"},
+                               {"symbol", event.symbol},
+                               {"headline", news.headline},
+                               {"timestamp", utils::ts_to_sec(event.timestamp)}}.dump();
                 }
                 break;
             }

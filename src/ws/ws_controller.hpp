@@ -35,6 +35,7 @@ enum class SubscriptionType {
     TRADES,
     QUOTES,
     BARS,
+    NEWS,
     ORDER_UPDATES,
     ALL
 };
@@ -219,6 +220,7 @@ private:
                                           int64_t timeframe_seconds = 60);
 
     static std::string format_trade_finnhub(const std::string& symbol, const TradeData& trade, Timestamp ts);
+    static std::string format_news_finnhub(const NewsData& news, Timestamp ts);
 
     static std::string merge_json_array_batch(const std::vector<std::string>& msgs);
     static void enqueue_event_message(const drogon::WebSocketConnectionPtr& conn,

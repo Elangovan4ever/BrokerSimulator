@@ -151,6 +151,25 @@ public:
     void clear_stream_subscriptions(const std::string& session_id);
 
     /**
+     * Update news stream subscriptions for a session.
+     * Symbols can be concrete tickers (e.g., AAPL) or "*" for general market news.
+     */
+    void update_news_subscriptions(const std::string& session_id,
+                                   const std::vector<std::string>& symbols,
+                                   bool subscribe);
+
+    /**
+     * Check if a news symbol/category token is currently subscribed.
+     */
+    bool is_news_symbol_subscribed(const std::string& session_id,
+                                   const std::string& symbol) const;
+
+    /**
+     * Clear all news subscriptions for a session.
+     */
+    void clear_news_subscriptions(const std::string& session_id);
+
+    /**
      * Save checkpoint for a session (for crash recovery).
      */
     void save_session_checkpoint(const std::string& session_id);
@@ -171,6 +190,8 @@ private:
     void stop_shared_feeder();
     bool enqueue_event(std::shared_ptr<Session> session, const MarketEvent& ev);
     bool enqueue_unified_event(std::shared_ptr<Session> session, const UnifiedMarketEvent& ev);
+    bool enqueue_news_event(std::shared_ptr<Session> session, const CompanyNewsRecord& news);
+    void start_news_feed_for_symbol(std::shared_ptr<Session> session, const std::string& symbol_token);
     std::optional<Order> find_order(std::shared_ptr<Session> session, const std::string& order_id);
     void upsert_order(std::shared_ptr<Session> session, const Order& order);
     void append_event_log(const std::string& session_id, const std::string& payload);
@@ -195,6 +216,8 @@ private:
     // Maps session_id -> symbol -> reference count
     mutable std::mutex stream_mutex_;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> stream_symbol_counts_;
+    std::unordered_map<std::string, std::unordered_map<std::string, int>> stream_news_symbol_counts_;
+    std::unordered_map<std::string, std::unordered_set<std::string>> news_feeder_started_tokens_;
 };
 
 } // namespace broker_sim

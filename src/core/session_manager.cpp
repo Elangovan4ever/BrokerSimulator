@@ -4,8 +4,41 @@
 #include "data_source_stub.hpp"
 #include "checkpoint.hpp"
 #include "../ws/status_ws_controller.hpp"
+#include <cctype>
+#include <sstream>
 
 namespace broker_sim {
+
+namespace {
+
+std::string trim_copy(const std::string& input) {
+    size_t first = 0;
+    while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first]))) {
+        ++first;
+    }
+    size_t last = input.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(input[last - 1]))) {
+        --last;
+    }
+    return input.substr(first, last - first);
+}
+
+std::string normalize_news_token(const std::string& raw) {
+    auto token = trim_copy(raw);
+    if (token.empty()) return token;
+
+    for (char& c : token) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+
+    if (token == "NEWS" || token == "GENERAL" || token == "MARKET" || token == "MARKET_NEWS") {
+        return "*";
+    }
+    return token;
+}
+
+}  // namespace
+
 
 Session::Session(const std::string& session_id, const SessionConfig& cfg)
     : id(session_id)
@@ -145,6 +178,12 @@ void SessionManager::start_session(const std::string& session_id) {
         }
         // Reset time engine to session start time
         session->time_engine->set_time(session->config.start_time);
+
+        // Allow news feeders to restart on session restart.
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            news_feeder_started_tokens_.erase(session->id);
+        }
     }
 
     session->status = SessionStatus::RUNNING;
@@ -153,6 +192,21 @@ void SessionManager::start_session(const std::string& session_id) {
     session->should_stop.store(false);
     // Data loads when symbols are subscribed via WebSocket
     spdlog::info("[StartSession] session={} waiting for subscriptions", session->id);
+
+    // Resume pre-existing news subscriptions if they were set before start/restart.
+    std::vector<std::string> news_tokens;
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto it = stream_news_symbol_counts_.find(session->id);
+        if (it != stream_news_symbol_counts_.end()) {
+            for (const auto& kv : it->second) {
+                if (kv.second > 0) news_tokens.push_back(kv.first);
+            }
+        }
+    }
+    for (const auto& token : news_tokens) {
+        start_news_feed_for_symbol(session, token);
+    }
     if (exec_cfg_.enable_shared_feed) {
         start_shared_feeder();
     }
@@ -192,6 +246,10 @@ void SessionManager::stop_session(const std::string& session_id) {
     if (session) {
         session->stop();
         session->status = SessionStatus::STOPPED;
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            news_feeder_started_tokens_.erase(session_id);
+        }
         save_session_checkpoint(session_id);
 
         nlohmann::json w{{"event","session_stopped"},{"session_id",session_id}};
@@ -233,6 +291,12 @@ void SessionManager::destroy_session(const std::string& session_id) {
     }
     if (session) {
         session->stop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        stream_symbol_counts_.erase(session_id);
+        stream_news_symbol_counts_.erase(session_id);
+        news_feeder_started_tokens_.erase(session_id);
     }
     if (exec_cfg_.enable_shared_feed) {
         bool any_running = false;
@@ -1198,6 +1262,154 @@ bool SessionManager::enqueue_unified_event(std::shared_ptr<Session> session, con
     return ok;
 }
 
+bool SessionManager::enqueue_news_event(std::shared_ptr<Session> session, const CompanyNewsRecord& news) {
+    if (!session || !session->event_queue) return false;
+
+    std::string symbol = news.symbol;
+    if (symbol.empty()) symbol = news.related;
+    if (symbol.empty()) symbol = news.category;
+
+    NewsData payload;
+    payload.category = news.category;
+    payload.headline = news.headline;
+    payload.summary = news.summary;
+    payload.source = news.source;
+    payload.url = news.url;
+    payload.image = news.image;
+    payload.related = news.related;
+    payload.id = news.id;
+    payload.raw_json = news.raw_json;
+
+    bool ok = session->event_queue->push(news.datetime, EventType::NEWS, symbol, std::move(payload));
+    session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+    if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+void SessionManager::start_news_feed_for_symbol(std::shared_ptr<Session> session,
+                                                const std::string& symbol_token) {
+    if (!session || !data_source_) return;
+
+    const std::string token = normalize_news_token(symbol_token);
+    if (token.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& started_tokens = news_feeder_started_tokens_[session->id];
+        if (started_tokens.find(token) != started_tokens.end()) {
+            return;
+        }
+        started_tokens.insert(token);
+    }
+
+    session->feed_threads.push_back(std::make_unique<std::thread>(
+        [this, session, token]() {
+            if (!data_source_) return;
+            spdlog::info("[NewsSub] session={} token={} query start", session->id, token);
+
+            std::vector<CompanyNewsRecord> buffered_news;
+            buffered_news.reserve(256);
+
+            auto collect_news = [session, token, &buffered_news](const CompanyNewsRecord& news) {
+                if (news.datetime < session->config.start_time || news.datetime > session->config.end_time) {
+                    spdlog::debug("[NewsSub] session={} token={} dropping news id={} ts={} outside session window",
+                                  session->id, token, news.id, news.datetime.time_since_epoch().count());
+                    return;
+                }
+                buffered_news.push_back(news);
+            };
+
+            try {
+                if (token == "*") {
+                    data_source_->stream_finnhub_market_news(session->config.start_time,
+                                                             session->config.end_time,
+                                                             collect_news);
+                } else {
+                    data_source_->stream_company_news(std::vector<std::string>{token},
+                                                      session->config.start_time,
+                                                      session->config.end_time,
+                                                      collect_news);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[NewsSub] session={} token={} stream failed: {}", session->id, token, e.what());
+            }
+
+            if (buffered_news.empty()) {
+                spdlog::info("[NewsSub] session={} token={} query done buffered_rows=0 emitted_rows=0",
+                             session->id, token);
+                return;
+            }
+
+            std::sort(buffered_news.begin(), buffered_news.end(),
+                      [](const CompanyNewsRecord& lhs, const CompanyNewsRecord& rhs) {
+                          return lhs.datetime < rhs.datetime;
+                      });
+
+            constexpr auto kNewsLookahead = std::chrono::seconds(2);
+            size_t emitted_rows = 0;
+
+            while (emitted_rows < buffered_news.size()) {
+                if (session->should_stop.load(std::memory_order_acquire)) {
+                    spdlog::debug("[NewsSub] session={} token={} stopping with {} rows pending",
+                                  session->id, token, buffered_news.size() - emitted_rows);
+                    break;
+                }
+
+                if (!is_news_symbol_subscribed(session->id, token)) {
+                    spdlog::debug("[NewsSub] session={} token={} unsubscribed; dropping {} buffered rows",
+                                  session->id, token, buffered_news.size() - emitted_rows);
+                    break;
+                }
+
+                const auto& next_news = buffered_news[emitted_rows];
+                auto current_sim_time = session->time_engine->current_time();
+                if (next_news.datetime > current_sim_time + kNewsLookahead) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    continue;
+                }
+
+                CompanyNewsRecord normalized = next_news;
+                if (normalized.symbol.empty() && token != "*") {
+                    normalized.symbol = token;
+                }
+
+                bool queued = enqueue_news_event(session, normalized);
+                std::string headline_preview = normalized.headline;
+                if (headline_preview.size() > 120) {
+                    headline_preview = headline_preview.substr(0, 120) + "...";
+                }
+
+                if (queued) {
+                    spdlog::info(
+                        "[NewsSub] session={} token={} enqueued id={} symbol={} ts={} headline= {}",
+                        session->id,
+                        token,
+                        normalized.id,
+                        normalized.symbol,
+                        normalized.datetime.time_since_epoch().count(),
+                        headline_preview
+                    );
+                } else {
+                    spdlog::warn(
+                        "[NewsSub] session={} token={} failed enqueue id={} symbol={} ts={} headline= {}",
+                        session->id,
+                        token,
+                        normalized.id,
+                        normalized.symbol,
+                        normalized.datetime.time_since_epoch().count(),
+                        headline_preview
+                    );
+                }
+
+                emitted_rows++;
+            }
+
+            spdlog::info("[NewsSub] session={} token={} query done buffered_rows={} emitted_rows={}",
+                         session->id, token, buffered_news.size(), emitted_rows);
+        }
+    ));
+}
+
 void SessionManager::enforce_margin(std::shared_ptr<Session> session) {
     if (!exec_cfg_.enable_margin_call_checks) return;
     auto st = session->account_manager->state();
@@ -1728,6 +1940,99 @@ void SessionManager::clear_stream_subscriptions(const std::string& session_id) {
         spdlog::info("[StreamSub] session={} cleared {} symbol subscriptions", 
                      session_id, count);
     }
+}
+
+void SessionManager::update_news_subscriptions(const std::string& session_id,
+                                               const std::vector<std::string>& symbols,
+                                               bool subscribe) {
+    auto session = get_session(session_id);
+    if (!session) {
+        spdlog::warn("[NewsSub] session={} not found", session_id);
+        return;
+    }
+
+    std::vector<std::string> new_tokens;
+
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& token_counts = stream_news_symbol_counts_[session_id];
+
+        for (const auto& raw_symbol : symbols) {
+            const auto token = normalize_news_token(raw_symbol);
+            if (token.empty()) continue;
+
+            if (subscribe) {
+                int prev = token_counts[token];
+                token_counts[token]++;
+                spdlog::info("[NewsSub] session={} token={} count {} -> {}",
+                             session_id, token, prev, token_counts[token]);
+                if (prev == 0) {
+                    new_tokens.push_back(token);
+                }
+            } else {
+                auto it = token_counts.find(token);
+                if (it != token_counts.end()) {
+                    it->second--;
+                    spdlog::info("[NewsSub] session={} token={} count={}",
+                                 session_id, token, it->second);
+                    if (it->second <= 0) {
+                        token_counts.erase(it);
+                        auto started_it = news_feeder_started_tokens_.find(session_id);
+                        if (started_it != news_feeder_started_tokens_.end()) {
+                            started_it->second.erase(token);
+                            if (started_it->second.empty()) {
+                                news_feeder_started_tokens_.erase(started_it);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (token_counts.empty()) {
+            stream_news_symbol_counts_.erase(session_id);
+        }
+    }
+
+    for (const auto& token : new_tokens) {
+        if (session->status != SessionStatus::RUNNING) continue;
+        start_news_feed_for_symbol(session, token);
+    }
+}
+
+bool SessionManager::is_news_symbol_subscribed(const std::string& session_id,
+                                               const std::string& symbol) const {
+    const auto token = normalize_news_token(symbol);
+    if (token.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto session_it = stream_news_symbol_counts_.find(session_id);
+    if (session_it == stream_news_symbol_counts_.end() || session_it->second.empty()) {
+        return false;
+    }
+
+    if (token != "*") {
+        auto all_it = session_it->second.find("*");
+        if (all_it != session_it->second.end() && all_it->second > 0) {
+            return true;
+        }
+    }
+
+    auto token_it = session_it->second.find(token);
+    return token_it != session_it->second.end() && token_it->second > 0;
+}
+
+void SessionManager::clear_news_subscriptions(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+
+    auto count_it = stream_news_symbol_counts_.find(session_id);
+    if (count_it != stream_news_symbol_counts_.end()) {
+        size_t count = count_it->second.size();
+        stream_news_symbol_counts_.erase(count_it);
+        spdlog::info("[NewsSub] session={} cleared {} news subscriptions", session_id, count);
+    }
+
+    news_feeder_started_tokens_.erase(session_id);
 }
 
 } // namespace broker_sim

@@ -106,9 +106,8 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                                          Timestamp start_time,
                                          Timestamp end_time,
                                          const std::function<void(const MarketEvent&)>& cb) {
-    // Note: No mutex lock here - stream_events is called once at session start
-    // and batches all events locally before returning. The session loop doesn't
-    // call this concurrently with other methods.
+    // Serialize shared client access; libclickhouse-cpp client is not thread-safe.
+    std::lock_guard<std::mutex> lock(client_mutex_);
     // Reconnect if client is null or stale
     if (!client_) {
         spdlog::info("ClickHouse client not connected, reconnecting...");
@@ -228,7 +227,8 @@ void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& sy
                                               Timestamp start_time,
                                               Timestamp end_time,
                                               const std::function<void(const BarRecord&)>& cb) {
-    // Note: No mutex lock here - similar to stream_events, called once at session start
+    // Serialize shared client access; libclickhouse-cpp client is not thread-safe.
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) {
         spdlog::info("ClickHouse client not connected, reconnecting...");
         connect();
@@ -297,6 +297,8 @@ void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string
                                                    Timestamp start_time,
                                                    Timestamp end_time,
                                                    const std::function<void(const UnifiedMarketEvent&)>& cb) {
+    // Serialize shared client access; libclickhouse-cpp client is not thread-safe.
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) {
         spdlog::info("ClickHouse client not connected, reconnecting...");
         connect();
@@ -741,9 +743,10 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
         {}
     )", symbol, start_str, end_str, limit_clause(limit));
     auto run_select = [&]() {
-        client_->Select(query, [&out](const clickhouse::Block& block) {
+        client_->Select(query, [&out, &symbol](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 CompanyNewsRecord n;
+                n.symbol = symbol;
                 n.datetime = extract_ts_any(block[0], row);
                 n.headline = block[1]->As<clickhouse::ColumnString>()->At(row);
                 n.summary = block[2]->As<clickhouse::ColumnString>()->At(row);
@@ -2443,6 +2446,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_finnhub_market_news(Tim
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 CompanyNewsRecord n;
+                n.symbol.clear();
                 n.category = block[0]->As<clickhouse::ColumnString>()->At(row);
                 n.datetime = extract_ts_any(block[1], row);
                 n.headline = block[2]->As<clickhouse::ColumnString>()->At(row);
@@ -2470,6 +2474,143 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_finnhub_market_news(Tim
         }
     }
     return out;
+}
+
+
+void ClickHouseDataSource::stream_company_news(const std::vector<std::string>& symbols,
+                                               Timestamp start_time,
+                                               Timestamp end_time,
+                                               const std::function<void(const CompanyNewsRecord&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (symbols.empty()) {
+        spdlog::info("ClickHouse stream_company_news skipped: empty symbol list");
+        return;
+    }
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected for stream_company_news, reconnecting...");
+        connect();
+    }
+
+    std::string sym_list = build_symbol_list(symbols);
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+
+    std::string query = fmt::format(R"(
+        SELECT CAST(symbol AS String), datetime, headline, summary, source_name, url, image,
+               CAST(category AS String), CAST(related AS String), id, raw_json
+        FROM finnhub_company_news
+        WHERE symbol IN ({})
+          AND datetime >= '{}'
+          AND datetime < '{}'
+        ORDER BY datetime ASC
+    )", sym_list, start_str, end_str);
+
+    size_t emitted_rows = 0;
+    auto run_select = [&]() {
+        client_->Select(query, [&cb, &emitted_rows](const clickhouse::Block& block) {
+            emitted_rows += block.GetRowCount();
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                CompanyNewsRecord n;
+                n.symbol = block[0]->As<clickhouse::ColumnString>()->At(row);
+                n.datetime = extract_ts_any(block[1], row);
+                n.headline = block[2]->As<clickhouse::ColumnString>()->At(row);
+                n.summary = block[3]->As<clickhouse::ColumnString>()->At(row);
+                n.source = block[4]->As<clickhouse::ColumnString>()->At(row);
+                n.url = block[5]->As<clickhouse::ColumnString>()->At(row);
+                n.image = block[6]->As<clickhouse::ColumnString>()->At(row);
+                n.category = block[7]->As<clickhouse::ColumnString>()->At(row);
+                n.related = block[8]->As<clickhouse::ColumnString>()->At(row);
+                n.id = block[9]->As<clickhouse::ColumnUInt64>()->At(row);
+                n.raw_json = block[10]->As<clickhouse::ColumnString>()->At(row);
+                cb(n);
+            }
+        });
+    };
+
+    spdlog::info("ClickHouse stream_company_news start symbols={} range=[{}, {})",
+                 symbols.size(), start_str, end_str);
+
+    try {
+        run_select();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse stream_company_news failed: {}, reconnecting and retrying...",
+                     e.what());
+        emitted_rows = 0;
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse stream_company_news retry failed: {}", retry_e.what());
+            return;
+        }
+    }
+
+    spdlog::info("ClickHouse stream_company_news completed symbols={} emitted_rows={}",
+                 symbols.size(), emitted_rows);
+}
+
+void ClickHouseDataSource::stream_finnhub_market_news(Timestamp start_time,
+                                                      Timestamp end_time,
+                                                      const std::function<void(const CompanyNewsRecord&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected for stream_finnhub_market_news, reconnecting...");
+        connect();
+    }
+
+    auto start_str = format_timestamp(start_time);
+    auto end_str = format_timestamp(end_time);
+
+    std::string query = fmt::format(R"(
+        SELECT CAST(category AS String), datetime, headline, source_name, url, summary, image, id, raw_json
+        FROM finnhub_market_news
+        WHERE datetime >= toDateTime('{}')
+          AND datetime < toDateTime('{}')
+        ORDER BY datetime ASC
+    )", start_str, end_str);
+
+    size_t emitted_rows = 0;
+    auto run_select = [&]() {
+        client_->Select(query, [&cb, &emitted_rows](const clickhouse::Block& block) {
+            emitted_rows += block.GetRowCount();
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                CompanyNewsRecord n;
+                n.symbol.clear();
+                n.category = block[0]->As<clickhouse::ColumnString>()->At(row);
+                n.datetime = extract_ts_any(block[1], row);
+                n.headline = block[2]->As<clickhouse::ColumnString>()->At(row);
+                n.source = block[3]->As<clickhouse::ColumnString>()->At(row);
+                n.url = block[4]->As<clickhouse::ColumnString>()->At(row);
+                n.summary = block[5]->As<clickhouse::ColumnString>()->At(row);
+                n.image = block[6]->As<clickhouse::ColumnString>()->At(row);
+                n.id = block[7]->As<clickhouse::ColumnUInt64>()->At(row);
+                n.raw_json = block[8]->As<clickhouse::ColumnString>()->At(row);
+                cb(n);
+            }
+        });
+    };
+
+    spdlog::info("ClickHouse stream_finnhub_market_news start range=[{}, {})",
+                 start_str, end_str);
+
+    try {
+        run_select();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse stream_finnhub_market_news failed: {}, reconnecting and retrying...",
+                     e.what());
+        emitted_rows = 0;
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse stream_finnhub_market_news retry failed: {}",
+                         retry_e.what());
+            return;
+        }
+    }
+
+    spdlog::info("ClickHouse stream_finnhub_market_news completed emitted_rows={}",
+                 emitted_rows);
 }
 
 std::vector<FinnhubInsiderTransactionRecord> ClickHouseDataSource::get_finnhub_insider_transactions(

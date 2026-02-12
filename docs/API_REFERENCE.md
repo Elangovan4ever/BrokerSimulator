@@ -952,16 +952,37 @@ Subscription prefixes:
 
 **URL:** `ws://localhost:8400/finnhub/ws`
 
-#### Subscribe
+
+#### Subscribe (Trades)
 
 ```json
 {"type": "subscribe", "symbol": "AAPL"}
 ```
 
+#### Subscribe (News)
+
+Company-specific news:
+```json
+{"type": "subscribe_news", "symbol": "AAPL"}
+```
+
+General/market news (wildcard):
+```json
+{"type": "subscribe_news", "symbol": "general"}
+```
+
+Notes:
+- `subscribe_news` and `unsubscribe_news` are supported aliases.
+- The simulator also accepts `news`, `category`, `topic`, `stream`, or `channel` fields to express news subscriptions.
+
 #### Unsubscribe
 
 ```json
 {"type": "unsubscribe", "symbol": "AAPL"}
+```
+
+```json
+{"type": "unsubscribe_news", "symbol": "AAPL"}
 ```
 
 #### Message Types
@@ -971,6 +992,10 @@ Subscription prefixes:
 {"type": "trade", "data": [{"s": "AAPL", "p": 150.25, "v": 100, "t": 1704200400000, "c": []}]}
 ```
 
+**News:**
+```json
+{"type": "news", "data": [{"category": "general", "datetime": 1704200400, "headline": "Market headline", "id": 12345, "source": "Reuters", "summary": "...", "url": "https://example.com/story"}]}
+```
 ---
 
 ## Error Handling

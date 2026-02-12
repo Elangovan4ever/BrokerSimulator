@@ -48,6 +48,7 @@ struct BarRecord {
 
 struct CompanyNewsRecord {
     Timestamp datetime;
+    std::string symbol;
     std::string headline;
     std::string summary;
     std::string source;
@@ -707,6 +708,17 @@ public:
     virtual std::vector<CompanyNewsRecord> get_finnhub_market_news(Timestamp start_time,
                                                                    Timestamp end_time,
                                                                    size_t limit) = 0;
+
+    // Chronological stream of Finnhub company news for symbol subscriptions.
+    virtual void stream_company_news(const std::vector<std::string>& symbols,
+                                     Timestamp start_time,
+                                     Timestamp end_time,
+                                     const std::function<void(const CompanyNewsRecord&)>& cb) = 0;
+
+    // Chronological stream of Finnhub general market news.
+    virtual void stream_finnhub_market_news(Timestamp start_time,
+                                            Timestamp end_time,
+                                            const std::function<void(const CompanyNewsRecord&)>& cb) = 0;
 
     virtual std::vector<FinnhubInsiderTransactionRecord> get_finnhub_insider_transactions(const std::string& symbol,
                                                                                            Timestamp start_time,
