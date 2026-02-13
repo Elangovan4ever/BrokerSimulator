@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 namespace broker_sim {
@@ -3164,11 +3165,41 @@ std::string ClickHouseDataSource::format_timestamp(Timestamp ts) {
     return ss.str();
 }
 
+namespace {
+int64_t pow10_i64(size_t exp) {
+    int64_t value = 1;
+    for (size_t i = 0; i < exp; ++i) {
+        if (value > std::numeric_limits<int64_t>::max() / 10) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        value *= 10;
+    }
+    return value;
+}
+
+Timestamp datetime64_to_timestamp(const std::shared_ptr<clickhouse::ColumnDateTime64>& col, size_t row) {
+    if (!col) return Timestamp{};
+
+    const int64_t raw = col->At(row);
+    const size_t precision = col->GetPrecision();
+
+    int64_t nanos = raw;
+    if (precision < 9) {
+        nanos = raw * pow10_i64(9 - precision);
+    } else if (precision > 9) {
+        const int64_t divisor = pow10_i64(precision - 9);
+        if (divisor > 0) {
+            nanos = raw / divisor;
+        }
+    }
+
+    return Timestamp{} + std::chrono::nanoseconds(nanos);
+}
+} // namespace
+
 Timestamp ClickHouseDataSource::extract_ts(const clickhouse::ColumnRef& col, size_t row) {
     auto c = col->As<clickhouse::ColumnDateTime64>();
-    // DateTime64(9) stores nanoseconds since epoch
-    auto nanos = c->At(row);
-    return Timestamp{} + std::chrono::nanoseconds(nanos);
+    return datetime64_to_timestamp(c, row);
 }
 
 std::string ClickHouseDataSource::interval_expr(int multiplier, const std::string& timespan) {
@@ -3203,9 +3234,7 @@ Timestamp ClickHouseDataSource::extract_ts_any(const clickhouse::ColumnRef& col,
         return extract_ts_any(n->Nested(), row);
     }
     if (auto c = col->As<clickhouse::ColumnDateTime64>()) {
-        // DateTime64(9) stores nanoseconds since epoch
-        auto nanos = c->At(row);
-        return Timestamp{} + std::chrono::nanoseconds(nanos);
+        return datetime64_to_timestamp(c, row);
     }
     if (auto c = col->As<clickhouse::ColumnDateTime>()) {
         auto secs = c->At(row);
