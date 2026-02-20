@@ -447,6 +447,19 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     }
 
     auto fill = session->matching_engine->submit_order(order);
+    if (fill && fill->fill_qty > 0.0) {
+        // Matching engine mutates immediate fills on the local order instance.
+        // SessionManager applies fills via process_fill(); normalize here to avoid double-counting.
+        if (order.filled_qty >= fill->fill_qty) {
+            order.filled_qty -= fill->fill_qty;
+        } else {
+            order.filled_qty = 0.0;
+        }
+        if (order.status == OrderStatus::PARTIALLY_FILLED || order.status == OrderStatus::FILLED) {
+            order.status = OrderStatus::NEW;
+        }
+    }
+
     upsert_order(session, order);
     {
         std::lock_guard<std::mutex> lock(session->orders_mutex);

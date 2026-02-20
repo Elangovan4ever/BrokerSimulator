@@ -223,6 +223,39 @@ TEST(SessionManagerTest, MarketOrderFillsAfterFirstQuote) {
     mgr.stop_session(session->id);
 }
 
+
+TEST(SessionManagerTest, ImmediateFillDoesNotDoubleCountFilledQuantity) {
+    auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{});
+    SessionManager mgr(ds);
+
+    SessionConfig cfg;
+    cfg.symbols = {"AAPL"};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(10000000);
+    cfg.speed_factor = 0.0;
+    auto session = mgr.create_session(cfg);
+
+    NBBO nbbo{"AAPL", 100.0, 1000, 100.5, 1000, 1000000};
+    session->matching_engine->update_nbbo(nbbo);
+
+    Order order;
+    order.symbol = "AAPL";
+    order.side = OrderSide::BUY;
+    order.type = OrderType::MARKET;
+    order.tif = TimeInForce::DAY;
+    order.qty = 2.0;
+
+    auto order_id = mgr.submit_order(session->id, order);
+    ASSERT_FALSE(order_id.empty());
+
+    auto orders = mgr.get_orders(session->id);
+    auto it = orders.find(order_id);
+    ASSERT_NE(it, orders.end());
+    EXPECT_DOUBLE_EQ(it->second.qty.value_or(0.0), 2.0);
+    EXPECT_DOUBLE_EQ(it->second.filled_qty, 2.0);
+    EXPECT_EQ(it->second.status, OrderStatus::FILLED);
+}
+
 TEST(SessionManagerTest, PauseStopsEventProgression) {
     int64_t t1 = 1'000'000;
     int64_t t2 = 51'000'000;
