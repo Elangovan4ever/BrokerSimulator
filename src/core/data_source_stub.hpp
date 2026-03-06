@@ -148,6 +148,11 @@ public:
         return {};
     }
 
+    std::vector<TickerBasicRecord> get_tickers(const StockTickersQuery& query) override {
+        (void)query;
+        return {};
+    }
+
     std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
                                                       std::optional<Timestamp> max_date) override {
         (void)ticker;

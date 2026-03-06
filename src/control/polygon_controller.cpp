@@ -2684,37 +2684,81 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
                                       std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                                       std::string symbol) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    std::transform(symbol.begin(), symbol.end(), symbol.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    auto details = data_source->get_ticker_basic(symbol, session->time_engine->current_time());
+    if (!details) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    json result = {
+        {"ticker", details->ticker.empty() ? symbol : details->ticker},
+        {"name", details->name},
+        {"market", details->market},
+        {"locale", details->locale},
+        {"primary_exchange", details->primary_exchange},
+        {"type", details->type},
+        {"active", details->active},
+        {"currency_name", details->currency_name},
+        {"cik", details->cik},
+        {"composite_figi", details->composite_figi},
+        {"share_class_figi", details->share_class_figi},
+        {"market_cap", details->market_cap.value_or(0.0)},
+        {"phone_number", details->phone_number},
+        {"address", json::object()},
+        {"description", details->description},
+        {"sic_code", details->sic_code},
+        {"sic_description", details->sic_description},
+        {"ticker_root", details->ticker_root},
+        {"homepage_url", details->homepage_url},
+        {"total_employees", details->total_employees.value_or(0)},
+        {"list_date", details->list_date ? format_date(*details->list_date) : ""},
+        {"branding", json::object()},
+        {"share_class_shares_outstanding", details->share_class_shares_outstanding.value_or(0)},
+        {"weighted_shares_outstanding", details->weighted_shares_outstanding.value_or(0)},
+        {"round_lot", details->round_lot.value_or(0)}
+    };
+
+    if (!details->address1.empty()) result["address"]["address1"] = details->address1;
+    if (!details->city.empty()) result["address"]["city"] = details->city;
+    if (!details->state.empty()) result["address"]["state"] = details->state;
+    if (!details->postal_code.empty()) result["address"]["postal_code"] = details->postal_code;
+
+    if (!details->logo_url.empty()) result["branding"]["logo_url"] = details->logo_url;
+    if (!details->icon_url.empty()) result["branding"]["icon_url"] = details->icon_url;
+
+    if (!details->raw_json.empty()) {
+        try {
+            auto raw = json::parse(details->raw_json);
+            if (raw.contains("last_updated_utc")) result["last_updated_utc"] = raw["last_updated_utc"];
+        } catch (...) {
+        }
+    }
 
     json response = {
         {"status", "OK"},
         {"request_id", utils::generate_id()},
-        {"results", {
-            {"ticker", symbol},
-            {"name", symbol + " Inc."},
-            {"market", "stocks"},
-            {"locale", "us"},
-            {"primary_exchange", "XNAS"},
-            {"type", "CS"},  // Common Stock
-            {"active", true},
-            {"currency_name", "usd"},
-            {"cik", "0000000000"},
-            {"composite_figi", "BBG000000000"},
-            {"share_class_figi", "BBG000000000"},
-            {"market_cap", 0},
-            {"phone_number", ""},
-            {"address", {}},
-            {"description", "Simulated ticker for " + symbol},
-            {"sic_code", "0000"},
-            {"sic_description", ""},
-            {"ticker_root", symbol},
-            {"homepage_url", ""},
-            {"total_employees", 0},
-            {"list_date", "2000-01-01"},
-            {"branding", {}},
-            {"share_class_shares_outstanding", 0},
-            {"weighted_shares_outstanding", 0},
-            {"round_lot", 100}
-        }}
+        {"results", std::move(result)}
     };
 
     cb(json_resp(response));
@@ -2723,28 +2767,124 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
 void PolygonController::tickersList(const drogon::HttpRequestPtr& req,
                                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({
+            {"status", "OK"},
+            {"count", 0},
+            {"results", json::array()},
+            {"request_id", utils::generate_id()},
+            {"next_url", nullptr}
+        }));
+        return;
+    }
 
-    // Return sample tickers
-    std::vector<std::string> sample_symbols = {
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "JPM", "V", "JNJ"
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({
+            {"status", "OK"},
+            {"count", 0},
+            {"results", json::array()},
+            {"request_id", utils::generate_id()},
+            {"next_url", nullptr}
+        }));
+        return;
+    }
+
+    auto parse_bool_param = [](const std::string& value) -> std::optional<bool> {
+        if (value.empty()) return std::nullopt;
+        std::string v = value;
+        std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (v == "true" || v == "1" || v == "yes") return true;
+        if (v == "false" || v == "0" || v == "no") return false;
+        return std::nullopt;
     };
 
+    StockTickersQuery query;
+    query.max_snapshot_time = session->time_engine->current_time();
+    query.search = req->getParameter("search");
+    query.market = req->getParameter("market");
+    query.locale = req->getParameter("locale");
+    query.type = req->getParameter("type");
+    query.exchange = req->getParameter("exchange");
+    query.sort = req->getParameter("sort");
+    if (query.sort.empty()) query.sort = "ticker";
+    query.order = req->getParameter("order");
+    if (query.order.empty()) query.order = "asc";
+
+    auto active_param = req->getParameter("active");
+    if (!active_param.empty()) {
+        auto active = parse_bool_param(active_param);
+        if (!active.has_value()) {
+            cb(error_resp("Invalid value for active parameter.", 400));
+            return;
+        }
+        query.active = *active;
+    }
+
+    int limit = 10;
+    auto limit_param = req->getParameter("limit");
+    if (!limit_param.empty()) {
+        try {
+            limit = std::stoi(limit_param);
+        } catch (...) {
+            cb(error_resp("Invalid value for limit parameter.", 400));
+            return;
+        }
+    }
+    if (limit < 1 || limit > 1000) {
+        cb(error_resp("Invalid value for limit parameter.", 400));
+        return;
+    }
+
+    int offset = 0;
+    auto offset_param = req->getParameter("offset");
+    if (!offset_param.empty()) {
+        try {
+            offset = std::stoi(offset_param);
+        } catch (...) {
+            cb(error_resp("Invalid value for offset parameter.", 400));
+            return;
+        }
+    }
+    if (offset < 0) {
+        cb(error_resp("Invalid value for offset parameter.", 400));
+        return;
+    }
+
+    query.limit = static_cast<size_t>(limit + 1);
+    query.offset = static_cast<size_t>(offset);
+
+    auto rows = data_source->get_tickers(query);
+    bool has_more = rows.size() > static_cast<size_t>(limit);
+    if (has_more) rows.resize(static_cast<size_t>(limit));
+
     json results = json::array();
-    for (const auto& sym : sample_symbols) {
-        json ticker_item;
-        ticker_item["ticker"] = sym;
-        ticker_item["name"] = sym + " Inc.";
-        ticker_item["market"] = "stocks";
-        ticker_item["locale"] = "us";
-        ticker_item["primary_exchange"] = "XNAS";
-        ticker_item["type"] = "CS";
-        ticker_item["active"] = true;
-        ticker_item["currency_name"] = "usd";
-        ticker_item["last_updated_utc"] = "2024-01-01T00:00:00Z";
-        ticker_item["cik"] = "0000000000";
-        ticker_item["composite_figi"] = "BBG000000000";
-        ticker_item["share_class_figi"] = "BBG000000000";
-        results.push_back(ticker_item);
+    for (const auto& row : rows) {
+        json item = {
+            {"ticker", row.ticker},
+            {"name", row.name},
+            {"market", row.market},
+            {"locale", row.locale},
+            {"primary_exchange", row.primary_exchange},
+            {"type", row.type},
+            {"active", row.active},
+            {"currency_name", row.currency_name},
+            {"cik", row.cik},
+            {"composite_figi", row.composite_figi},
+            {"share_class_figi", row.share_class_figi}
+        };
+
+        if (!row.raw_json.empty()) {
+            try {
+                auto raw = json::parse(row.raw_json);
+                if (raw.contains("last_updated_utc")) item["last_updated_utc"] = raw["last_updated_utc"];
+            } catch (...) {
+            }
+        }
+        results.push_back(std::move(item));
     }
 
     json response = {
@@ -2754,6 +2894,32 @@ void PolygonController::tickersList(const drogon::HttpRequestPtr& req,
         {"request_id", utils::generate_id()},
         {"next_url", nullptr}
     };
+
+    if (has_more) {
+        std::vector<std::pair<std::string, std::string>> next_params;
+        auto add_param = [&next_params](const std::string& key, const std::string& value) {
+            if (!value.empty()) next_params.emplace_back(key, value);
+        };
+        add_param("search", req->getParameter("search"));
+        add_param("market", req->getParameter("market"));
+        add_param("locale", req->getParameter("locale"));
+        add_param("type", req->getParameter("type"));
+        add_param("exchange", req->getParameter("exchange"));
+        add_param("active", req->getParameter("active"));
+        add_param("sort", query.sort);
+        add_param("order", query.order);
+        add_param("limit", std::to_string(limit));
+        add_param("offset", std::to_string(offset + limit));
+
+        auto query_str = build_query_string(next_params);
+        auto proto = req->getHeader("x-forwarded-proto");
+        if (proto.empty()) proto = "http";
+        auto host = req->getHeader("host");
+        std::string base = host.empty()
+            ? "/v3/reference/tickers"
+            : proto + "://" + host + "/v3/reference/tickers";
+        response["next_url"] = query_str.empty() ? base : (base + "?" + query_str);
+    }
 
     cb(json_resp(response));
 }

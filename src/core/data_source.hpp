@@ -334,10 +334,52 @@ struct StockTickerEventRecord {
     std::string raw_json;
 };
 
+struct StockTickersQuery {
+    std::optional<std::string> ticker;
+    std::optional<std::string> search;
+    std::optional<std::string> market;
+    std::optional<std::string> locale;
+    std::optional<std::string> type;
+    std::optional<std::string> exchange;
+    std::optional<bool> active;
+    std::string sort{"ticker"};
+    std::string order{"asc"};
+    size_t limit{10};
+    size_t offset{0};
+    std::optional<Timestamp> max_snapshot_time;
+};
+
 struct TickerBasicRecord {
+    std::string ticker;
+    std::string ticker_root;
     std::string name;
+    std::string market;
+    std::string locale;
+    std::string primary_exchange;
+    std::string type;
+    bool active{true};
+    std::string currency_name;
     std::string composite_figi;
     std::string cik;
+    std::string share_class_figi;
+    std::string description;
+    std::string homepage_url;
+    std::string phone_number;
+    std::string address1;
+    std::string city;
+    std::string state;
+    std::string postal_code;
+    std::string sic_code;
+    std::string sic_description;
+    std::optional<double> market_cap;
+    std::optional<uint64_t> share_class_shares_outstanding;
+    std::optional<uint64_t> weighted_shares_outstanding;
+    std::optional<uint32_t> total_employees;
+    std::optional<uint32_t> round_lot;
+    std::optional<Timestamp> list_date;
+    std::string logo_url;
+    std::string icon_url;
+    std::string raw_json;
 };
 
 struct StockIpoRecord {
@@ -672,6 +714,7 @@ public:
     virtual std::vector<StockNewsRecord> get_stock_news(const StockNewsQuery& query) = 0;
     virtual std::vector<StockNewsInsightRecord> get_stock_news_insights(const std::vector<std::string>& article_ids) = 0;
     virtual std::vector<StockTickerEventRecord> get_stock_ticker_events(const StockTickerEventsQuery& query) = 0;
+    virtual std::vector<TickerBasicRecord> get_tickers(const StockTickersQuery& query) = 0;
     virtual std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
                                                               std::optional<Timestamp> max_date) = 0;
     virtual std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) = 0;
