@@ -1218,32 +1218,43 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
             where.push_back(fmt::format("has(tickers, '{}')", *query.ticker));
         }
 
-        add_ts("published_utc", query.published_utc, "=");
-        add_ts("published_utc", query.published_utc_gt, ">");
-        add_ts("published_utc", query.published_utc_gte, ">=");
-        add_ts("published_utc", query.published_utc_lt, "<");
-        add_ts("published_utc", query.published_utc_lte, "<=");
+        add_ts("published", query.published_utc, "=");
+        add_ts("published", query.published_utc_gt, ">");
+        add_ts("published", query.published_utc_gte, ">=");
+        add_ts("published", query.published_utc_lt, "<");
+        add_ts("published", query.published_utc_lte, "<=");
 
         if (query.max_published_utc) {
             auto ts = format_timestamp(*query.max_published_utc);
-            where.push_back(fmt::format("published_utc <= toDateTime64('{}', 3)", ts));
+            where.push_back(fmt::format("published <= toDateTime64('{}', 3)", ts));
         }
 
         if (query.cursor_published_utc) {
             auto ts = format_timestamp(*query.cursor_published_utc);
+            uint64_t cursor_id = 0;
+            if (query.cursor_id && !query.cursor_id->empty()) {
+                try {
+                    cursor_id = static_cast<uint64_t>(std::stoull(*query.cursor_id));
+                } catch (...) {
+                    cursor_id = 0;
+                }
+            }
+
             if (query.order == "ascending") {
-                if (query.cursor_id && !query.cursor_id->empty()) {
-                    where.push_back(fmt::format("(published_utc > toDateTime64('{}', 3) OR (published_utc = toDateTime64('{}', 3) AND id > '{}'))",
-                                                ts, ts, *query.cursor_id));
+                if (cursor_id > 0) {
+                    where.push_back(fmt::format(
+                        "(published > toDateTime64('{}', 3) OR (published = toDateTime64('{}', 3) AND benzinga_id > {}))",
+                        ts, ts, cursor_id));
                 } else {
-                    where.push_back(fmt::format("published_utc > toDateTime64('{}', 3)", ts));
+                    where.push_back(fmt::format("published > toDateTime64('{}', 3)", ts));
                 }
             } else {
-                if (query.cursor_id && !query.cursor_id->empty()) {
-                    where.push_back(fmt::format("(published_utc < toDateTime64('{}', 3) OR (published_utc = toDateTime64('{}', 3) AND id < '{}'))",
-                                                ts, ts, *query.cursor_id));
+                if (cursor_id > 0) {
+                    where.push_back(fmt::format(
+                        "(published < toDateTime64('{}', 3) OR (published = toDateTime64('{}', 3) AND benzinga_id < {}))",
+                        ts, ts, cursor_id));
                 } else {
-                    where.push_back(fmt::format("published_utc < toDateTime64('{}', 3)", ts));
+                    where.push_back(fmt::format("published < toDateTime64('{}', 3)", ts));
                 }
             }
         }
@@ -1264,24 +1275,25 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
         }
 
         std::string sql = fmt::format(R"(
-            SELECT CAST(id AS String),
-                   published_utc,
-                   updated_utc,
-                   CAST(publisher_name AS String),
-                   publisher_homepage_url,
-                   publisher_logo_url,
-                   publisher_favicon_url,
+            SELECT CAST(benzinga_id AS String) AS id,
+                   published AS published_utc,
+                   last_updated AS updated_utc,
+                   CAST('Benzinga' AS String) AS publisher_name,
+                   CAST('https://www.benzinga.com' AS String) AS publisher_homepage_url,
+                   CAST('' AS String) AS publisher_logo_url,
+                   CAST('' AS String) AS publisher_favicon_url,
                    title,
                    author,
-                   article_url,
-                   amp_url,
-                   image_url,
-                   description,
+                   url AS article_url,
+                   url AS amp_url,
+                   if(length(images) > 0, images[1], '') AS image_url,
+                   teaser AS description,
                    CAST(tickers AS Array(String)) AS tickers,
-                   CAST(keywords AS Array(String)) AS keywords
-            FROM stock_news
+                   CAST(channels AS Array(String)) AS channels,
+                   CAST(tags AS Array(String)) AS tags
+            FROM benzinga_news
             {}
-            ORDER BY published_utc {} , id {}
+            ORDER BY published {} , benzinga_id {}
             {}
         )", where_clause, order, order, limit_clause);
 
@@ -1317,7 +1329,14 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
                 n.image_url = block[11]->As<clickhouse::ColumnString>()->At(row);
                 n.description = block[12]->As<clickhouse::ColumnString>()->At(row);
                 n.tickers = read_array(block[13], row);
-                n.keywords = read_array(block[14], row);
+                auto channels = read_array(block[14], row);
+                auto tags = read_array(block[15], row);
+                n.keywords = channels;
+                for (const auto& tag : tags) {
+                    if (std::find(n.keywords.begin(), n.keywords.end(), tag) == n.keywords.end()) {
+                        n.keywords.push_back(tag);
+                    }
+                }
                 out.push_back(std::move(n));
             }
         });

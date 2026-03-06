@@ -66,7 +66,11 @@ std::optional<Fill> MatchingEngine::submit_order(Order& order) {
         return std::nullopt;
     }
 
-    return try_fill(order, it->second);
+    auto fill = try_fill(order, it->second);
+    if (fill && fill->is_partial && tif_allows_enqueue(order)) {
+        pending_orders_[order.id] = order;
+    }
+    return fill;
 }
 
 std::optional<Fill> MatchingEngine::submit_order_with_latency(Order& order, int64_t current_time_ns) {

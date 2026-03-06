@@ -641,21 +641,38 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
     spdlog::info("Session {} loop starting, queue_size={}", session->id, session->event_queue->size());
     try {
         size_t processed = 0;
+        const Timestamp end_time = session->config.end_time;
         while (!session->should_stop.load()) {
+            const auto current_ts = session->time_engine->current_time();
+            if (current_ts >= end_time) {
+                spdlog::info("Session {} reached configured end_time={}, stopping loop",
+                             session->id,
+                             end_time.time_since_epoch().count());
+                break;
+            }
+
             auto ev_opt = session->event_queue->wait_and_pop();
             if (!ev_opt) {
                 spdlog::info("Session {} loop: wait_and_pop returned empty", session->id);
                 break;
             }
             const Event& ev = *ev_opt;
-            auto current_ts = session->time_engine->current_time();
+
+            if (ev.timestamp > end_time) {
+                spdlog::info("Session {} received out-of-window event ts={} (> end={}), stopping loop",
+                             session->id,
+                             ev.timestamp.time_since_epoch().count(),
+                             end_time.time_since_epoch().count());
+                break;
+            }
+
             auto next_open = exec_cfg_.next_market_open_after(current_ts);
-            if (next_open > current_ts && next_open <= ev.timestamp) {
+            if (next_open > current_ts && next_open <= ev.timestamp && next_open <= end_time) {
                 session->time_engine->set_time(next_open);
             }
             if (exec_cfg_.get_market_session(ev.timestamp) == ExecutionConfig::MarketSession::CLOSED) {
                 auto next_open_event = exec_cfg_.next_market_open_after(ev.timestamp);
-                if (next_open_event > ev.timestamp) {
+                if (next_open_event > ev.timestamp && next_open_event <= end_time) {
                     session->time_engine->set_time(next_open_event);
                 }
                 continue;
@@ -672,6 +689,10 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
         }
         spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
         if (!session->should_stop.load()) {
+            // Clamp final session clock to configured end boundary for deterministic status reads.
+            if (session->time_engine->current_time() != end_time) {
+                session->time_engine->set_time(end_time);
+            }
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
         } else {
@@ -1068,6 +1089,14 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
             auto window = std::chrono::seconds(window_secs);
             
             while (!session->should_stop.load() && cursor < end) {
+                const Timestamp sim_now = session->time_engine->current_time();
+                if (sim_now > cursor) {
+                    cursor = sim_now;
+                }
+                if (cursor >= end) {
+                    break;
+                }
+
                 // Get currently subscribed symbols (dynamic, not captured at start)
                 auto symbols = get_stream_symbols(session);
                 
@@ -1243,6 +1272,17 @@ void SessionManager::stop_shared_feeder() {
 }
 
 bool SessionManager::enqueue_event(std::shared_ptr<Session> session, const MarketEvent& ev) {
+    if (!session || !session->event_queue) return false;
+    if (ev.timestamp < session->config.start_time || ev.timestamp > session->config.end_time) {
+        session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+        spdlog::trace("[QueueGuard] session={} dropping market event ts={} outside [{}, {}]",
+                      session->id,
+                      ev.timestamp.time_since_epoch().count(),
+                      session->config.start_time.time_since_epoch().count(),
+                      session->config.end_time.time_since_epoch().count());
+        return false;
+    }
+
     bool ok = false;
     if (ev.type == MarketEventType::QUOTE) {
         ok = session->event_queue->push(ev.timestamp, EventType::QUOTE, ev.quote.symbol,
@@ -1258,6 +1298,17 @@ bool SessionManager::enqueue_event(std::shared_ptr<Session> session, const Marke
 }
 
 bool SessionManager::enqueue_unified_event(std::shared_ptr<Session> session, const UnifiedMarketEvent& ev) {
+    if (!session || !session->event_queue) return false;
+    if (ev.timestamp < session->config.start_time || ev.timestamp > session->config.end_time) {
+        session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+        spdlog::trace("[QueueGuard] session={} dropping unified event ts={} outside [{}, {}]",
+                      session->id,
+                      ev.timestamp.time_since_epoch().count(),
+                      session->config.start_time.time_since_epoch().count(),
+                      session->config.end_time.time_since_epoch().count());
+        return false;
+    }
+
     bool ok = false;
     if (ev.type == UnifiedEventType::QUOTE) {
         ok = session->event_queue->push(ev.timestamp, EventType::QUOTE, ev.quote.symbol,
@@ -1277,6 +1328,16 @@ bool SessionManager::enqueue_unified_event(std::shared_ptr<Session> session, con
 
 bool SessionManager::enqueue_news_event(std::shared_ptr<Session> session, const CompanyNewsRecord& news) {
     if (!session || !session->event_queue) return false;
+    if (news.datetime < session->config.start_time || news.datetime > session->config.end_time) {
+        session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+        spdlog::trace("[QueueGuard] session={} dropping news id={} ts={} outside [{}, {}]",
+                      session->id,
+                      news.id,
+                      news.datetime.time_since_epoch().count(),
+                      session->config.start_time.time_since_epoch().count(),
+                      session->config.end_time.time_since_epoch().count());
+        return false;
+    }
 
     std::string symbol = news.symbol;
     if (symbol.empty()) symbol = news.related;
@@ -1318,7 +1379,22 @@ void SessionManager::start_news_feed_for_symbol(std::shared_ptr<Session> session
     session->feed_threads.push_back(std::make_unique<std::thread>(
         [this, session, token]() {
             if (!data_source_) return;
-            spdlog::info("[NewsSub] session={} token={} query start", session->id, token);
+            const auto query_start = std::max(session->time_engine->current_time(), session->config.start_time);
+            const auto query_end = session->config.end_time;
+            if (query_start >= query_end) {
+                spdlog::info("[NewsSub] session={} token={} skip query start>=end ({} >= {})",
+                             session->id,
+                             token,
+                             query_start.time_since_epoch().count(),
+                             query_end.time_since_epoch().count());
+                return;
+            }
+
+            spdlog::info("[NewsSub] session={} token={} query start={} end={}",
+                         session->id,
+                         token,
+                         query_start.time_since_epoch().count(),
+                         query_end.time_since_epoch().count());
 
             std::vector<CompanyNewsRecord> buffered_news;
             buffered_news.reserve(256);
@@ -1334,13 +1410,13 @@ void SessionManager::start_news_feed_for_symbol(std::shared_ptr<Session> session
 
             try {
                 if (token == "*") {
-                    data_source_->stream_finnhub_market_news(session->config.start_time,
-                                                             session->config.end_time,
+                    data_source_->stream_finnhub_market_news(query_start,
+                                                             query_end,
                                                              collect_news);
                 } else {
                     data_source_->stream_company_news(std::vector<std::string>{token},
-                                                      session->config.start_time,
-                                                      session->config.end_time,
+                                                      query_start,
+                                                      query_end,
                                                       collect_news);
                 }
             } catch (const std::exception& e) {
@@ -1884,8 +1960,22 @@ void SessionManager::update_stream_subscriptions(const std::string& session_id,
             [this, session, symbol]() {
                 if (!data_source_) return;
                 std::vector<std::string> syms = {symbol};
-                spdlog::info("[StreamSub] session={} symbol={} query start", session->id, symbol);
-                data_source_->stream_events(syms, session->config.start_time, session->config.end_time,
+                const auto query_start = std::max(session->time_engine->current_time(), session->config.start_time);
+                const auto query_end = session->config.end_time;
+                if (query_start >= query_end) {
+                    spdlog::info("[StreamSub] session={} symbol={} skip query start>=end ({} >= {})",
+                                 session->id,
+                                 symbol,
+                                 query_start.time_since_epoch().count(),
+                                 query_end.time_since_epoch().count());
+                    return;
+                }
+                spdlog::info("[StreamSub] session={} symbol={} query start={} end={}",
+                             session->id,
+                             symbol,
+                             query_start.time_since_epoch().count(),
+                             query_end.time_since_epoch().count());
+                data_source_->stream_events(syms, query_start, query_end,
                     [this, session](const MarketEvent& ev) {
                         enqueue_event(session, ev);
                     });

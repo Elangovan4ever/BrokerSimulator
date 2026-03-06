@@ -162,6 +162,41 @@ private:
     std::vector<MarketEvent> events_;
 };
 
+class RecordingDataSource : public StubDataSource {
+public:
+    struct StreamQuery {
+        std::vector<std::string> symbols;
+        Timestamp start;
+        Timestamp end;
+    };
+
+    void stream_events(const std::vector<std::string>& symbols,
+                       Timestamp start,
+                       Timestamp end,
+                       const std::function<void(const MarketEvent&)>&) override {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            queries_.push_back(StreamQuery{symbols, start, end});
+        }
+        cv_.notify_all();
+    }
+
+    bool wait_for_queries(size_t min_queries, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [&]() { return queries_.size() >= min_queries; });
+    }
+
+    std::vector<StreamQuery> queries() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return queries_;
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::condition_variable cv_;
+    std::vector<StreamQuery> queries_;
+};
+
 Timestamp make_ts(int64_t ns) {
     return Timestamp{} + std::chrono::nanoseconds(ns);
 }
@@ -710,6 +745,7 @@ TEST(SessionManagerTest, FastForwardConsumesEventsWithoutCallbacks) {
     });
 
     mgr.start_session(session->id);
+    mgr.update_stream_subscriptions(session->id, {"AAPL"}, true);
     mgr.pause_session(session->id);
 
     mgr.fast_forward(session->id, make_ts(t2));
@@ -774,5 +810,99 @@ TEST(SessionManagerTest, MarketImpactAdjustsFillPrice) {
     }
 
     EXPECT_NEAR(fill_price, 100.05, 1e-6);
+    mgr.stop_session(session->id);
+}
+
+TEST(SessionManagerTest, SessionStopsAtConfiguredEndTime) {
+    constexpr int64_t t_in_window = 1'000'000;
+    constexpr int64_t t_out_of_window = 50'000'000;
+    constexpr int64_t t_end = 10'000'000;
+
+    MarketEvent in_window;
+    in_window.timestamp = make_ts(t_in_window);
+    in_window.type = MarketEventType::QUOTE;
+    in_window.quote = QuoteRecord{in_window.timestamp, "AAPL", 100.0, 100, 101.0, 100, 1, 1, 1};
+
+    MarketEvent out_of_window;
+    out_of_window.timestamp = make_ts(t_out_of_window);
+    out_of_window.type = MarketEventType::QUOTE;
+    out_of_window.quote = QuoteRecord{out_of_window.timestamp, "AAPL", 102.0, 100, 103.0, 100, 1, 1, 1};
+
+    auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{in_window, out_of_window});
+    SessionManager mgr(ds);
+
+    SessionConfig cfg;
+    cfg.symbols = {"AAPL"};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(t_end);
+    cfg.speed_factor = 0.0;
+    auto session = mgr.create_session(cfg);
+
+    std::mutex mu;
+    std::condition_variable cv;
+    int quote_events = 0;
+    mgr.add_event_callback([&](const std::string&, const Event& e) {
+        if (e.event_type != EventType::QUOTE) return;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            ++quote_events;
+        }
+        cv.notify_all();
+    });
+
+    mgr.start_session(session->id);
+    mgr.update_stream_subscriptions(session->id, {"AAPL"}, true);
+
+    {
+        std::unique_lock<std::mutex> lock(mu);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(2), [&]() { return quote_events >= 1; }));
+    }
+    session->event_queue->stop();
+
+    bool completed = false;
+    for (int i = 0; i < 200; ++i) {
+        auto s = mgr.get_session(session->id);
+        if (s && s->status == SessionStatus::COMPLETED) {
+            completed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(completed);
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        EXPECT_EQ(quote_events, 1);
+    }
+    EXPECT_EQ(session->time_engine->current_time(), cfg.end_time);
+
+    mgr.stop_session(session->id);
+}
+
+TEST(SessionManagerTest, DynamicSubscriptionStartsFromCurrentSimTime) {
+    auto ds = std::make_shared<RecordingDataSource>();
+    ExecutionConfig exec_cfg;
+    exec_cfg.poll_interval_seconds = 1;
+    SessionManager mgr(ds, exec_cfg);
+
+    SessionConfig cfg;
+    cfg.symbols = {};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(20'000'000);
+    cfg.speed_factor = 0.0;
+    auto session = mgr.create_session(cfg);
+
+    mgr.start_session(session->id);
+
+    const Timestamp expected_floor = make_ts(5'000'000);
+    session->time_engine->set_time(expected_floor);
+    mgr.update_stream_subscriptions(session->id, {"AAPL"}, true);
+
+    ASSERT_TRUE(ds->wait_for_queries(1, std::chrono::seconds(2)));
+    auto queries = ds->queries();
+    ASSERT_FALSE(queries.empty());
+    EXPECT_GE(queries.front().start, expected_floor);
+    EXPECT_LE(queries.front().end, cfg.end_time);
+
     mgr.stop_session(session->id);
 }
