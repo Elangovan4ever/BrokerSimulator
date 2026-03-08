@@ -2416,6 +2416,7 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
                                                                                   Timestamp start_time,
                                                                                   Timestamp end_time,
                                                                                   size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<RecommendationRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -2430,7 +2431,7 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
         ORDER BY period DESC
         {}
     )", symbol, start_str, end_str, limit_clause(limit));
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 RecommendationRecord r;
@@ -2444,9 +2445,19 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
                 out.push_back(std::move(r));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_recommendation_trends failed: {}", e.what());
+        spdlog::warn("ClickHouse get_recommendation_trends failed: {}, reconnecting...", e.what());
         out.clear();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_recommendation_trends retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
@@ -2487,6 +2498,7 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
                                                                                  Timestamp start_time,
                                                                                  Timestamp end_time,
                                                                                  size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<UpgradeDowngradeRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -2506,7 +2518,7 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
         ORDER BY grade_time DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 UpgradeDowngradeRecord u;
@@ -2519,9 +2531,19 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
                 out.push_back(std::move(u));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_upgrades_downgrades failed: {}", e.what());
+        spdlog::warn("ClickHouse get_upgrades_downgrades failed: {}, reconnecting...", e.what());
         out.clear();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_upgrades_downgrades retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
