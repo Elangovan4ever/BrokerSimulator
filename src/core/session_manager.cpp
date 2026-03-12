@@ -37,6 +37,33 @@ std::string normalize_news_token(const std::string& raw) {
     return token;
 }
 
+int64_t session_sim_now_ns(const std::shared_ptr<Session>& session) {
+    if (!session) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
+    int64_t sim_ns = 0;
+    if (session->time_engine) {
+        sim_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            session->time_engine->current_time().time_since_epoch()
+        ).count();
+    }
+    if (sim_ns <= 0) {
+        sim_ns = session->last_event_ns.load(std::memory_order_acquire);
+    }
+    if (sim_ns <= 0) {
+        sim_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            session->config.start_time.time_since_epoch()
+        ).count();
+    }
+    return sim_ns;
+}
+
+Timestamp ns_to_timestamp(int64_t ns) {
+    return Timestamp{} + std::chrono::nanoseconds(ns);
+}
+
 }  // namespace
 
 
@@ -326,8 +353,8 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     if (order.id.empty()) order.id = generate_uuid();
     if (order.client_order_id.empty()) order.client_order_id = order.id;
     order.is_maker = false;
-    int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    int64_t now_ns = session_sim_now_ns(session);
+    Timestamp now_ts = ns_to_timestamp(now_ns);
     order.created_at_ns = now_ns;
     order.submitted_at_ns = now_ns;
     order.updated_at_ns = now_ns;
@@ -341,7 +368,6 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     }
 
     // Basic OPG/CLS handling: constrain to session window.
-    auto now_ts = std::chrono::system_clock::now();
     if (order.tif == TimeInForce::OPG) {
         // Only allow up to 5 minutes after session start.
         Timestamp cutoff = session->config.start_time + std::chrono::minutes(5);
@@ -408,7 +434,7 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     if (exec_cfg_.enable_circuit_breakers) {
         std::lock_guard<std::mutex> lock(session->halt_mutex);
         // Check for expired halts first
-        auto now_ts = std::chrono::system_clock::now();
+        auto now_ts = ns_to_timestamp(session_sim_now_ns(session));
         auto end_it = session->halt_end_times.find(order.symbol);
         if (end_it != session->halt_end_times.end() && now_ts >= end_it->second) {
             // Halt has expired, remove it
@@ -477,7 +503,7 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     }
     {
         Event ev;
-        ev.timestamp = std::chrono::system_clock::now();
+        ev.timestamp = now_ts;
         ev.sequence = 0;
         ev.event_type = EventType::ORDER_NEW;
         ev.symbol = order.symbol;
@@ -541,7 +567,7 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
             order.canceled_at_ns = now_ns;
             upsert_order(session, order);
             Event ev;
-            ev.timestamp = std::chrono::system_clock::now();
+            ev.timestamp = now_ts;
             ev.sequence = 0;
             ev.event_type = EventType::ORDER_CANCEL;
             ev.symbol = order.symbol;
@@ -576,8 +602,7 @@ bool SessionManager::cancel_order(const std::string& session_id, const std::stri
         auto it = session->orders.find(order_id);
         if (it != session->orders.end()) {
             it->second.status = OrderStatus::CANCELED;
-            int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+            int64_t now_ns = session_sim_now_ns(session);
             it->second.updated_at_ns = now_ns;
             it->second.canceled_at_ns = now_ns;
             order_opt = it->second;
@@ -603,7 +628,7 @@ bool SessionManager::cancel_order(const std::string& session_id, const std::stri
     }
     if (canceled) {
         Event ev;
-        ev.timestamp = std::chrono::system_clock::now();
+        ev.timestamp = ns_to_timestamp(session_sim_now_ns(session));
         ev.sequence = 0;
         ev.event_type = EventType::ORDER_CANCEL;
         ev.symbol = order_opt ? order_opt->symbol : "";
@@ -1715,8 +1740,7 @@ void SessionManager::enforce_margin(std::shared_ptr<Session> session) {
         order.tif = TimeInForce::DAY;
         order.qty = std::abs(pos.qty);
         order.status = OrderStatus::NEW;
-        int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        int64_t now_ns = session_sim_now_ns(session);
         order.created_at_ns = now_ns;
         order.submitted_at_ns = now_ns;
         order.updated_at_ns = now_ns;

@@ -159,7 +159,23 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
               AND sip_timestamp >= '{}'
               AND sip_timestamp < '{}'
         )
-        ORDER BY ts ASC, kind ASC
+        ORDER BY ts ASC,
+                 kind ASC,
+                 symbol ASC,
+                 exchange ASC,
+                 bid_exch ASC,
+                 ask_exch ASC,
+                 price ASC,
+                 size ASC,
+                 tape ASC,
+                 conditions ASC,
+                 open ASC,
+                 high ASC,
+                 low ASC,
+                 close ASC,
+                 volume ASC,
+                 vwap ASC,
+                 trade_count ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str);
 
     spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
