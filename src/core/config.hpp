@@ -85,6 +85,15 @@ struct ExecutionConfig {
     // Feed options
     bool enable_shared_feed{false};        // Share data feed across sessions
 
+    // Event processing mode
+    // - live_async: current behavior (best throughput, non-deterministic ordering under async races)
+    // - deterministic_causal: strict deterministic ordering per polling window (still causal, no lookahead)
+    std::string event_processing_mode{"live_async"};
+
+    bool deterministic_causal_mode() const {
+        return event_processing_mode == "deterministic_causal";
+    }
+
     // Polling fallback
     int poll_interval_seconds{0};          // >0 enables polling fallback per window
 
@@ -569,6 +578,8 @@ inline void load_config(Config& cfg, const std::string& path) {
                                                          cfg.execution.enable_forced_liquidation);
         cfg.execution.enable_shared_feed = e.value("enable_shared_feed",
                                                    cfg.execution.enable_shared_feed);
+        cfg.execution.event_processing_mode = e.value("event_processing_mode",
+                                                      cfg.execution.event_processing_mode);
         cfg.execution.enable_market_impact = e.value("enable_market_impact",
                                                     cfg.execution.enable_market_impact);
         cfg.execution.market_impact_bps = e.value("market_impact_bps",

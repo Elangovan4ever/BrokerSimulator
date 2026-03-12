@@ -210,6 +210,13 @@ void SessionManager::start_session(const std::string& session_id) {
     if (exec_cfg_.enable_shared_feed) {
         start_shared_feeder();
     }
+
+    if (exec_cfg_.deterministic_causal_mode() || exec_cfg_.poll_interval_seconds > 0) {
+        if (!session->polling_thread) {
+            start_polling_feeder(session);
+        }
+    }
+
     session->worker_thread = std::make_unique<std::thread>(
         [this, session]() { run_session_loop(session); }
     );
@@ -1076,82 +1083,253 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
     auto start = session->config.start_time;
     auto end = session->config.end_time;
     int window_secs = exec_cfg_.poll_interval_seconds;
-    if (window_secs <= 0) return;
-    
+    if (window_secs <= 0) {
+        if (exec_cfg_.deterministic_causal_mode()) {
+            window_secs = 1;
+        } else {
+            return;
+        }
+    }
+
     auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
     auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
-    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} window_secs={}",
-                 session->id, start_ns, end_ns, window_secs);
-    
+    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} window_secs={} mode={}",
+                 session->id,
+                 start_ns,
+                 end_ns,
+                 window_secs,
+                 exec_cfg_.event_processing_mode);
+
     session->polling_thread = std::make_unique<std::thread>(
         [this, session, start, end, window_secs]() {
             Timestamp cursor = start;
             auto window = std::chrono::seconds(window_secs);
-            
-            while (!session->should_stop.load() && cursor < end) {
-                const Timestamp sim_now = session->time_engine->current_time();
-                if (sim_now > cursor) {
-                    cursor = sim_now;
+            const double speed = session->config.speed_factor > 0.0 ? session->config.speed_factor : 1.0;
+            const auto loop_sleep = std::chrono::milliseconds(std::max<int64_t>(2, static_cast<int64_t>((window_secs * 1000.0) / speed)));
+            const auto idle_sleep = std::chrono::milliseconds(50);
+
+            auto build_window_symbols = [this, session]() {
+                auto symbols = get_stream_symbols(session);
+                std::sort(symbols.begin(), symbols.end());
+                symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+                return symbols;
+            };
+
+            auto build_news_tokens = [this, session]() {
+                std::vector<std::string> tokens;
+                {
+                    std::lock_guard<std::mutex> lock(stream_mutex_);
+                    auto it = stream_news_symbol_counts_.find(session->id);
+                    if (it != stream_news_symbol_counts_.end()) {
+                        tokens.reserve(it->second.size());
+                        for (const auto& kv : it->second) {
+                            if (kv.second > 0) tokens.push_back(kv.first);
+                        }
+                    }
                 }
+                std::sort(tokens.begin(), tokens.end());
+                tokens.erase(std::unique(tokens.begin(), tokens.end()), tokens.end());
+                return tokens;
+            };
+
+            while (!session->should_stop.load() && cursor < end) {
                 if (cursor >= end) {
                     break;
                 }
 
-                // Get currently subscribed symbols (dynamic, not captured at start)
-                auto symbols = get_stream_symbols(session);
-                
-                if (symbols.empty()) {
-                    spdlog::debug("[PollingFeeder] session={} no symbols subscribed, sleeping", session->id);
-                    std::this_thread::sleep_for(window);
-                    continue;
-                }
-                
-                std::string symbols_str;
-                for (const auto& s : symbols) {
-                    if (!symbols_str.empty()) symbols_str += ",";
-                    symbols_str += s;
-                }
-                spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
-                              session->id, symbols.size(), symbols_str);
-                
+                auto symbols = build_window_symbols();
                 Timestamp window_end = std::min(cursor + window, end);
-                
-                if (session->config.live_bar_aggr_source == "1s") {
-                    data_source_->stream_events_with_bars(
-                        symbols, cursor, window_end,
-                        [this, session](const UnifiedMarketEvent& ev) {
-                            const std::string& symbol =
-                                (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
-                                (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
-                                ev.bar.symbol;
-                            
-                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
-                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
-                                              session->id, symbol);
+
+                if (exec_cfg_.deterministic_causal_mode()) {
+                    struct OrderedFeedEvent {
+                        Timestamp ts;
+                        int kind;  // 0 quote, 1 trade, 2 bar, 3 news
+                        std::string symbol;
+                        uint64_t ordinal;
+                        std::variant<UnifiedMarketEvent, MarketEvent, CompanyNewsRecord> payload;
+                    };
+
+                    std::vector<OrderedFeedEvent> batch;
+                    batch.reserve(4096);
+                    uint64_t ordinal = 0;
+
+                    if (!symbols.empty()) {
+                        std::string symbols_str;
+                        for (const auto& sym : symbols) {
+                            if (!symbols_str.empty()) symbols_str += ",";
+                            symbols_str += sym;
+                        }
+                        spdlog::debug("[PollingFeeder] session={} deterministic poll {} symbols: [{}]",
+                                      session->id,
+                                      symbols.size(),
+                                      symbols_str);
+
+                        if (session->config.live_bar_aggr_source == "1s") {
+                            data_source_->stream_events_with_bars(
+                                symbols,
+                                cursor,
+                                window_end,
+                                [this, session, &batch, &ordinal](const UnifiedMarketEvent& ev) {
+                                    const std::string symbol =
+                                        (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                                        (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                                        ev.bar.symbol;
+
+                                    if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                        return;
+                                    }
+
+                                    int kind = 2;
+                                    if (ev.type == UnifiedEventType::QUOTE) kind = 0;
+                                    else if (ev.type == UnifiedEventType::TRADE) kind = 1;
+
+                                    batch.push_back(OrderedFeedEvent{ev.timestamp, kind, symbol, ordinal++, ev});
+                                }
+                            );
+                        } else {
+                            data_source_->stream_events(
+                                symbols,
+                                cursor,
+                                window_end,
+                                [this, session, &batch, &ordinal](const MarketEvent& ev) {
+                                    const std::string symbol =
+                                        (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
+
+                                    if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                        return;
+                                    }
+
+                                    const int kind = (ev.type == MarketEventType::QUOTE) ? 0 : 1;
+                                    batch.push_back(OrderedFeedEvent{ev.timestamp, kind, symbol, ordinal++, ev});
+                                }
+                            );
+                        }
+                    }
+
+                    auto news_tokens = build_news_tokens();
+                    for (const auto& token : news_tokens) {
+                        if (session->should_stop.load(std::memory_order_acquire)) break;
+                        if (!is_news_symbol_subscribed(session->id, token)) continue;
+
+                        auto collect_news = [this, session, token, &batch, &ordinal](const CompanyNewsRecord& news) {
+                            if (news.datetime < session->config.start_time || news.datetime > session->config.end_time) {
                                 return;
                             }
-                            enqueue_unified_event(session, ev);
+                            if (!is_news_symbol_subscribed(session->id, token)) {
+                                return;
+                            }
+
+                            CompanyNewsRecord normalized = news;
+                            if (normalized.symbol.empty() && token != "*") {
+                                normalized.symbol = token;
+                            }
+                            const std::string event_symbol =
+                                !normalized.symbol.empty() ? normalized.symbol : token;
+                            batch.push_back(OrderedFeedEvent{normalized.datetime, 3, event_symbol, ordinal++, normalized});
+                        };
+
+                        try {
+                            if (token == "*") {
+                                data_source_->stream_finnhub_market_news(cursor, window_end, collect_news);
+                            } else {
+                                data_source_->stream_company_news(std::vector<std::string>{token}, cursor, window_end, collect_news);
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[PollingFeeder] session={} deterministic news query failed token={} err={}",
+                                         session->id,
+                                         token,
+                                         e.what());
                         }
-                    );
+                    }
+
+                    std::sort(batch.begin(), batch.end(), [](const OrderedFeedEvent& a, const OrderedFeedEvent& b) {
+                        if (a.ts != b.ts) return a.ts < b.ts;
+                        if (a.kind != b.kind) return a.kind < b.kind;
+                        if (a.symbol != b.symbol) return a.symbol < b.symbol;
+                        return a.ordinal < b.ordinal;
+                    });
+
+                    size_t enqueued = 0;
+                    for (const auto& item : batch) {
+                        if (session->should_stop.load(std::memory_order_acquire)) break;
+
+                        bool ok = false;
+                        if (std::holds_alternative<UnifiedMarketEvent>(item.payload)) {
+                            ok = enqueue_unified_event(session, std::get<UnifiedMarketEvent>(item.payload));
+                        } else if (std::holds_alternative<MarketEvent>(item.payload)) {
+                            ok = enqueue_event(session, std::get<MarketEvent>(item.payload));
+                        } else {
+                            ok = enqueue_news_event(session, std::get<CompanyNewsRecord>(item.payload));
+                        }
+
+                        if (ok) {
+                            ++enqueued;
+                        }
+                    }
+
+                    spdlog::debug("[PollingFeeder] session={} deterministic batch window_start={} window_end={} events={} enqueued={}",
+                                  session->id,
+                                  cursor.time_since_epoch().count(),
+                                  window_end.time_since_epoch().count(),
+                                  batch.size(),
+                                  enqueued);
                 } else {
-                    data_source_->stream_events(symbols, cursor, window_end, 
-                        [this, session](const MarketEvent& ev) {
-                            const std::string& symbol = 
-                                (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
-                            
-                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
-                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
-                                              session->id, symbol);
-                                return;
+                    if (symbols.empty()) {
+                        spdlog::debug("[PollingFeeder] session={} no symbols subscribed, sleeping", session->id);
+                        std::this_thread::sleep_for(idle_sleep);
+                        continue;
+                    }
+
+                    std::string symbols_str;
+                    for (const auto& s : symbols) {
+                        if (!symbols_str.empty()) symbols_str += ",";
+                        symbols_str += s;
+                    }
+                    spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
+                                  session->id,
+                                  symbols.size(),
+                                  symbols_str);
+
+                    if (session->config.live_bar_aggr_source == "1s") {
+                        data_source_->stream_events_with_bars(
+                            symbols, cursor, window_end,
+                            [this, session](const UnifiedMarketEvent& ev) {
+                                const std::string& symbol =
+                                    (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                                    (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                                    ev.bar.symbol;
+
+                                if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                    spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                                  session->id,
+                                                  symbol);
+                                    return;
+                                }
+                                enqueue_unified_event(session, ev);
                             }
-                            enqueue_event(session, ev);
-                        }
-                    );
+                        );
+                    } else {
+                        data_source_->stream_events(symbols, cursor, window_end,
+                            [this, session](const MarketEvent& ev) {
+                                const std::string& symbol =
+                                    (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
+
+                                if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                    spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                                  session->id,
+                                                  symbol);
+                                    return;
+                                }
+                                enqueue_event(session, ev);
+                            }
+                        );
+                    }
                 }
+
                 cursor = window_end;
-                std::this_thread::sleep_for(window);
+                std::this_thread::sleep_for(loop_sleep);
             }
-            
+
             spdlog::info("[PollingFeeder] session={} polling feeder stopped", session->id);
         }
     );
@@ -1374,6 +1552,13 @@ void SessionManager::start_news_feed_for_symbol(std::shared_ptr<Session> session
             return;
         }
         started_tokens.insert(token);
+    }
+
+    if (exec_cfg_.deterministic_causal_mode()) {
+        spdlog::info("[NewsSub] session={} token={} deterministic mode: polling feeder owns news streaming",
+                     session->id,
+                     token);
+        return;
     }
 
     session->feed_threads.push_back(std::make_unique<std::thread>(
@@ -1924,6 +2109,7 @@ void SessionManager::update_stream_subscriptions(const std::string& session_id,
     }
     
     std::vector<std::string> new_symbols;
+    const bool use_polling_feeder = exec_cfg_.deterministic_causal_mode() || exec_cfg_.poll_interval_seconds > 0;
     
     {
         std::lock_guard<std::mutex> lock(stream_mutex_);
@@ -1953,35 +2139,49 @@ void SessionManager::update_stream_subscriptions(const std::string& session_id,
     }
     
     // Load data for new subscriptions
-    for (const auto& symbol : new_symbols) {
-        if (session->status != SessionStatus::RUNNING) continue;
-        spdlog::info("[StreamSub] session={} LOADING DATA for symbol={}", session_id, symbol);
-        session->feed_threads.push_back(std::make_unique<std::thread>(
-            [this, session, symbol]() {
-                if (!data_source_) return;
-                std::vector<std::string> syms = {symbol};
-                const auto query_start = std::max(session->time_engine->current_time(), session->config.start_time);
-                const auto query_end = session->config.end_time;
-                if (query_start >= query_end) {
-                    spdlog::info("[StreamSub] session={} symbol={} skip query start>=end ({} >= {})",
+    if (use_polling_feeder) {
+        if (!new_symbols.empty()) {
+            std::string symbols_csv;
+            for (const auto& sym : new_symbols) {
+                if (!symbols_csv.empty()) symbols_csv += ",";
+                symbols_csv += sym;
+            }
+            spdlog::info("[StreamSub] session={} deferred {} new symbols to polling feeder: [{}]",
+                         session_id,
+                         new_symbols.size(),
+                         symbols_csv);
+        }
+    } else {
+        for (const auto& symbol : new_symbols) {
+            if (session->status != SessionStatus::RUNNING) continue;
+            spdlog::info("[StreamSub] session={} LOADING DATA for symbol={}", session_id, symbol);
+            session->feed_threads.push_back(std::make_unique<std::thread>(
+                [this, session, symbol]() {
+                    if (!data_source_) return;
+                    std::vector<std::string> syms = {symbol};
+                    const auto query_start = std::max(session->time_engine->current_time(), session->config.start_time);
+                    const auto query_end = session->config.end_time;
+                    if (query_start >= query_end) {
+                        spdlog::info("[StreamSub] session={} symbol={} skip query start>=end ({} >= {})",
+                                     session->id,
+                                     symbol,
+                                     query_start.time_since_epoch().count(),
+                                     query_end.time_since_epoch().count());
+                        return;
+                    }
+                    spdlog::info("[StreamSub] session={} symbol={} query start={} end={}",
                                  session->id,
                                  symbol,
                                  query_start.time_since_epoch().count(),
                                  query_end.time_since_epoch().count());
-                    return;
+                    data_source_->stream_events(syms, query_start, query_end,
+                        [this, session](const MarketEvent& ev) {
+                            enqueue_event(session, ev);
+                        });
+                    spdlog::info("[StreamSub] session={} symbol={} query done", session->id, symbol);
                 }
-                spdlog::info("[StreamSub] session={} symbol={} query start={} end={}",
-                             session->id,
-                             symbol,
-                             query_start.time_since_epoch().count(),
-                             query_end.time_since_epoch().count());
-                data_source_->stream_events(syms, query_start, query_end,
-                    [this, session](const MarketEvent& ev) {
-                        enqueue_event(session, ev);
-                    });
-                spdlog::info("[StreamSub] session={} symbol={} query done", session->id, symbol);
-            }
-        ));
+            ));
+        }
     }
 }
 
