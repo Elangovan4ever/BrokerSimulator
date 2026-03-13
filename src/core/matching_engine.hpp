@@ -34,6 +34,7 @@ struct Order {
     bool stop_triggered{false};
     bool is_maker{false};
     bool extended_hours{false};   // Allow execution during pre-market/after-hours
+    int64_t decision_time_ns{0};  // Optional simulator execution anchor from strategy decision time
     int64_t min_exec_timestamp{0};
     OrderStatus status{OrderStatus::NEW};
     int64_t created_at_ns{0};

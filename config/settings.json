@@ -33,7 +33,7 @@
     "enable_slippage": false,
     "fixed_slippage_bps": 0.0,
     "poll_interval_seconds": 1,
-    "event_processing_mode": "live_async"
+    "event_processing_mode": "deterministic_causal"
   },
   "websocket": {
     "queue_size": 1000,

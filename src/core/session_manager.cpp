@@ -64,6 +64,53 @@ Timestamp ns_to_timestamp(int64_t ns) {
     return Timestamp{} + std::chrono::nanoseconds(ns);
 }
 
+std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSource>& data_source,
+                                                  const std::shared_ptr<Session>& session,
+                                                  const Order& order,
+                                                  Timestamp decision_time) {
+    if (!data_source) {
+        return std::nullopt;
+    }
+
+    const auto query_end = decision_time + std::chrono::seconds(90);
+
+    auto trades = data_source->get_trades(order.symbol, decision_time, query_end, 1);
+    if (!trades.empty() && trades.front().price > 0.0) {
+        return trades.front().price;
+    }
+
+    auto quotes = data_source->get_quotes(order.symbol, decision_time, query_end, 1);
+    if (!quotes.empty()) {
+        const auto& q = quotes.front();
+        if (order.side == OrderSide::BUY && q.ask_price > 0.0) {
+            return q.ask_price;
+        }
+        if (order.side == OrderSide::SELL && q.bid_price > 0.0) {
+            return q.bid_price;
+        }
+        if (q.bid_price > 0.0 && q.ask_price > 0.0) {
+            return (q.bid_price + q.ask_price) / 2.0;
+        }
+    }
+
+    auto bars = data_source->get_bars(order.symbol, decision_time, query_end, 1, "minute", 1);
+    if (!bars.empty() && bars.front().close > 0.0) {
+        return bars.front().close;
+    }
+
+    auto nbbo = session->matching_engine->get_nbbo(order.symbol);
+    if (nbbo) {
+        if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) {
+            return nbbo->ask_price;
+        }
+        if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) {
+            return nbbo->bid_price;
+        }
+    }
+
+    return std::nullopt;
+}
+
 }  // namespace
 
 
@@ -354,17 +401,22 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     if (order.client_order_id.empty()) order.client_order_id = order.id;
     order.is_maker = false;
     int64_t now_ns = session_sim_now_ns(session);
-    Timestamp now_ts = ns_to_timestamp(now_ns);
-    order.created_at_ns = now_ns;
-    order.submitted_at_ns = now_ns;
-    order.updated_at_ns = now_ns;
+    int64_t order_clock_ns = order.decision_time_ns > 0 ? order.decision_time_ns : now_ns;
+    Timestamp order_clock_ts = ns_to_timestamp(order_clock_ns);
+    order.created_at_ns = order_clock_ns;
+    order.submitted_at_ns = order_clock_ns;
+    order.updated_at_ns = order_clock_ns;
     if (exec_cfg_.enable_latency && exec_cfg_.fixed_latency_us > 0) {
-        int64_t base_ns = session->last_event_ns.load(std::memory_order_acquire);
-        if (base_ns == 0) {
-            base_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                session->config.start_time.time_since_epoch()).count();
+        if (order.decision_time_ns > 0) {
+            order.min_exec_timestamp = order_clock_ns;
+        } else {
+            int64_t base_ns = session->last_event_ns.load(std::memory_order_acquire);
+            if (base_ns == 0) {
+                base_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    session->config.start_time.time_since_epoch()).count();
+            }
+            order.min_exec_timestamp = base_ns + exec_cfg_.fixed_latency_us * 1000;
         }
-        order.min_exec_timestamp = base_ns + exec_cfg_.fixed_latency_us * 1000;
     }
 
     // Basic OPG/CLS handling: constrain to session window.
@@ -372,14 +424,14 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
         // Only allow up to 5 minutes after session start.
         Timestamp cutoff = session->config.start_time + std::chrono::minutes(5);
         order.expire_at = cutoff;
-        if (now_ts > cutoff) {
+        if (order_clock_ts > cutoff) {
             spdlog::warn("Order rejected: OPG past window id={}", order.id);
             return {};
         }
     } else if (order.tif == TimeInForce::CLS) {
         // Set expiry at session end; allow submits only during session.
         order.expire_at = session->config.end_time;
-        if (now_ts > session->config.end_time) {
+        if (order_clock_ts > session->config.end_time) {
             spdlog::warn("Order rejected: CLS past session end id={}", order.id);
             return {};
         }
@@ -479,8 +531,26 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
         }
     }
 
-    auto fill = session->matching_engine->submit_order(order);
-    if (fill && fill->fill_qty > 0.0) {
+    std::optional<Fill> fill;
+    const bool use_decision_fill = order.decision_time_ns > 0
+        && order.type == OrderType::MARKET
+        && order.qty.has_value()
+        && order.qty.value() > 0.0;
+
+    if (use_decision_fill) {
+        auto decision_price = resolve_decision_fill_price(api_data_source_, session, order, order_clock_ts);
+        if (decision_price && *decision_price > 0.0) {
+            fill = Fill{order.id, order.qty.value(), *decision_price, order_clock_ns, false};
+            spdlog::debug("Decision-time fill for order {} at {}", order.id, *decision_price);
+        } else {
+            spdlog::warn("Decision-time fill fallback to matching engine for order {} (price unavailable)", order.id);
+            fill = session->matching_engine->submit_order(order);
+        }
+    } else {
+        fill = session->matching_engine->submit_order(order);
+    }
+
+    if (fill && fill->fill_qty > 0.0 && !use_decision_fill) {
         // Matching engine mutates immediate fills on the local order instance.
         // SessionManager applies fills via process_fill(); normalize here to avoid double-counting.
         if (order.filled_qty >= fill->fill_qty) {
@@ -498,12 +568,12 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
         std::lock_guard<std::mutex> lock(session->orders_mutex);
         auto it = session->orders.find(order.id);
         if (it != session->orders.end()) {
-            it->second.updated_at_ns = now_ns;
+            it->second.updated_at_ns = order_clock_ns;
         }
     }
     {
         Event ev;
-        ev.timestamp = now_ts;
+        ev.timestamp = order_clock_ts;
         ev.sequence = 0;
         ev.event_type = EventType::ORDER_NEW;
         ev.symbol = order.symbol;
@@ -563,11 +633,11 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
         if (remaining > 0.0 && (order.tif == TimeInForce::IOC || order.tif == TimeInForce::FOK)) {
             order.filled_qty += fill ? fill->fill_qty : 0.0;
             order.status = OrderStatus::CANCELED;
-            order.updated_at_ns = now_ns;
-            order.canceled_at_ns = now_ns;
+            order.updated_at_ns = order_clock_ns;
+            order.canceled_at_ns = order_clock_ns;
             upsert_order(session, order);
             Event ev;
-            ev.timestamp = now_ts;
+            ev.timestamp = order_clock_ts;
             ev.sequence = 0;
             ev.event_type = EventType::ORDER_CANCEL;
             ev.symbol = order.symbol;
