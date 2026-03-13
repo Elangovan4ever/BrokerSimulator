@@ -390,6 +390,22 @@ void AlpacaController::submitOrder(const drogon::HttpRequestPtr& req,
             order.trail_percent = body["trail_percent"].get<double>();
         }
 
+        if (body.contains("decision_time") && !body["decision_time"].is_null()) {
+            if (body["decision_time"].is_string()) {
+                auto parsed = utils::parse_ts_any(body["decision_time"].get<std::string>());
+                if (!parsed) {
+                    cb(error_resp("invalid decision_time", 400));
+                    return;
+                }
+                order.decision_time_ns = utils::ts_to_ns(*parsed);
+            } else if (body["decision_time"].is_number_integer()) {
+                order.decision_time_ns = body["decision_time"].get<int64_t>();
+            } else {
+                cb(error_resp("invalid decision_time", 400));
+                return;
+            }
+        }
+
         // Extended hours not supported in simulation
 
         // Submit order
