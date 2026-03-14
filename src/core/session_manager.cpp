@@ -45,30 +45,68 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         return std::nullopt;
     }
 
-    const auto query_end = decision_time + std::chrono::seconds(90);
-
-    auto trades = data_source->get_trades(order.symbol, decision_time, query_end, 1);
-    if (!trades.empty() && trades.front().price > 0.0) {
-        return trades.front().price;
-    }
-
-    auto quotes = data_source->get_quotes(order.symbol, decision_time, query_end, 1);
-    if (!quotes.empty()) {
-        const auto& q = quotes.front();
+    auto quote_fill_price = [&](const QuoteRecord& q) -> std::optional<double> {
         if (order.side == OrderSide::BUY && q.ask_price > 0.0) return q.ask_price;
         if (order.side == OrderSide::SELL && q.bid_price > 0.0) return q.bid_price;
         if (q.bid_price > 0.0 && q.ask_price > 0.0) return (q.bid_price + q.ask_price) / 2.0;
+        return std::nullopt;
+    };
+
+    // Prefer strictly causal forward ticks right after decision time.
+    const auto forward_end = decision_time + std::chrono::seconds(90);
+
+    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 1);
+    if (!trades.empty() && trades.front().price > 0.0) {
+        spdlog::debug("decision_fill source=trade symbol={} ts={} price={}", order.symbol,
+                     std::chrono::duration_cast<std::chrono::nanoseconds>(trades.front().timestamp.time_since_epoch()).count(),
+                     trades.front().price);
+        return trades.front().price;
     }
 
-    auto bars = data_source->get_bars(order.symbol, decision_time, query_end, 1, "minute", 1);
+    auto quotes = data_source->get_quotes(order.symbol, decision_time, forward_end, 1);
+    if (!quotes.empty()) {
+        if (auto px = quote_fill_price(quotes.front())) {
+            spdlog::debug("decision_fill source=quote symbol={} ts={} bid={} ask={} chosen={}", order.symbol,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(quotes.front().timestamp.time_since_epoch()).count(),
+                         quotes.front().bid_price, quotes.front().ask_price, *px);
+            return px;
+        }
+    }
+
+    auto bars = data_source->get_bars(order.symbol, decision_time, forward_end, 1, "minute", 1);
     if (!bars.empty() && bars.front().close > 0.0) {
+        spdlog::debug("decision_fill source=forward_bar symbol={} ts={} close={}", order.symbol,
+                     std::chrono::duration_cast<std::chrono::nanoseconds>(bars.front().timestamp.time_since_epoch()).count(),
+                     bars.front().close);
         return bars.front().close;
     }
 
+    // Deterministic fallback: use the latest completed minute bar at-or-before decision time.
+    const auto lookback_start = decision_time - std::chrono::minutes(60);
+    const auto lookback_end = decision_time + std::chrono::milliseconds(1);
+    auto prior_bars = data_source->get_bars(order.symbol, lookback_start, lookback_end, 1, "minute", 0);
+    for (auto it = prior_bars.rbegin(); it != prior_bars.rend(); ++it) {
+        if (it->timestamp <= decision_time && it->close > 0.0) {
+            spdlog::debug("decision_fill source=lookback_bar symbol={} ts={} close={}", order.symbol,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(it->timestamp.time_since_epoch()).count(),
+                         it->close);
+            return it->close;
+        }
+    }
+
+    // Last resort (non-deterministic) compatibility fallback.
     auto nbbo = session->matching_engine->get_nbbo(order.symbol);
     if (nbbo) {
-        if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) return nbbo->ask_price;
-        if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) return nbbo->bid_price;
+        if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) {
+            spdlog::debug("decision_fill source=nbbo symbol={} bid={} ask={} chosen={}", order.symbol,
+                         nbbo->bid_price, nbbo->ask_price, nbbo->ask_price);
+            return nbbo->ask_price;
+        }
+        if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) {
+            spdlog::debug("decision_fill source=nbbo symbol={} bid={} ask={} chosen={}", order.symbol,
+                         nbbo->bid_price, nbbo->ask_price, nbbo->bid_price);
+            return nbbo->bid_price;
+        }
     }
 
     return std::nullopt;
@@ -939,7 +977,10 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
     upsert_order(session, order);
 
     Fill applied_fill = fill;
-    if (exec_cfg_.enable_market_impact && exec_cfg_.market_impact_bps > 0.0) {
+    const bool lock_decision_fill_price = order.decision_time_ns > 0
+        && fill.timestamp == order.decision_time_ns;
+
+    if (!lock_decision_fill_price && exec_cfg_.enable_market_impact && exec_cfg_.market_impact_bps > 0.0) {
         auto nbbo = session->matching_engine->get_nbbo(order.symbol);
         if (nbbo) {
             double available = order.side == OrderSide::BUY ? nbbo->ask_size : nbbo->bid_size;
@@ -954,7 +995,7 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
             }
         }
     }
-    if (exec_cfg_.enable_slippage && exec_cfg_.fixed_slippage_bps != 0.0) {
+    if (!lock_decision_fill_price && exec_cfg_.enable_slippage && exec_cfg_.fixed_slippage_bps != 0.0) {
         double bps = exec_cfg_.fixed_slippage_bps / 10000.0;
         if (order.side == OrderSide::BUY) {
             applied_fill.fill_price *= (1.0 + bps);

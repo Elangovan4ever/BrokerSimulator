@@ -181,6 +181,7 @@ struct StockSplitsQuery {
 };
 
 struct StockNewsQuery {
+    std::string feed{"polygon_news"};
     std::optional<std::string> ticker;
     std::optional<Timestamp> published_utc;
     std::optional<Timestamp> published_utc_gt;

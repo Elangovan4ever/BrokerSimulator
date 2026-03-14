@@ -1325,6 +1325,15 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
     StockNewsQuery query;
     query.max_published_utc = session->time_engine->current_time();
 
+    auto feed = get_param("feed");
+    if (feed.empty()) feed = "polygon_news";
+    if (feed != "polygon_news" && feed != "benzinga_news") {
+        cb(error_resp("Invalid value for feed parameter.", 400));
+        return;
+    }
+    query.feed = feed;
+    if (!has_cursor) param_values["feed"] = feed;
+
     std::string order = get_param("order");
     if (order.empty()) order = "descending";
     if (order == "asc") order = "ascending";
@@ -1453,6 +1462,7 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
 
         std::vector<std::string> order_keys = {
             "ap", "as",
+            "feed",
             "ticker",
             "published_utc", "published_utc.gte", "published_utc.gt",
             "published_utc.lte", "published_utc.lt",
