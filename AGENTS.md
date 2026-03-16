@@ -1,70 +1,170 @@
-# BrokerSimulator Agent Notes
+# AGENTS.md — BrokerSimulator (Current Operating Instructions)
 
-This repo hosts the C++ BrokerSimulator (Drogon) plus a React manager UI and integration tests.
+This file defines the execution contract for AI agents working in BrokerSimulator.
+It reflects current behavior in this repo and its role in ElanTradePro integration.
 
-## Services and Ports
-- Control service: `http://<host>:8000`
-- Alpaca trading simulator: `http://<host>:8100`
-- Polygon data simulator: `http://<host>:8200`
-- Finnhub data simulator: `http://<host>:8300`
-- Manager UI runs locally (Vite) and proxies to the services.
-- Default host in tests: `elanlinux` (same LAN).
+Last updated: 2026-03-14
 
-## Key Directories
-- `src/`: C++ simulator code (control, alpaca, polygon, finnhub, websocket).
-- `manager-ui/`: React UI.
-- `integration-test/`: Jest/TypeScript integration tests.
-- `requirements/`: Requirements and design docs.
-- `scripts/`, `start.sh`, `stop.sh`, `start_ui.sh`, `stop_ui.sh`: launcher helpers.
+---
 
-## Simulation Rules
-- No lookahead: REST APIs must not reveal data after current simulated time.
-- Past data before current simulated time must be available.
-- Session start/end times gate the replay engine and websocket streaming, not historical REST access.
+## 1) Hard Rules (Always Follow)
 
-## Session Control
-- Sessions are created via the control service, started with `/sessions/{id}/start`.
-- `session_id` can be passed as a query param to Alpaca/Polygon/Finnhub endpoints.
-- Sessions have `current_time` and `speed_factor` (time travel behavior).
+1. If simulator restart is needed, run it yourself:
+   - `./start.sh restart`
+   - Do not ask the user to run restart commands.
+2. After each user request handled in this repo, append one line to:
+   - `codex_history.log`
+   - Include timestamp + request summary + action taken.
+3. Do not silently revert user changes.
+4. If unexpected unrelated changes appear, pause and ask.
+5. Simulator behavior must remain live-like for replay:
+   - no future-data leakage beyond current simulated time.
 
-## Data Sources
-- ClickHouse database: `market_data` (not `polygon`).
-- Polygon data tables: `stock_trades`, `stock_quotes`, `stock_*_bars`, `ticker_details`,
-  `stock_dividends`, `stock_splits`, `stock_news`, `stock_short_interest`,
-  `stock_short_volume`, `stock_ticker_events`, `stock_balance_sheets`.
-- Finnhub tables (synced by `polygonsync` on elanlinux):
-  - Global: `finnhub_earnings_calendar`, `finnhub_ipo_calendar`, `finnhub_market_news`
-  - Daily per-symbol: `finnhub_company_news`, `finnhub_upgrades_downgrades`,
-    `finnhub_insider_transactions`
-  - Weekly per-symbol: `finnhub_sec_filings`, `finnhub_dividends`,
-    `finnhub_congressional_trading`, `finnhub_insider_sentiment`,
-    `finnhub_recommendation_trends`, `finnhub_price_targets`,
-    `finnhub_eps_estimates`, `finnhub_revenue_estimates`,
-    `finnhub_earnings_history`, `finnhub_social_sentiment`,
-    `finnhub_company_profiles`, `finnhub_basic_financials`,
-    `finnhub_ownership`, `finnhub_company_peers`, `finnhub_news_sentiment`
-  - Additional: `finnhub_financials_reported`, `finnhub_financials_standardized`
-- ClickHouse LowCardinality columns must be `CAST(... AS String)` in SQL.
+---
 
-## Alpaca Trading API (Simulator)
-- Account: `/v2/account`
-- Orders: `/v2/orders`, `/v2/orders/{id}`, `/v2/orders:by_client_order_id`
-- Positions: `/v2/positions`, `/v2/positions/{symbol}`
-- Cancel/replace endpoints supported; notional orders return 400.
-- Market data endpoints exist but are not used for Alpaca tests.
+## 2) Repo Role and Scope
 
-## WebSockets
-- Status updates: `/ws/status` (session status + current time).
-- Alpaca stream: `/alpaca/stream` or `/alpaca/ws`.
+BrokerSimulator is the live-like market/trading simulator for ElanTradePro.
+It exposes broker-compatible APIs and streams for:
 
-## Integration Tests
-- Location: `integration-test/`
-- Run all: `npm test` (uses `.env.test`).
-- Uses real Polygon/Finnhub APIs for schema comparisons when API keys are set.
-- `TEST_SYMBOLS` default: `AAPL,MSFT,AMZN`.
-- `TEST_START_DATE` default: `2025-01-13`.
-- `FINNHUB_TEST_START_DATE` default: `2025-12-20`.
+- Control service: `:8000`
+- Alpaca simulation: `:8100`
+- Polygon simulation: `:8200`
+- Finnhub simulation: `:8300`
+- WebSocket gateway: `:8400`
 
-## Notes
-- The simulator filters out future data based on `current_time` for all REST APIs.
-- Many tests depend on ClickHouse being populated for the configured date ranges.
+Primary directories:
+- `src/` C++ simulator code
+- `manager-ui/` simulator UI
+- `integration-test/` tests
+- `requirements/` design/reference docs
+
+---
+
+## 3) Live-Like Time and Data Contract
+
+1. Session owns replay time (`current_time`) and speed.
+2. Data APIs/streams must not expose records after session `current_time`.
+3. Historical API requests are allowed for prior data, but must be clamped for live-like endpoints where applicable.
+4. Session time window (`start_time`, `end_time`) must gate replay progression and stream emission.
+5. Dynamic symbol subscriptions must attach to current session time state (no backfill leak by default).
+
+---
+
+## 4) Order Fill Semantics Contract
+
+1. Accept and honor strategy `decision_time` for order placement where supplied.
+2. Fill timestamps should anchor to decision/simulated timeline for consistency in high-speed replay.
+3. Avoid introducing lookahead or post-hoc corrections that use future ticks.
+4. Accounting truth precedence for debugging:
+   - orders/trades/events in API payloads > chart marker placement.
+
+---
+
+## 5) API Compatibility Contract
+
+Simulator endpoints should mimic real provider API shapes and constraints.
+
+- Alpaca simulation: account/orders/positions lifecycle compatibility.
+- Polygon simulation:
+  - supports feed selection (`polygon_news`, `benzinga_news`) where implemented.
+  - ticker and all-ticker news behavior must match capability model.
+- Finnhub simulation:
+  - symbol-scoped news and other supported market-info endpoints.
+
+Do not add simulator-only payload deviations unless explicitly versioned and documented.
+
+---
+
+## 6) Streaming Contract
+
+1. WebSocket streams are session-scoped via `session_id`.
+2. Stream events must align with session replay time.
+3. Do not duplicate emit paths that create racey duplicate events.
+4. Keep stream payload ordering deterministic when timestamps are equal (stable ordering).
+
+---
+
+## 7) Data Source Contract
+
+- Primary ClickHouse schema: `market_data`.
+- Support tables include Polygon and Finnhub synced datasets used by controllers.
+- Queries must enforce replay-time cutoffs before returning records.
+- For LowCardinality columns in ClickHouse, use safe casts where needed in SQL.
+
+---
+
+## 8) Verification and Testing Discipline
+
+For non-trivial changes, validate with evidence before completion.
+
+Minimum checks:
+1. Build simulator successfully.
+2. Start simulator and verify health endpoints respond.
+3. Run targeted API flow reproducing the issue.
+4. Validate both REST and WS behavior for the changed path.
+5. For timing consistency fixes, run repeated replay tests (>=3 runs, preferably 5) and compare fill fingerprints:
+   - symbol, side, qty, fill price, fill time.
+
+When debugging against ElanTradePro:
+- Validate end-to-end behavior from ElanTradePro API/UI, not simulator in isolation only.
+
+---
+
+## 9) Operations
+
+Start/restart:
+```bash
+./start.sh restart
+```
+
+Stop:
+```bash
+./stop.sh
+```
+
+UI helpers:
+```bash
+./start_ui.sh
+./stop_ui.sh
+```
+
+Use repo scripts in `scripts/` rather than ad-hoc process spawning.
+
+---
+
+## 10) Logs and Debugging
+
+Check these first for regressions:
+- simulator runtime logs under `~/logs/` and repo log outputs.
+- WS/controller logs for session_id/time filtering behavior.
+
+For timing mismatches, capture:
+1. order create payload (including decision_time)
+2. fill response timestamp/price
+3. emitted WS event payload timestamp
+4. corresponding query-time filters and session current_time
+
+---
+
+## 11) Cross-Repo Coordination (Mandatory)
+
+BrokerSimulator and ElanTradePro must remain behaviorally aligned.
+
+If changing contracts used by ElanTradePro (payload fields, timing semantics, feed behavior):
+1. update both repos as needed,
+2. validate end-to-end,
+3. report both branches/commits.
+
+No unilateral contract drift.
+
+---
+
+## 12) Practical Agent Checklist (Per Request)
+
+1. Confirm branch + git status.
+2. Reproduce first.
+3. Implement minimal correct fix.
+4. Verify with targeted repeated tests where timing is involved.
+5. Summarize evidence.
+6. Append one request/action trace to `codex_history.log`.

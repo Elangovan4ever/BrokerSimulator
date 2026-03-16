@@ -5,6 +5,7 @@
 #include "checkpoint.hpp"
 #include "../ws/status_ws_controller.hpp"
 #include <cctype>
+#include <cmath>
 #include <sstream>
 
 namespace broker_sim {
@@ -35,6 +36,33 @@ std::string normalize_news_token(const std::string& raw) {
         return "*";
     }
     return token;
+}
+
+int compute_adaptive_window_secs(int base_window_secs, double speed_factor) {
+    const int base = std::max(1, base_window_secs);
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    // Keep request fan-out bounded at high replay speeds while preserving 1s granularity at low speed.
+    const int speed_window = std::max(1, static_cast<int>(std::ceil(speed / 8.0)));
+    return std::max(base, speed_window);
+}
+
+std::chrono::milliseconds compute_window_loop_sleep(int window_secs, double speed_factor) {
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    return std::chrono::milliseconds(
+        std::max<int64_t>(2, static_cast<int64_t>((window_secs * 1000.0) / speed)));
+}
+
+std::chrono::milliseconds compute_iteration_sleep(std::chrono::steady_clock::time_point started_at,
+                                                  int window_secs,
+                                                  double speed_factor) {
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    const auto target = std::chrono::duration<double>(static_cast<double>(window_secs) / speed);
+    const auto elapsed = std::chrono::steady_clock::now() - started_at;
+    if (elapsed >= target) {
+        return std::chrono::milliseconds(2);
+    }
+    return std::max(std::chrono::milliseconds(2),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(target - elapsed));
 }
 
 std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSource>& data_source,
@@ -284,6 +312,13 @@ void SessionManager::start_session(const std::string& session_id) {
     }
     if (exec_cfg_.enable_shared_feed) {
         start_shared_feeder();
+    } else {
+        auto initial_symbols = get_stream_symbols(session);
+        if (initial_symbols.empty()) {
+            spdlog::info("[StartSession] session={} no initial symbols; starting polling feeder for time progression",
+                         session->id);
+            start_polling_feeder(session);
+        }
     }
     session->worker_thread = std::make_unique<std::thread>(
         [this, session]() { run_session_loop(session); }
@@ -746,6 +781,13 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
                 break;
             }
             const Event& ev = *ev_opt;
+            if (ev.timestamp >= session->config.end_time) {
+                session->time_engine->set_time(session->config.end_time);
+                spdlog::info(
+                    "Session {} loop: reached end_time boundary; dropping remaining queued events",
+                    session->id);
+                break;
+            }
             auto current_ts = session->time_engine->current_time();
             auto next_open = exec_cfg_.next_market_open_after(current_ts);
             if (next_open > current_ts && next_open <= ev.timestamp) {
@@ -770,12 +812,17 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
         }
         spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
         if (!session->should_stop.load()) {
+            if (session->time_engine->current_time() < session->config.end_time) {
+                session->time_engine->set_time(session->config.end_time);
+            }
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
         } else {
         }
+        session->time_engine->stop();
     } catch (const std::exception& e) {
         session->status = SessionStatus::ERROR;
+        session->time_engine->stop();
         spdlog::error("Session {} error: {}", session->id, e.what());
     }
 }
@@ -1155,26 +1202,44 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
     if (!data_source_) return;
     auto start = session->config.start_time;
     auto end = session->config.end_time;
-    int window_secs = exec_cfg_.poll_interval_seconds;
-    if (window_secs <= 0) return;
+    int base_window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 1;
     
     auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
     auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
-    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} window_secs={}",
-                 session->id, start_ns, end_ns, window_secs);
+    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} base_window_secs={}",
+                 session->id, start_ns, end_ns, base_window_secs);
     
     session->polling_thread = std::make_unique<std::thread>(
-        [this, session, start, end, window_secs]() {
+        [this, session, start, end, base_window_secs]() {
             Timestamp cursor = start;
-            auto window = std::chrono::seconds(window_secs);
+            const double speed = session->config.speed_factor > 0.0 ? session->config.speed_factor : 1.0;
+            const int window_secs = compute_adaptive_window_secs(base_window_secs, speed);
+            const auto window = std::chrono::seconds(window_secs);
+            const auto loop_sleep = compute_window_loop_sleep(window_secs, speed);
+            spdlog::info(
+                "[PollingFeeder] session={} adaptive_window_secs={} loop_sleep_ms={} speed={}",
+                session->id,
+                window_secs,
+                loop_sleep.count(),
+                speed);
             
             while (!session->should_stop.load() && cursor < end) {
+                const auto loop_started_at = std::chrono::steady_clock::now();
+                Timestamp window_end = std::min(cursor + window, end);
+
                 // Get currently subscribed symbols (dynamic, not captured at start)
                 auto symbols = get_stream_symbols(session);
                 
                 if (symbols.empty()) {
-                    spdlog::debug("[PollingFeeder] session={} no symbols subscribed, sleeping", session->id);
-                    std::this_thread::sleep_for(window);
+                    if (session->time_engine->is_paused()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+
+                    spdlog::debug("[PollingFeeder] session={} no symbols subscribed, advancing time", session->id);
+                    session->time_engine->set_time(window_end);
+                    cursor = window_end;
+                    std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
                     continue;
                 }
                 
@@ -1185,13 +1250,16 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                 }
                 spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
                               session->id, symbols.size(), symbols_str);
-                
-                Timestamp window_end = std::min(cursor + window, end);
-                
+
                 if (session->config.live_bar_aggr_source == "1s") {
                     data_source_->stream_events_with_bars(
                         symbols, cursor, window_end,
-                        [this, session](const UnifiedMarketEvent& ev) {
+                        [this, session, cursor, window_end](const UnifiedMarketEvent& ev) {
+                            if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                            if (ev.timestamp < session->config.start_time ||
+                                ev.timestamp >= session->config.end_time) {
+                                return;
+                            }
                             const std::string& symbol =
                                 (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
                                 (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
@@ -1207,7 +1275,12 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                     );
                 } else {
                     data_source_->stream_events(symbols, cursor, window_end, 
-                        [this, session](const MarketEvent& ev) {
+                        [this, session, cursor, window_end](const MarketEvent& ev) {
+                            if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                            if (ev.timestamp < session->config.start_time ||
+                                ev.timestamp >= session->config.end_time) {
+                                return;
+                            }
                             const std::string& symbol = 
                                 (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
                             
@@ -1221,7 +1294,11 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                     );
                 }
                 cursor = window_end;
-                std::this_thread::sleep_for(window);
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
+            }
+
+            if (session->event_queue) {
+                session->event_queue->stop();
             }
             
             spdlog::info("[PollingFeeder] session={} polling feeder stopped", session->id);
@@ -1252,6 +1329,7 @@ void SessionManager::start_shared_feeder() {
         // Track per-session cursors so we only stream a bounded window ahead.
         std::unordered_map<std::string, Timestamp> shared_cursors;
         while (shared_feed_running_.load(std::memory_order_acquire)) {
+            const auto loop_started_at = std::chrono::steady_clock::now();
             std::vector<std::shared_ptr<Session>> running_sessions;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1266,17 +1344,54 @@ void SessionManager::start_shared_feeder() {
                 continue;
             }
 
+            int base_window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 1;
+            double max_speed = 1.0;
             Timestamp min_start = running_sessions.front()->config.start_time;
             Timestamp max_end = running_sessions.front()->config.end_time;
+            std::unordered_map<std::string, std::vector<std::string>> session_symbols;
             std::vector<std::string> symbols;
             symbols.reserve(64);
             for (const auto& s : running_sessions) {
                 if (s->config.start_time < min_start) min_start = s->config.start_time;
                 if (s->config.end_time > max_end) max_end = s->config.end_time;
-                for (const auto& sym : s->config.symbols) symbols.push_back(sym);
+                if (s->config.speed_factor > max_speed) max_speed = s->config.speed_factor;
+
+                auto syms = get_stream_symbols(s);
+                std::sort(syms.begin(), syms.end());
+                syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
+                session_symbols[s->id] = syms;
+
+                if (syms.empty()) {
+                    if (s->time_engine->is_paused()) {
+                        continue;
+                    }
+                    auto current_sim = s->time_engine->current_time();
+                    auto cursor = std::max(current_sim, s->config.start_time);
+                    const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
+                    auto window_end = std::min(cursor + std::chrono::seconds(window_secs), s->config.end_time);
+                    if (window_end > current_sim) {
+                        s->time_engine->set_time(window_end);
+                    }
+                    if (window_end >= s->config.end_time && s->event_queue) {
+                        s->event_queue->stop();
+                    }
+                    continue;
+                }
+
+                for (const auto& sym : syms) symbols.push_back(sym);
             }
             std::sort(symbols.begin(), symbols.end());
             symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+
+            if (symbols.empty()) {
+                std::this_thread::sleep_for(
+                    compute_iteration_sleep(loop_started_at,
+                                            compute_adaptive_window_secs(base_window_secs, max_speed),
+                                            max_speed));
+                continue;
+            }
+
+            const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
 
             bool any_bar_source = std::any_of(
                 running_sessions.begin(), running_sessions.end(),
@@ -1285,26 +1400,40 @@ void SessionManager::start_shared_feeder() {
                 }
             );
 
-            if (any_bar_source) {
-                // Stream in bounded windows to avoid flooding queues.
-                int window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 300;
-                Timestamp cursor = min_start;
-                auto it = shared_cursors.find("__global");
-                if (it != shared_cursors.end()) {
-                    cursor = std::max(cursor, it->second);
+            Timestamp cursor = min_start;
+            auto it = shared_cursors.find("__global");
+            if (it != shared_cursors.end()) {
+                cursor = std::max(cursor, it->second);
+            }
+            if (cursor >= max_end) {
+                shared_cursors["__global"] = max_end;
+                for (const auto& s : running_sessions) {
+                    if (s->event_queue) {
+                        s->time_engine->set_time(s->config.end_time);
+                        s->event_queue->stop();
+                    }
                 }
-                Timestamp window_end = std::min(cursor + std::chrono::seconds(window_secs), max_end);
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
+                continue;
+            }
+            Timestamp window_end = std::min(cursor + std::chrono::seconds(window_secs), max_end);
 
+            if (any_bar_source) {
                 data_source_->stream_events_with_bars(symbols, cursor, window_end,
-                    [this, running_sessions](const UnifiedMarketEvent& ev) {
+                    [this, running_sessions, session_symbols, cursor, window_end](const UnifiedMarketEvent& ev) {
+                        if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
                         const std::string& symbol =
                             (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
                             (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
                             ev.bar.symbol;
                         for (const auto& s : running_sessions) {
-                            if (ev.timestamp < s->config.start_time || ev.timestamp > s->config.end_time) continue;
-                            if (!s->config.symbols.empty() &&
-                                std::find(s->config.symbols.begin(), s->config.symbols.end(), symbol) == s->config.symbols.end()) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), symbol) == syms.end()) {
                                 continue;
                             }
                             if (ev.type == UnifiedEventType::BAR && s->config.live_bar_aggr_source != "1s") {
@@ -1315,22 +1444,34 @@ void SessionManager::start_shared_feeder() {
                     }
                 );
 
-                shared_cursors["__global"] = window_end;
             } else {
-                data_source_->stream_events(symbols, min_start, max_end,
-                    [this, running_sessions, symbols](const MarketEvent& ev) {
+                data_source_->stream_events(symbols, cursor, window_end,
+                    [this, running_sessions, session_symbols, cursor, window_end](const MarketEvent& ev) {
+                        if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                        const std::string event_symbol =
+                            (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
                         for (const auto& s : running_sessions) {
-                            if (ev.timestamp < s->config.start_time || ev.timestamp > s->config.end_time) continue;
-                            if (!s->config.symbols.empty() &&
-                                std::find(s->config.symbols.begin(), s->config.symbols.end(),
-                                          (ev.type == MarketEventType::QUOTE ? ev.quote.symbol : ev.trade.symbol)) == s->config.symbols.end()) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), event_symbol) == syms.end()) {
                                 continue;
                             }
                             enqueue_event(s, ev);
                         }
                     });
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            for (const auto& s : running_sessions) {
+                if (window_end >= s->config.end_time && s->event_queue) {
+                    s->time_engine->set_time(s->config.end_time);
+                    s->event_queue->stop();
+                }
+            }
+            shared_cursors["__global"] = window_end;
+            std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
         }
     });
 }
@@ -1980,6 +2121,12 @@ void SessionManager::update_stream_subscriptions(const std::string& session_id,
     // Load data for new subscriptions
     for (const auto& symbol : new_symbols) {
         if (session->status != SessionStatus::RUNNING) continue;
+        if (session->polling_thread) {
+            spdlog::info("[StreamSub] session={} deferred {} to polling feeder (thread already active)",
+                         session_id,
+                         symbol);
+            continue;
+        }
         spdlog::info("[StreamSub] session={} LOADING DATA for symbol={}", session_id, symbol);
         session->feed_threads.push_back(std::make_unique<std::thread>(
             [this, session, symbol]() {

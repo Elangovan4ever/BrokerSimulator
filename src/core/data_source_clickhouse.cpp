@@ -2287,7 +2287,13 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
     std::vector<EarningsCalendarRecord> out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected for get_earnings_calendar, reconnecting...");
+        connect();
+    }
     if (!client_) return out;
+
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
@@ -2307,7 +2313,8 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
         ORDER BY date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 EarningsCalendarRecord e;
@@ -2323,9 +2330,23 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                 out.push_back(std::move(e));
             }
         });
+    };
+
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_earnings_calendar failed: {}", e.what());
+        spdlog::warn(
+            "ClickHouse get_earnings_calendar failed: {}, reconnecting and retrying...",
+            e.what());
         out.clear();
+        connect();
+        if (!client_) return out;
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_earnings_calendar retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
