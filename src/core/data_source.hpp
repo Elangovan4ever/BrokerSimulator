@@ -380,6 +380,15 @@ struct StockShortVolumeRecord {
     std::string raw_json;
 };
 
+struct TopMoversSnapshotRecord {
+    Timestamp timestamp;
+    std::vector<std::string> symbols;
+    std::vector<double> prices;
+    std::vector<double> change_percents;
+    std::vector<uint64_t> volumes;
+    std::vector<double> previous_closes;
+};
+
 struct FinancialsRecord {
     std::string ticker;
     std::string cik;
@@ -678,6 +687,8 @@ public:
     virtual std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) = 0;
     virtual std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) = 0;
     virtual std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) = 0;
+    virtual std::optional<TopMoversSnapshotRecord> get_top_gainers_snapshot(Timestamp max_timestamp,
+                                                                            size_t limit) = 0;
     virtual std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery& query) = 0;
 
     virtual std::vector<SplitRecord> get_splits(const std::string& symbol,

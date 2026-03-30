@@ -202,6 +202,52 @@ std::string build_query_string(const std::vector<std::pair<std::string, std::str
     }
     return out.str();
 }
+
+json build_snapshot_day(double current, double previous_close, uint64_t volume) {
+    const auto high = std::max(current, previous_close);
+    const auto low = std::min(current, previous_close);
+    return {
+        {"o", previous_close},
+        {"h", high},
+        {"l", low},
+        {"c", current},
+        {"v", static_cast<double>(volume)},
+        {"vw", current}
+    };
+}
+
+json build_snapshot_minute(double current, uint64_t volume, Timestamp ts) {
+    return {
+        {"av", static_cast<double>(volume)},
+        {"t", utils::ts_to_ms(ts)},
+        {"n", 0},
+        {"o", current},
+        {"h", current},
+        {"l", current},
+        {"c", current},
+        {"v", 0.0},
+        {"vw", current}
+    };
+}
+
+json build_top_mover_ticker(const TopMoversSnapshotRecord& snapshot, size_t index) {
+    const auto& symbol = snapshot.symbols.at(index);
+    const auto price = snapshot.prices.at(index);
+    const auto prev_close = snapshot.previous_closes.at(index);
+    const auto volume = snapshot.volumes.at(index);
+    const auto change = price - prev_close;
+
+    return {
+        {"ticker", symbol},
+        {"name", symbol},
+        {"todaysChange", change},
+        {"todaysChangePerc", snapshot.change_percents.at(index)},
+        {"updated", utils::ts_to_ms(snapshot.timestamp)},
+        {"day", build_snapshot_day(price, prev_close, volume)},
+        {"min", build_snapshot_minute(price, volume, snapshot.timestamp)},
+        {"prevDay", build_snapshot_day(prev_close, prev_close, 0)}
+    };
+}
 } // namespace
 
 PolygonController::PolygonController(std::shared_ptr<SessionManager> session_mgr, const Config& cfg)
@@ -1325,15 +1371,6 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
     StockNewsQuery query;
     query.max_published_utc = session->time_engine->current_time();
 
-    auto feed = get_param("feed");
-    if (feed.empty()) feed = "polygon_news";
-    if (feed != "polygon_news" && feed != "benzinga_news") {
-        cb(error_resp("Invalid value for feed parameter.", 400));
-        return;
-    }
-    query.feed = feed;
-    if (!has_cursor) param_values["feed"] = feed;
-
     std::string order = get_param("order");
     if (order.empty()) order = "descending";
     if (order == "asc") order = "ascending";
@@ -1462,7 +1499,6 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
 
         std::vector<std::string> order_keys = {
             "ap", "as",
-            "feed",
             "ticker",
             "published_utc", "published_utc.gte", "published_utc.gt",
             "published_utc.lte", "published_utc.lt",
@@ -2564,44 +2600,59 @@ void PolygonController::snapshotAll(const drogon::HttpRequestPtr& req,
     auto session = get_session(req);
 
     json tickers = json::array();
-
-    // Get cached data for all symbols
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    if (session) {
-        for (const auto& [sym, q] : quotes_cache_[session->id]) {
-            json ticker_data = {
-                {"ticker", sym},
-                {"todaysChange", 0},
-                {"todaysChangePerc", 0},
-                {"updated", q.ts_ns}
-            };
-
-            ticker_data["lastQuote"] = {
-                {"P", q.ask_price},
-                {"S", static_cast<int64_t>(q.ask_size)},
-                {"p", q.bid_price},
-                {"s", static_cast<int64_t>(q.bid_size)},
-                {"t", q.ts_ns}
-            };
-
-            // Add day, min, prevDay for Polygon API compatibility
-            ticker_data["day"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
-            ticker_data["min"] = {{"av", 0}, {"t", 0}, {"n", 0}, {"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
-            ticker_data["prevDay"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
-
-            auto trade_it = trades_cache_[session->id].find(sym);
-            if (trade_it != trades_cache_[session->id].end()) {
-                ticker_data["lastTrade"] = {
-                    {"p", trade_it->second.price},
-                    {"s", static_cast<int64_t>(trade_it->second.size)},
-                    {"t", trade_it->second.ts_ns},
-                    {"i", "0"},
-                    {"x", 0},
-                    {"c", json::array()}
-                };
+    auto data_source = session_mgr_->api_data_source();
+    if (session && data_source) {
+        auto snapshot_time = session->time_engine->current_time();
+        if (auto requested = utils::parse_ts_any(req->getParameter("timestamp"))) {
+            // Replay callers pass an explicit simulated second and expect the historical
+            // snapshot for that second, not the controller's current clock sample.
+            snapshot_time = *requested;
+        }
+        if (auto snapshot = data_source->get_top_gainers_snapshot(snapshot_time, 20)) {
+            for (size_t i = 0; i < snapshot->symbols.size(); ++i) {
+                tickers.push_back(build_top_mover_ticker(*snapshot, i));
             }
+        }
+    }
 
-            tickers.push_back(ticker_data);
+    if (tickers.empty()) {
+        // Fallback to cached data when no precomputed movers snapshot is available yet.
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (session) {
+            for (const auto& [sym, q] : quotes_cache_[session->id]) {
+                json ticker_data = {
+                    {"ticker", sym},
+                    {"todaysChange", 0},
+                    {"todaysChangePerc", 0},
+                    {"updated", q.ts_ns}
+                };
+
+                ticker_data["lastQuote"] = {
+                    {"P", q.ask_price},
+                    {"S", static_cast<int64_t>(q.ask_size)},
+                    {"p", q.bid_price},
+                    {"s", static_cast<int64_t>(q.bid_size)},
+                    {"t", q.ts_ns}
+                };
+
+                ticker_data["day"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+                ticker_data["min"] = {{"av", 0}, {"t", 0}, {"n", 0}, {"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+                ticker_data["prevDay"] = {{"o", 0}, {"h", 0}, {"l", 0}, {"c", 0}, {"v", 0}, {"vw", 0}};
+
+                auto trade_it = trades_cache_[session->id].find(sym);
+                if (trade_it != trades_cache_[session->id].end()) {
+                    ticker_data["lastTrade"] = {
+                        {"p", trade_it->second.price},
+                        {"s", static_cast<int64_t>(trade_it->second.size)},
+                        {"t", trade_it->second.ts_ns},
+                        {"i", "0"},
+                        {"x", 0},
+                        {"c", json::array()}
+                    };
+                }
+
+                tickers.push_back(ticker_data);
+            }
         }
     }
 
@@ -2627,6 +2678,17 @@ void PolygonController::snapshotTicker(const drogon::HttpRequestPtr& req,
         {"todaysChange", 0},
         {"todaysChangePerc", 0}
     };
+
+    auto data_source = session_mgr_->api_data_source();
+    if (data_source) {
+        if (auto snapshot = data_source->get_top_gainers_snapshot(session->time_engine->current_time(), 20)) {
+            auto it = std::find(snapshot->symbols.begin(), snapshot->symbols.end(), symbol);
+            if (it != snapshot->symbols.end()) {
+                auto index = static_cast<size_t>(std::distance(snapshot->symbols.begin(), it));
+                ticker_data = build_top_mover_ticker(*snapshot, index);
+            }
+        }
+    }
 
     // Get NBBO from matching engine
     auto nbbo = session->matching_engine->get_nbbo(symbol);
@@ -2673,9 +2735,19 @@ void PolygonController::snapshotGainersLosers(const drogon::HttpRequestPtr& req,
                                               std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                                               std::string direction) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    auto session = get_session(req);
 
-    // Would return top gainers or losers based on direction
     json tickers = json::array();
+    if (direction == "gainers" && session) {
+        auto data_source = session_mgr_->api_data_source();
+        if (data_source) {
+            if (auto snapshot = data_source->get_top_gainers_snapshot(session->time_engine->current_time(), 20)) {
+                for (size_t i = 0; i < snapshot->symbols.size(); ++i) {
+                    tickers.push_back(build_top_mover_ticker(*snapshot, i));
+                }
+            }
+        }
+    }
 
     json response = {
         {"status", "OK"},
@@ -2694,37 +2766,53 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
                                       std::function<void(const drogon::HttpResponsePtr&)>&& cb,
                                       std::string symbol) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    std::transform(symbol.begin(), symbol.end(), symbol.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    auto details = data_source->get_ticker_basic(symbol, session->time_engine->current_time());
+    if (!details) {
+        cb(json_resp({{"status", "NOT_FOUND"},
+                      {"request_id", utils::generate_id()},
+                      {"message", "Ticker not found"}}, 404));
+        return;
+    }
+
+    json result = {
+        {"ticker", symbol},
+        {"name", details->name},
+        {"market", "stocks"},
+        {"locale", "us"},
+        {"primary_exchange", ""},
+        {"type", ""},
+        {"active", true},
+        {"currency_name", ""},
+        {"cik", details->cik},
+        {"composite_figi", details->composite_figi},
+        {"share_class_figi", ""},
+        {"address", json::object()},
+        {"branding", json::object()}
+    };
 
     json response = {
         {"status", "OK"},
         {"request_id", utils::generate_id()},
-        {"results", {
-            {"ticker", symbol},
-            {"name", symbol + " Inc."},
-            {"market", "stocks"},
-            {"locale", "us"},
-            {"primary_exchange", "XNAS"},
-            {"type", "CS"},  // Common Stock
-            {"active", true},
-            {"currency_name", "usd"},
-            {"cik", "0000000000"},
-            {"composite_figi", "BBG000000000"},
-            {"share_class_figi", "BBG000000000"},
-            {"market_cap", 0},
-            {"phone_number", ""},
-            {"address", {}},
-            {"description", "Simulated ticker for " + symbol},
-            {"sic_code", "0000"},
-            {"sic_description", ""},
-            {"ticker_root", symbol},
-            {"homepage_url", ""},
-            {"total_employees", 0},
-            {"list_date", "2000-01-01"},
-            {"branding", {}},
-            {"share_class_shares_outstanding", 0},
-            {"weighted_shares_outstanding", 0},
-            {"round_lot", 100}
-        }}
+        {"results", std::move(result)}
     };
 
     cb(json_resp(response));
@@ -2733,34 +2821,34 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
 void PolygonController::tickersList(const drogon::HttpRequestPtr& req,
                                     std::function<void(const drogon::HttpResponsePtr&)>&& cb) {
     if (!authorize(req)) { cb(unauthorized()); return; }
+    auto session = get_session(req);
+    if (!session || !session->time_engine) {
+        cb(json_resp({
+            {"status", "OK"},
+            {"count", 0},
+            {"results", json::array()},
+            {"request_id", utils::generate_id()},
+            {"next_url", nullptr}
+        }));
+        return;
+    }
 
-    // Return sample tickers
-    std::vector<std::string> sample_symbols = {
-        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "JPM", "V", "JNJ"
-    };
-
-    json results = json::array();
-    for (const auto& sym : sample_symbols) {
-        json ticker_item;
-        ticker_item["ticker"] = sym;
-        ticker_item["name"] = sym + " Inc.";
-        ticker_item["market"] = "stocks";
-        ticker_item["locale"] = "us";
-        ticker_item["primary_exchange"] = "XNAS";
-        ticker_item["type"] = "CS";
-        ticker_item["active"] = true;
-        ticker_item["currency_name"] = "usd";
-        ticker_item["last_updated_utc"] = "2024-01-01T00:00:00Z";
-        ticker_item["cik"] = "0000000000";
-        ticker_item["composite_figi"] = "BBG000000000";
-        ticker_item["share_class_figi"] = "BBG000000000";
-        results.push_back(ticker_item);
+    auto data_source = session_mgr_->api_data_source();
+    if (!data_source) {
+        cb(json_resp({
+            {"status", "OK"},
+            {"count", 0},
+            {"results", json::array()},
+            {"request_id", utils::generate_id()},
+            {"next_url", nullptr}
+        }));
+        return;
     }
 
     json response = {
         {"status", "OK"},
-        {"count", results.size()},
-        {"results", results},
+        {"count", 0},
+        {"results", json::array()},
         {"request_id", utils::generate_id()},
         {"next_url", nullptr}
     };

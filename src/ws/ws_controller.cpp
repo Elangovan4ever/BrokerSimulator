@@ -27,6 +27,14 @@ int64_t parse_timeframe(const std::string& tf) {
     }
 }
 
+std::string format_timeframe(int64_t seconds) {
+    if (seconds <= 0) return "1m";
+    if (seconds % 86400 == 0) return std::to_string(seconds / 86400) + "d";
+    if (seconds % 3600 == 0) return std::to_string(seconds / 3600) + "h";
+    if (seconds % 60 == 0) return std::to_string(seconds / 60) + "m";
+    return std::to_string(seconds) + "s";
+}
+
 std::string trim_copy(const std::string& input) {
     size_t first = 0;
     while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first]))) {
@@ -691,7 +699,9 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
                 state.subscriptions[SubscriptionType::BARS].insert(symbol);
                 symbols_to_subscribe.push_back(symbol);
                 if (!timeframe_str.empty()) {
-                    state.bar_timeframes[symbol] = parse_timeframe(timeframe_str);
+                    state.bar_timeframes[symbol].insert(parse_timeframe(timeframe_str));
+                } else {
+                    state.bar_timeframes[symbol].insert(60);
                 }
             }
             subscribed.push_back(token);
@@ -727,9 +737,11 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
             std::string prefix = token.substr(0, dot);
             std::string rest = token.substr(dot + 1);
             std::string symbol = rest;
+            std::string timeframe_str;
             size_t dot2 = rest.find('.');
             if (dot2 != std::string::npos) {
                 symbol = rest.substr(0, dot2);
+                timeframe_str = rest.substr(dot2 + 1);
             }
 
             if (prefix == "T") {
@@ -739,8 +751,20 @@ void WsController::handle_polygon_message(const drogon::WebSocketConnectionPtr& 
                 state.subscriptions[SubscriptionType::QUOTES].erase(symbol);
                 symbols_to_unsubscribe.push_back(symbol);
             } else if (prefix == "AM" || prefix == "A") {
-                state.subscriptions[SubscriptionType::BARS].erase(symbol);
-                state.bar_timeframes.erase(symbol);
+                auto tf_it = state.bar_timeframes.find(symbol);
+                if (tf_it != state.bar_timeframes.end()) {
+                    if (!timeframe_str.empty()) {
+                        tf_it->second.erase(parse_timeframe(timeframe_str));
+                    } else {
+                        tf_it->second.clear();
+                    }
+                    if (tf_it->second.empty()) {
+                        state.bar_timeframes.erase(tf_it);
+                        state.subscriptions[SubscriptionType::BARS].erase(symbol);
+                    }
+                } else {
+                    state.subscriptions[SubscriptionType::BARS].erase(symbol);
+                }
                 symbols_to_unsubscribe.push_back(symbol);
             }
         }
@@ -1103,6 +1127,7 @@ std::string WsController::format_bar_polygon(const std::string& symbol, const Ba
     item["e"] = utils::ts_to_ms(ts) + (timeframe_seconds * 1000);
     item["vw"] = bar.vwap.value_or(0.0);
     item["n"] = bar.trade_count.value_or(0);
+    item["tf"] = format_timeframe(timeframe_seconds);
     msg.push_back(item);
     return msg.dump();
 }
@@ -1274,72 +1299,76 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
                 if (state.api_type == WsApiType::POLYGON &&
                     state.live_bar_aggr_source != "1s" &&
                     state.is_subscribed(SubscriptionType::BARS, event.symbol)) {
-                    int64_t tf_secs = 60;
                     auto tf_it = state.bar_timeframes.find(event.symbol);
-                    if (tf_it != state.bar_timeframes.end()) {
-                        tf_secs = tf_it->second;
+                    std::vector<int64_t> timeframes;
+                    if (tf_it != state.bar_timeframes.end() && !tf_it->second.empty()) {
+                        timeframes.assign(tf_it->second.begin(), tf_it->second.end());
+                    } else {
+                        timeframes.push_back(60);
                     }
 
                     int64_t ts_epoch = utils::ts_to_sec(event.timestamp);
-                    int64_t bucket_start = (ts_epoch / tf_secs) * tf_secs;
                     int64_t event_ts_ns = utils::ts_to_ns(event.timestamp);
                     int64_t bar_interval_ms = resolve_bar_stream_interval_ms(state);
                     int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
 
-                    auto& agg = state.agg_bars[event.symbol];
-                    if (agg.bucket_start_epoch != bucket_start) {
-                        if (agg.has_data && agg.bucket_start_epoch != 0) {
-                            BarData agg_bar;
-                            agg_bar.open = agg.open;
-                            agg_bar.high = agg.high;
-                            agg_bar.low = agg.low;
-                            agg_bar.close = agg.close;
-                            agg_bar.volume = agg.volume;
-                            agg_bar.trade_count = agg.trade_count;
+                    for (int64_t tf_secs : timeframes) {
+                        int64_t bucket_start = (ts_epoch / tf_secs) * tf_secs;
+                        auto& agg = state.agg_bars[event.symbol][tf_secs];
+                        if (agg.bucket_start_epoch != bucket_start) {
+                            if (agg.has_data && agg.bucket_start_epoch != 0) {
+                                BarData agg_bar;
+                                agg_bar.open = agg.open;
+                                agg_bar.high = agg.high;
+                                agg_bar.low = agg.low;
+                                agg_bar.close = agg.close;
+                                agg_bar.volume = agg.volume;
+                                agg_bar.trade_count = agg.trade_count;
 
-                            Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                            std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
-                            conn->send(bar_msg);
-                            agg.last_emit_ts_ns = event_ts_ns;
+                                Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                                std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
+                                conn->send(bar_msg);
+                                agg.last_emit_ts_ns = event_ts_ns;
+                            }
+
+                            agg.bucket_start_epoch = bucket_start;
+                            agg.open = trade.price;
+                            agg.high = trade.price;
+                            agg.low = trade.price;
+                            agg.close = trade.price;
+                            agg.volume = trade.size;
+                            agg.trade_count = 1;
+                            agg.vwap.reset();
+                            agg.has_data = true;
+                            agg.last_emit_ts_ns = 0;
+                        } else {
+                            agg.high = std::max(agg.high, trade.price);
+                            agg.low = std::min(agg.low, trade.price);
+                            agg.close = trade.price;
+                            agg.volume += trade.size;
+                            agg.trade_count += 1;
+                            agg.has_data = true;
                         }
 
-                        agg.bucket_start_epoch = bucket_start;
-                        agg.open = trade.price;
-                        agg.high = trade.price;
-                        agg.low = trade.price;
-                        agg.close = trade.price;
-                        agg.volume = trade.size;
-                        agg.trade_count = 1;
-                        agg.vwap.reset();
-                        agg.has_data = true;
-                        agg.last_emit_ts_ns = 0;
-                    } else {
-                        agg.high = std::max(agg.high, trade.price);
-                        agg.low = std::min(agg.low, trade.price);
-                        agg.close = trade.price;
-                        agg.volume += trade.size;
-                        agg.trade_count += 1;
-                        agg.has_data = true;
-                    }
+                        if (agg.has_data) {
+                            int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (event_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
+                            if (elapsed_ns < 0) {
+                                elapsed_ns = bar_interval_ns;
+                            }
+                            if (agg.last_emit_ts_ns == 0 || elapsed_ns >= bar_interval_ns) {
+                                BarData agg_bar;
+                                agg_bar.open = agg.open;
+                                agg_bar.high = agg.high;
+                                agg_bar.low = agg.low;
+                                agg_bar.close = agg.close;
+                                agg_bar.volume = agg.volume;
+                                agg_bar.trade_count = agg.trade_count;
 
-                    if (agg.has_data) {
-                        int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (event_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
-                        if (elapsed_ns < 0) {
-                            elapsed_ns = bar_interval_ns;
-                        }
-                        if (agg.last_emit_ts_ns == 0 || elapsed_ns >= bar_interval_ns) {
-                            BarData agg_bar;
-                            agg_bar.open = agg.open;
-                            agg_bar.high = agg.high;
-                            agg_bar.low = agg.low;
-                            agg_bar.close = agg.close;
-                            agg_bar.volume = agg.volume;
-                            agg_bar.trade_count = agg.trade_count;
-
-                            Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                            std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
-                            conn->send(bar_msg);
-                            agg.last_emit_ts_ns = event_ts_ns;
+                                Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                                std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
+                                conn->send(bar_msg);
+                                agg.last_emit_ts_ns = event_ts_ns;
+                            }
                         }
                     }
                 }
@@ -1377,82 +1406,87 @@ void WsController::broadcast_event(const std::string& session_id, const Event& e
                 const auto& bar = std::get<BarData>(event.data);
 
                 if (state.api_type == WsApiType::POLYGON) {
-                    int64_t tf_secs = 60;
                     auto tf_it = state.bar_timeframes.find(event.symbol);
-                    if (tf_it != state.bar_timeframes.end()) {
-                        tf_secs = tf_it->second;
+                    std::vector<int64_t> timeframes;
+                    if (tf_it != state.bar_timeframes.end() && !tf_it->second.empty()) {
+                        timeframes.assign(tf_it->second.begin(), tf_it->second.end());
+                    } else {
+                        timeframes.push_back(60);
                     }
 
                     int64_t ts_epoch = utils::ts_to_sec(event.timestamp);
-                    int64_t bucket_start = (ts_epoch / tf_secs) * tf_secs;
                     int64_t event_ts_ns = utils::ts_to_ns(event.timestamp);
                     int64_t bar_interval_ms = resolve_bar_stream_interval_ms(state);
                     int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
 
-                    auto& agg = state.agg_bars[event.symbol];
-                    if (agg.bucket_start_epoch != bucket_start) {
-                        if (agg.has_data && agg.bucket_start_epoch != 0) {
-                            BarData agg_bar;
-                            agg_bar.open = agg.open;
-                            agg_bar.high = agg.high;
-                            agg_bar.low = agg.low;
-                            agg_bar.close = agg.close;
-                            agg_bar.volume = agg.volume;
-                            agg_bar.vwap = agg.vwap;
-                            agg_bar.trade_count = agg.trade_count;
+                    bool emitted_any = false;
+                    for (int64_t tf_secs : timeframes) {
+                        int64_t bucket_start = (ts_epoch / tf_secs) * tf_secs;
+                        auto& agg = state.agg_bars[event.symbol][tf_secs];
+                        if (agg.bucket_start_epoch != bucket_start) {
+                            if (agg.has_data && agg.bucket_start_epoch != 0) {
+                                BarData agg_bar;
+                                agg_bar.open = agg.open;
+                                agg_bar.high = agg.high;
+                                agg_bar.low = agg.low;
+                                agg_bar.close = agg.close;
+                                agg_bar.volume = agg.volume;
+                                agg_bar.vwap = agg.vwap;
+                                agg_bar.trade_count = agg.trade_count;
 
-                            Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                            std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
-                            conn->send(bar_msg);
-                        }
+                                Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                                std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
+                                conn->send(bar_msg);
+                            }
 
-                        agg.bucket_start_epoch = bucket_start;
-                        agg.open = bar.open;
-                        agg.high = bar.high;
-                        agg.low = bar.low;
-                        agg.close = bar.close;
-                        agg.volume = bar.volume;
-                        agg.trade_count = bar.trade_count.value_or(0);
-                        if (bar.vwap.has_value()) {
-                            agg.vwap = bar.vwap;
-                        }
-                        agg.has_data = true;
-                        agg.last_emit_ts_ns = 0;
-                    } else {
-                        agg.high = std::max(agg.high, bar.high);
-                        agg.low = std::min(agg.low, bar.low);
-                        agg.close = bar.close;
-                        agg.volume += bar.volume;
-                        agg.trade_count += bar.trade_count.value_or(0);
-                        if (bar.vwap.has_value()) {
-                            agg.vwap = bar.vwap;
-                        }
-                        agg.has_data = true;
-                    }
-
-                    if (agg.has_data) {
-                        int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (event_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
-                        if (elapsed_ns < 0) {
-                            elapsed_ns = bar_interval_ns;
-                        }
-                        if (agg.last_emit_ts_ns == 0 || elapsed_ns >= bar_interval_ns) {
-                            BarData agg_bar;
-                            agg_bar.open = agg.open;
-                            agg_bar.high = agg.high;
-                            agg_bar.low = agg.low;
-                            agg_bar.close = agg.close;
-                            agg_bar.volume = agg.volume;
-                            agg_bar.vwap = agg.vwap;
-                            agg_bar.trade_count = agg.trade_count;
-
-                            Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                            std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
-                            conn->send(bar_msg);
-                            agg.last_emit_ts_ns = event_ts_ns;
+                            agg.bucket_start_epoch = bucket_start;
+                            agg.open = bar.open;
+                            agg.high = bar.high;
+                            agg.low = bar.low;
+                            agg.close = bar.close;
+                            agg.volume = bar.volume;
+                            agg.trade_count = bar.trade_count.value_or(0);
+                            if (bar.vwap.has_value()) {
+                                agg.vwap = bar.vwap;
+                            }
+                            agg.has_data = true;
+                            agg.last_emit_ts_ns = 0;
                         } else {
-                            continue;
+                            agg.high = std::max(agg.high, bar.high);
+                            agg.low = std::min(agg.low, bar.low);
+                            agg.close = bar.close;
+                            agg.volume += bar.volume;
+                            agg.trade_count += bar.trade_count.value_or(0);
+                            if (bar.vwap.has_value()) {
+                                agg.vwap = bar.vwap;
+                            }
+                            agg.has_data = true;
                         }
-                    } else {
+
+                        if (agg.has_data) {
+                            int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (event_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
+                            if (elapsed_ns < 0) {
+                                elapsed_ns = bar_interval_ns;
+                            }
+                            if (agg.last_emit_ts_ns == 0 || elapsed_ns >= bar_interval_ns) {
+                                BarData agg_bar;
+                                agg_bar.open = agg.open;
+                                agg_bar.high = agg.high;
+                                agg_bar.low = agg.low;
+                                agg_bar.close = agg.close;
+                                agg_bar.volume = agg.volume;
+                                agg_bar.vwap = agg.vwap;
+                                agg_bar.trade_count = agg.trade_count;
+
+                                Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                                std::string bar_msg = format_bar_polygon(event.symbol, agg_bar, bucket_ts, tf_secs);
+                                conn->send(bar_msg);
+                                agg.last_emit_ts_ns = event_ts_ns;
+                                emitted_any = true;
+                            }
+                        }
+                    }
+                    if (!emitted_any) {
                         continue;
                     }
                 } else if (state.api_type == WsApiType::ALPACA) {
@@ -1664,41 +1698,38 @@ void WsController::worker_loop() {
 
                 for (auto& agg_entry : state.agg_bars) {
                     const auto& symbol = agg_entry.first;
-                    auto& agg = agg_entry.second;
                     if (!all_symbols && bar_symbols.count(symbol) == 0) continue;
-                    if (!agg.has_data || agg.bucket_start_epoch == 0) continue;
+                    for (auto& tf_entry : agg_entry.second) {
+                        int64_t tf_secs = tf_entry.first;
+                        auto& agg = tf_entry.second;
+                        if (!agg.has_data || agg.bucket_start_epoch == 0) continue;
 
-                    auto bar_interval_ms = resolve_bar_stream_interval_ms(state);
-                    int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
-                    int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (now_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
-                    if (elapsed_ns < 0) {
-                        elapsed_ns = bar_interval_ns;
+                        auto bar_interval_ms = resolve_bar_stream_interval_ms(state);
+                        int64_t bar_interval_ns = bar_interval_ms * 1000000LL;
+                        int64_t elapsed_ns = agg.last_emit_ts_ns > 0 ? (now_ts_ns - agg.last_emit_ts_ns) : bar_interval_ns;
+                        if (elapsed_ns < 0) {
+                            elapsed_ns = bar_interval_ns;
+                        }
+                        if (elapsed_ns < bar_interval_ns) continue;
+
+                        BarData agg_bar;
+                        agg_bar.open = agg.open;
+                        agg_bar.high = agg.high;
+                        agg_bar.low = agg.low;
+                        agg_bar.close = agg.close;
+                        agg_bar.volume = agg.volume;
+                        agg_bar.vwap = agg.vwap;
+                        agg_bar.trade_count = agg.trade_count;
+
+                        Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
+                        std::string bar_msg = format_bar_polygon(symbol, agg_bar, bucket_ts, tf_secs);
+                        conn->send(bar_msg);
+
+                        agg.last_emit_ts_ns = now_ts_ns;
+                        update_backpressure(conn, bar_msg.size());
+                        state.messages_sent += 1;
+                        state.bytes_sent += bar_msg.size();
                     }
-                    if (elapsed_ns < bar_interval_ns) continue;
-
-                    int64_t tf_secs = 60;
-                    auto tf_it = state.bar_timeframes.find(symbol);
-                    if (tf_it != state.bar_timeframes.end()) {
-                        tf_secs = tf_it->second;
-                    }
-
-                    BarData agg_bar;
-                    agg_bar.open = agg.open;
-                    agg_bar.high = agg.high;
-                    agg_bar.low = agg.low;
-                    agg_bar.close = agg.close;
-                    agg_bar.volume = agg.volume;
-                    agg_bar.vwap = agg.vwap;
-                    agg_bar.trade_count = agg.trade_count;
-
-                    Timestamp bucket_ts = Timestamp{} + std::chrono::seconds(agg.bucket_start_epoch);
-                    std::string bar_msg = format_bar_polygon(symbol, agg_bar, bucket_ts, tf_secs);
-                    conn->send(bar_msg);
-
-                    agg.last_emit_ts_ns = now_ts_ns;
-                    update_backpressure(conn, bar_msg.size());
-                    state.messages_sent += 1;
-                    state.bytes_sent += bar_msg.size();
                 }
             }
 

@@ -95,6 +95,8 @@ public:
     std::vector<StockIpoRecord> get_stock_ipos(const StockIposQuery& query) override;
     std::vector<StockShortInterestRecord> get_stock_short_interest(const StockShortInterestQuery& query) override;
     std::vector<StockShortVolumeRecord> get_stock_short_volume(const StockShortVolumeQuery& query) override;
+    std::optional<TopMoversSnapshotRecord> get_top_gainers_snapshot(Timestamp max_timestamp,
+                                                                    size_t limit) override;
     std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery& query) override;
 
     std::vector<SplitRecord> get_splits(const std::string& symbol,

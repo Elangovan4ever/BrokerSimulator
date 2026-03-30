@@ -170,6 +170,13 @@ public:
         return {};
     }
 
+    std::optional<TopMoversSnapshotRecord> get_top_gainers_snapshot(Timestamp max_timestamp,
+                                                                    size_t limit) override {
+        (void)max_timestamp;
+        (void)limit;
+        return std::nullopt;
+    }
+
     std::vector<FinancialsRecord> get_stock_financials(const FinancialsQuery& query) override {
         (void)query;
         return {};

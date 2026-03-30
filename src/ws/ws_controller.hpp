@@ -72,7 +72,7 @@ struct WsConnectionState {
     std::unordered_map<SubscriptionType, std::unordered_set<std::string>> subscriptions;
 
     // Bar timeframes per symbol (seconds)
-    std::unordered_map<std::string, int64_t> bar_timeframes;
+    std::unordered_map<std::string, std::unordered_set<int64_t>> bar_timeframes;
 
     // Backpressure tracking
     BackpressureState backpressure;
@@ -85,7 +85,7 @@ struct WsConnectionState {
     std::vector<std::string> pending_msgs;
     std::chrono::steady_clock::time_point last_flush{std::chrono::steady_clock::now()};
 
-    // Bar aggregation state per symbol
+    // Bar aggregation state per symbol/timeframe
     struct AggBar {
         int64_t bucket_start_epoch{0};
         double open{0}, high{0}, low{0}, close{0};
@@ -95,7 +95,7 @@ struct WsConnectionState {
         int64_t last_emit_ts_ns{0};
         bool has_data{false};
     };
-    std::unordered_map<std::string, AggBar> agg_bars;
+    std::unordered_map<std::string, std::unordered_map<int64_t, AggBar>> agg_bars;
 
     // Check if subscribed to a symbol for a given type
     bool is_subscribed(SubscriptionType type, const std::string& symbol) const {

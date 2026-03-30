@@ -119,7 +119,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
     auto end_str = format_timestamp(end_time);
     // Union trades and quotes in chronological order.
     std::string query = fmt::format(R"(
-        SELECT ts, symbol, kind, price, size, bid_price, bid_size, ask_price, ask_size, exchange, conditions, tape, bid_exch, ask_exch, seq
+        SELECT ts, symbol, kind, price, size, bid_price, bid_size, ask_price, ask_size, exchange, conditions, tape, bid_exch, ask_exch
         FROM (
             SELECT timestamp as ts,
                    CAST(symbol AS String) as symbol,
@@ -134,8 +134,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                    conditions,
                    toInt32(tape) as tape,
                    toInt32(exchange) as bid_exch,
-                   toInt32(exchange) as ask_exch,
-                   toUInt64(sequence_number) as seq
+                   toInt32(exchange) as ask_exch
             FROM stock_trades
             WHERE symbol IN ({})
               AND timestamp >= '{}'
@@ -154,14 +153,22 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                    '' as conditions,
                    toInt32(tape) as tape,
                    toInt32(bid_exchange) as bid_exch,
-                   toInt32(ask_exchange) as ask_exch,
-                   toUInt64(sequence_number) as seq
+                   toInt32(ask_exchange) as ask_exch
             FROM stock_quotes
             WHERE symbol IN ({})
               AND sip_timestamp >= '{}'
               AND sip_timestamp < '{}'
         )
-        ORDER BY ts ASC, kind ASC, seq ASC
+        ORDER BY ts ASC,
+                 kind ASC,
+                 symbol ASC,
+                 exchange ASC,
+                 bid_exch ASC,
+                 ask_exch ASC,
+                 price ASC,
+                 size ASC,
+                 tape ASC,
+                 conditions ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str);
 
     spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
@@ -395,7 +402,23 @@ void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string
               AND timestamp >= '{}'
               AND timestamp < '{}'
         )
-        ORDER BY ts ASC, kind ASC
+        ORDER BY ts ASC,
+                 kind ASC,
+                 symbol ASC,
+                 exchange ASC,
+                 bid_exch ASC,
+                 ask_exch ASC,
+                 price ASC,
+                 size ASC,
+                 tape ASC,
+                 conditions ASC,
+                 open ASC,
+                 high ASC,
+                 low ASC,
+                 close ASC,
+                 volume ASC,
+                 vwap ASC,
+                 trade_count ASC
     )", sym_list, start_str, end_str, sym_list, start_str, end_str, sym_list, start_str, end_str);
 
     spdlog::info("Starting ClickHouse merged stream for {} symbols, {} to {}", symbols.size(), start_str, end_str);
@@ -505,7 +528,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
             WHERE symbol = '{}'
               AND timestamp >= '{}'
               AND timestamp < '{}'
-            ORDER BY timestamp ASC, sequence_number ASC
+            ORDER BY timestamp ASC
             {}
         )", symbol, start_str, end_str, limit_clause);
 
@@ -553,7 +576,7 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
             WHERE symbol = '{}'
               AND sip_timestamp >= '{}'
               AND sip_timestamp < '{}'
-            ORDER BY sip_timestamp ASC, sequence_number ASC
+            ORDER BY sip_timestamp ASC
             {}
         )", symbol, start_str, end_str, limit_clause);
 
@@ -1209,16 +1232,6 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
         opts.SetPassword(cfg_.password);
         clickhouse::Client client(opts);
 
-        std::string feed = query.feed;
-        std::transform(feed.begin(), feed.end(), feed.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        if (feed.empty()) feed = "polygon_news";
-        const bool use_benzinga = (feed == "benzinga_news");
-
-        const std::string ts_col = use_benzinga ? "published" : "published_utc";
-        const std::string raw_id_col = use_benzinga ? "benzinga_id" : "id";
-
         std::vector<std::string> where;
         auto add_ts = [this, &where](const std::string& col, const std::optional<Timestamp>& value, const char* op) {
             if (!value) return;
@@ -1230,50 +1243,43 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
             where.push_back(fmt::format("has(tickers, '{}')", *query.ticker));
         }
 
-        add_ts(ts_col, query.published_utc, "=");
-        add_ts(ts_col, query.published_utc_gt, ">");
-        add_ts(ts_col, query.published_utc_gte, ">=");
-        add_ts(ts_col, query.published_utc_lt, "<");
-        add_ts(ts_col, query.published_utc_lte, "<=");
+        add_ts("published", query.published_utc, "=");
+        add_ts("published", query.published_utc_gt, ">");
+        add_ts("published", query.published_utc_gte, ">=");
+        add_ts("published", query.published_utc_lt, "<");
+        add_ts("published", query.published_utc_lte, "<=");
 
         if (query.max_published_utc) {
             auto ts = format_timestamp(*query.max_published_utc);
-            where.push_back(fmt::format("{} <= toDateTime64('{}', 3)", ts_col, ts));
+            where.push_back(fmt::format("published <= toDateTime64('{}', 3)", ts));
         }
 
         if (query.cursor_published_utc) {
             auto ts = format_timestamp(*query.cursor_published_utc);
-            const std::string cursor_id_value = query.cursor_id.value_or("0");
-            const std::string cursor_id_numeric = query.cursor_id
-                ? fmt::format("toUInt64OrZero('{}')", *query.cursor_id)
-                : "0";
+            uint64_t cursor_id = 0;
+            if (query.cursor_id && !query.cursor_id->empty()) {
+                try {
+                    cursor_id = static_cast<uint64_t>(std::stoull(*query.cursor_id));
+                } catch (...) {
+                    cursor_id = 0;
+                }
+            }
+
             if (query.order == "ascending") {
-                if (query.cursor_id && !query.cursor_id->empty()) {
-                    if (use_benzinga) {
-                        where.push_back(fmt::format(
-                            "({0} > toDateTime64('{1}', 3) OR ({0} = toDateTime64('{1}', 3) AND {2} > {3}))",
-                            ts_col, ts, raw_id_col, cursor_id_numeric));
-                    } else {
-                        where.push_back(fmt::format(
-                            "({0} > toDateTime64('{1}', 3) OR ({0} = toDateTime64('{1}', 3) AND {2} > '{3}'))",
-                            ts_col, ts, raw_id_col, cursor_id_value));
-                    }
+                if (cursor_id > 0) {
+                    where.push_back(fmt::format(
+                        "(published > toDateTime64('{}', 3) OR (published = toDateTime64('{}', 3) AND benzinga_id > {}))",
+                        ts, ts, cursor_id));
                 } else {
-                    where.push_back(fmt::format("{} > toDateTime64('{}', 3)", ts_col, ts));
+                    where.push_back(fmt::format("published > toDateTime64('{}', 3)", ts));
                 }
             } else {
-                if (query.cursor_id && !query.cursor_id->empty()) {
-                    if (use_benzinga) {
-                        where.push_back(fmt::format(
-                            "({0} < toDateTime64('{1}', 3) OR ({0} = toDateTime64('{1}', 3) AND {2} < {3}))",
-                            ts_col, ts, raw_id_col, cursor_id_numeric));
-                    } else {
-                        where.push_back(fmt::format(
-                            "({0} < toDateTime64('{1}', 3) OR ({0} = toDateTime64('{1}', 3) AND {2} < '{3}'))",
-                            ts_col, ts, raw_id_col, cursor_id_value));
-                    }
+                if (cursor_id > 0) {
+                    where.push_back(fmt::format(
+                        "(published < toDateTime64('{}', 3) OR (published = toDateTime64('{}', 3) AND benzinga_id < {}))",
+                        ts, ts, cursor_id));
                 } else {
-                    where.push_back(fmt::format("{} < toDateTime64('{}', 3)", ts_col, ts));
+                    where.push_back(fmt::format("published < toDateTime64('{}', 3)", ts));
                 }
             }
         }
@@ -1293,52 +1299,28 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
             limit_clause = fmt::format(" LIMIT {}", query.limit);
         }
 
-        std::string sql;
-        if (use_benzinga) {
-            sql = fmt::format(R"(
-                SELECT CAST(benzinga_id AS String),
-                       published AS published_utc,
-                       last_updated AS updated_utc,
-                       CAST('Benzinga' AS String),
-                       CAST('' AS String),
-                       CAST('' AS String),
-                       CAST('' AS String),
-                       title,
-                       author,
-                       url AS article_url,
-                       CAST('' AS String) AS amp_url,
-                       if(length(images) > 0, images[1], '') AS image_url,
-                       teaser AS description,
-                       CAST(tickers AS Array(String)) AS tickers,
-                       CAST(tags AS Array(String)) AS keywords
-                FROM benzinga_news
-                {}
-                ORDER BY published_utc {} , benzinga_id {}
-                {}
-            )", where_clause, order, order, limit_clause);
-        } else {
-            sql = fmt::format(R"(
-                SELECT CAST(id AS String),
-                       published_utc,
-                       updated_utc,
-                       CAST(publisher_name AS String),
-                       publisher_homepage_url,
-                       publisher_logo_url,
-                       publisher_favicon_url,
-                       title,
-                       author,
-                       article_url,
-                       amp_url,
-                       image_url,
-                       description,
-                       CAST(tickers AS Array(String)) AS tickers,
-                       CAST(keywords AS Array(String)) AS keywords
-                FROM stock_news
-                {}
-                ORDER BY published_utc {} , id {}
-                {}
-            )", where_clause, order, order, limit_clause);
-        }
+        std::string sql = fmt::format(R"(
+            SELECT CAST(benzinga_id AS String) AS id,
+                   published AS published_utc,
+                   last_updated AS updated_utc,
+                   CAST('Benzinga' AS String) AS publisher_name,
+                   CAST('https://www.benzinga.com' AS String) AS publisher_homepage_url,
+                   CAST('' AS String) AS publisher_logo_url,
+                   CAST('' AS String) AS publisher_favicon_url,
+                   title,
+                   author,
+                   url AS article_url,
+                   url AS amp_url,
+                   if(length(images) > 0, images[1], '') AS image_url,
+                   teaser AS description,
+                   CAST(tickers AS Array(String)) AS tickers,
+                   CAST(channels AS Array(String)) AS channels,
+                   CAST(tags AS Array(String)) AS tags
+            FROM benzinga_news
+            {}
+            ORDER BY published {} , benzinga_id {}
+            {}
+        )", where_clause, order, order, limit_clause);
 
         auto read_array = [](const clickhouse::ColumnRef& col, size_t row) {
             std::vector<std::string> out;
@@ -1372,7 +1354,14 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
                 n.image_url = block[11]->As<clickhouse::ColumnString>()->At(row);
                 n.description = block[12]->As<clickhouse::ColumnString>()->At(row);
                 n.tickers = read_array(block[13], row);
-                n.keywords = read_array(block[14], row);
+                auto channels = read_array(block[14], row);
+                auto tags = read_array(block[15], row);
+                n.keywords = channels;
+                for (const auto& tag : tags) {
+                    if (std::find(n.keywords.begin(), n.keywords.end(), tag) == n.keywords.end()) {
+                        n.keywords.push_back(tag);
+                    }
+                }
                 out.push_back(std::move(n));
             }
         });
@@ -1874,6 +1863,148 @@ std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume
     return out;
 }
 
+std::optional<TopMoversSnapshotRecord> ClickHouseDataSource::get_top_gainers_snapshot(
+    Timestamp max_timestamp,
+    size_t limit) {
+    try {
+        clickhouse::ClientOptions opts;
+        opts.SetHost(cfg_.host);
+        opts.SetPort(cfg_.port);
+        opts.SetDefaultDatabase(cfg_.database);
+        opts.SetUser(cfg_.user);
+        opts.SetPassword(cfg_.password);
+        clickhouse::Client client(opts);
+
+        auto ts = format_timestamp(max_timestamp);
+        auto array_size = [](const clickhouse::ColumnRef& col, size_t row) -> size_t {
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return 0;
+            return arr->GetAsColumn(row)->Size();
+        };
+        auto read_string_array = [](const clickhouse::ColumnRef& col, size_t row, size_t max_items) {
+            std::vector<std::string> out;
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return out;
+            auto row_col = arr->GetAsColumn(row);
+            auto str_col = row_col->As<clickhouse::ColumnString>();
+            if (!str_col) return out;
+            auto count = std::min(max_items, str_col->Size());
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                auto sv = str_col->At(i);
+                out.emplace_back(sv.data(), sv.size());
+            }
+            return out;
+        };
+        auto read_float64_array = [](const clickhouse::ColumnRef& col, size_t row, size_t max_items) {
+            std::vector<double> out;
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return out;
+            auto row_col = arr->GetAsColumn(row);
+            auto num_col = row_col->As<clickhouse::ColumnFloat64>();
+            if (!num_col) return out;
+            auto count = std::min(max_items, num_col->Size());
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                out.push_back(num_col->At(i));
+            }
+            return out;
+        };
+        auto read_float32_array = [](const clickhouse::ColumnRef& col, size_t row, size_t max_items) {
+            std::vector<double> out;
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return out;
+            auto row_col = arr->GetAsColumn(row);
+            auto num_col = row_col->As<clickhouse::ColumnFloat32>();
+            if (!num_col) return out;
+            auto count = std::min(max_items, num_col->Size());
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                out.push_back(static_cast<double>(num_col->At(i)));
+            }
+            return out;
+        };
+        auto read_uint64_array = [](const clickhouse::ColumnRef& col, size_t row, size_t max_items) {
+            std::vector<uint64_t> out;
+            auto arr = col->As<clickhouse::ColumnArray>();
+            if (!arr) return out;
+            auto row_col = arr->GetAsColumn(row);
+            auto num_col = row_col->As<clickhouse::ColumnUInt64>();
+            if (!num_col) return out;
+            auto count = std::min(max_items, num_col->Size());
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                out.push_back(num_col->At(i));
+            }
+            return out;
+        };
+
+        std::optional<TopMoversSnapshotRecord> snapshot;
+        std::string sql = fmt::format(R"(
+            SELECT timestamp,
+                   CAST(symbols AS Array(String)) AS symbols,
+                   CAST(prices AS Array(Float64)) AS prices,
+                   CAST(change_percents AS Array(Float32)) AS change_percents,
+                   CAST(volumes AS Array(UInt64)) AS volumes,
+                   CAST(previous_closes AS Array(Float64)) AS previous_closes
+            FROM market_data.stock_top_gainers_1s_top200
+            WHERE trade_date = toDate(toDateTime('{}', 'UTC'))
+              AND timestamp <= toDateTime('{}', 'UTC')
+            ORDER BY timestamp DESC
+            LIMIT 1
+        )", ts, ts);
+
+        client.Select(sql, [&](const clickhouse::Block& block) {
+            if (snapshot || block.GetRowCount() == 0) {
+                return;
+            }
+            const size_t row = 0;
+            auto available = std::min({
+                array_size(block[1], row),
+                array_size(block[2], row),
+                array_size(block[3], row),
+                array_size(block[4], row),
+                array_size(block[5], row),
+                limit
+            });
+            if (available == 0) {
+                return;
+            }
+
+            TopMoversSnapshotRecord record;
+            record.timestamp = extract_ts_any(block[0], row);
+            record.symbols = read_string_array(block[1], row, available);
+            record.prices = read_float64_array(block[2], row, available);
+            record.change_percents = read_float32_array(block[3], row, available);
+            record.volumes = read_uint64_array(block[4], row, available);
+            record.previous_closes = read_float64_array(block[5], row, available);
+
+            auto final_count = std::min({
+                record.symbols.size(),
+                record.prices.size(),
+                record.change_percents.size(),
+                record.volumes.size(),
+                record.previous_closes.size()
+            });
+            record.symbols.resize(final_count);
+            record.prices.resize(final_count);
+            record.change_percents.resize(final_count);
+            record.volumes.resize(final_count);
+            record.previous_closes.resize(final_count);
+
+            if (final_count == 0) {
+                return;
+            }
+            snapshot = std::move(record);
+        });
+
+        return snapshot;
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse get_top_gainers_snapshot failed: {}", e.what());
+        return std::nullopt;
+    }
+}
+
 std::vector<FinancialsRecord> ClickHouseDataSource::get_stock_financials(const FinancialsQuery& query) {
     std::vector<FinancialsRecord> out;
     try {
@@ -2287,13 +2418,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
     std::vector<EarningsCalendarRecord> out;
-    std::lock_guard<std::mutex> lock(client_mutex_);
-    if (!client_) {
-        spdlog::info("ClickHouse client not connected for get_earnings_calendar, reconnecting...");
-        connect();
-    }
     if (!client_) return out;
-
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
@@ -2313,8 +2438,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
         ORDER BY date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-
-    auto run_select = [&]() {
+    try {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 EarningsCalendarRecord e;
@@ -2330,23 +2454,9 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                 out.push_back(std::move(e));
             }
         });
-    };
-
-    try {
-        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn(
-            "ClickHouse get_earnings_calendar failed: {}, reconnecting and retrying...",
-            e.what());
+        spdlog::warn("ClickHouse get_earnings_calendar failed: {}", e.what());
         out.clear();
-        connect();
-        if (!client_) return out;
-        try {
-            run_select();
-        } catch (const std::exception& retry_e) {
-            spdlog::warn("ClickHouse get_earnings_calendar retry failed: {}", retry_e.what());
-            out.clear();
-        }
     }
     return out;
 }
@@ -2355,6 +2465,7 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
                                                                                   Timestamp start_time,
                                                                                   Timestamp end_time,
                                                                                   size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<RecommendationRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -2369,7 +2480,7 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
         ORDER BY period DESC
         {}
     )", symbol, start_str, end_str, limit_clause(limit));
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 RecommendationRecord r;
@@ -2383,9 +2494,19 @@ std::vector<RecommendationRecord> ClickHouseDataSource::get_recommendation_trend
                 out.push_back(std::move(r));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_recommendation_trends failed: {}", e.what());
+        spdlog::warn("ClickHouse get_recommendation_trends failed: {}, reconnecting...", e.what());
         out.clear();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_recommendation_trends retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
@@ -2426,6 +2547,7 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
                                                                                  Timestamp start_time,
                                                                                  Timestamp end_time,
                                                                                  size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<UpgradeDowngradeRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -2445,7 +2567,7 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
         ORDER BY grade_time DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 UpgradeDowngradeRecord u;
@@ -2458,9 +2580,19 @@ std::vector<UpgradeDowngradeRecord> ClickHouseDataSource::get_upgrades_downgrade
                 out.push_back(std::move(u));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_upgrades_downgrades failed: {}", e.what());
+        spdlog::warn("ClickHouse get_upgrades_downgrades failed: {}, reconnecting...", e.what());
         out.clear();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_upgrades_downgrades retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
