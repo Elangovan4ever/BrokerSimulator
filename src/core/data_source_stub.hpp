@@ -148,6 +148,11 @@ public:
         return {};
     }
 
+    std::vector<TickerBasicRecord> get_tickers(const StockTickersQuery& query) override {
+        (void)query;
+        return {};
+    }
+
     std::optional<TickerBasicRecord> get_ticker_basic(const std::string& ticker,
                                                       std::optional<Timestamp> max_date) override {
         (void)ticker;
@@ -172,6 +177,13 @@ public:
 
     std::optional<TopMoversSnapshotRecord> get_top_gainers_snapshot(Timestamp max_timestamp,
                                                                     size_t limit) override {
+        (void)max_timestamp;
+        (void)limit;
+        return std::nullopt;
+    }
+
+    std::optional<TopMoversSnapshotRecord> get_top_losers_snapshot(Timestamp max_timestamp,
+                                                                   size_t limit) override {
         (void)max_timestamp;
         (void)limit;
         return std::nullopt;

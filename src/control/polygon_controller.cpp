@@ -2738,10 +2738,16 @@ void PolygonController::snapshotGainersLosers(const drogon::HttpRequestPtr& req,
     auto session = get_session(req);
 
     json tickers = json::array();
-    if (direction == "gainers" && session) {
+    if (session) {
         auto data_source = session_mgr_->api_data_source();
         if (data_source) {
-            if (auto snapshot = data_source->get_top_gainers_snapshot(session->time_engine->current_time(), 20)) {
+            std::optional<TopMoversSnapshotRecord> snapshot;
+            if (direction == "gainers") {
+                snapshot = data_source->get_top_gainers_snapshot(session->time_engine->current_time(), 20);
+            } else if (direction == "losers") {
+                snapshot = data_source->get_top_losers_snapshot(session->time_engine->current_time(), 20);
+            }
+            if (snapshot) {
                 for (size_t i = 0; i < snapshot->symbols.size(); ++i) {
                     tickers.push_back(build_top_mover_ticker(*snapshot, i));
                 }
