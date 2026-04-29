@@ -154,8 +154,9 @@ inline nlohmann::json format_position(const Position& p) {
     };
 }
 
-inline nlohmann::json format_account(const AccountState& st, const std::string& session_id) {
+inline nlohmann::json format_account(const AccountState& st, const std::string& session_id, double reference_equity) {
     const double position_market_value = st.long_market_value + st.short_market_value;
+    const double last_equity = reference_equity > 0.0 ? reference_equity : st.equity;
     const auto now = std::chrono::system_clock::now();
     const std::string account_id =
         session_id.size() >= 32 ? session_id.substr(0, 32) : session_id;
@@ -187,7 +188,7 @@ inline nlohmann::json format_account(const AccountState& st, const std::string& 
     result["multiplier"] = "2";
     result["shorting_enabled"] = true;
     result["equity"] = std::to_string(st.equity);
-    result["last_equity"] = std::to_string(st.equity);
+    result["last_equity"] = std::to_string(last_equity);
     result["long_market_value"] = std::to_string(st.long_market_value);
     result["short_market_value"] = std::to_string(st.short_market_value);
     result["position_market_value"] = std::to_string(position_market_value);

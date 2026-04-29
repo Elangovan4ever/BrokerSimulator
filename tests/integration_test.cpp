@@ -11,6 +11,7 @@
 #include "../src/core/session_manager.hpp"
 #include "../src/core/data_source_stub.hpp"
 #include "../src/control/control_server.hpp"
+#include "../src/control/alpaca_format.hpp"
 
 using namespace broker_sim;
 
@@ -508,6 +509,19 @@ TEST(OrderManagementTest, GetOrderById) {
 //
 // Account and Position Tests
 //
+
+TEST(AccountTest, AlpacaFormatUsesSessionReferenceEquity) {
+    AccountState state;
+    state.cash = 125000.0;
+    state.equity = 125000.0;
+    state.buying_power = 500000.0;
+
+    auto account = alpaca_format::format_account(state, "session-reference", 100000.0);
+
+    EXPECT_EQ(account["portfolio_value"], "125000.000000");
+    EXPECT_EQ(account["equity"], "125000.000000");
+    EXPECT_EQ(account["last_equity"], "100000.000000");
+}
 
 TEST(AccountTest, InitialAccountState) {
     auto ds = std::make_shared<IntegrationTestDataSource>();

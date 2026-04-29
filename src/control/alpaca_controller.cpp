@@ -90,8 +90,8 @@ json AlpacaController::format_position(const Position& p) {
     return alpaca_format::format_position(p);
 }
 
-json AlpacaController::format_account(const AccountState& st, const std::string& session_id) {
-    return alpaca_format::format_account(st, session_id);
+json AlpacaController::format_account(const AccountState& st, const std::string& session_id, double reference_equity) {
+    return alpaca_format::format_account(st, session_id, reference_equity);
 }
 
 // ============================================================================
@@ -105,7 +105,7 @@ void AlpacaController::account(const drogon::HttpRequestPtr& req,
     if (!session) { cb(error_resp("session not found", 404)); return; }
 
     auto st = session->account_manager->state();
-    cb(json_resp(format_account(st, session->id)));
+    cb(json_resp(format_account(st, session->id, session->config.initial_capital)));
 }
 
 // ============================================================================

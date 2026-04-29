@@ -141,7 +141,7 @@ private:
     // Helpers for formatting
     nlohmann::json format_order(const Order& order);
     nlohmann::json format_position(const Position& pos);
-    nlohmann::json format_account(const AccountState& state, const std::string& session_id);
+    nlohmann::json format_account(const AccountState& state, const std::string& session_id, double reference_equity);
 
     std::shared_ptr<SessionManager> session_mgr_;
     Config cfg_;
