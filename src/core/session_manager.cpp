@@ -369,12 +369,7 @@ void SessionManager::start_session(const std::string& session_id) {
     if (exec_cfg_.enable_shared_feed) {
         start_shared_feeder();
     } else {
-        auto initial_symbols = get_stream_symbols(session);
-        if (initial_symbols.empty()) {
-            spdlog::info("[StartSession] session={} no initial symbols; starting polling feeder for time progression",
-                         session->id);
-            start_polling_feeder(session);
-        }
+        start_polling_feeder(session);
     }
     session->worker_thread = std::make_unique<std::thread>(
         [this, session]() { run_session_loop(session); }
@@ -864,14 +859,16 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
                 break;
             }
             auto current_ts = session->time_engine->current_time();
-            auto next_open = exec_cfg_.next_market_open_after(current_ts);
-            if (next_open > current_ts && next_open <= ev.timestamp) {
-                session->time_engine->set_time(next_open);
+            if (exec_cfg_.get_market_session(current_ts) == ExecutionConfig::MarketSession::CLOSED) {
+                auto next_open = exec_cfg_.next_market_open_after(current_ts);
+                if (next_open > current_ts && next_open <= ev.timestamp) {
+                    session->time_engine->set_time(std::min(next_open, session->config.end_time));
+                }
             }
             if (exec_cfg_.get_market_session(ev.timestamp) == ExecutionConfig::MarketSession::CLOSED) {
                 auto next_open_event = exec_cfg_.next_market_open_after(ev.timestamp);
                 if (next_open_event > ev.timestamp) {
-                    session->time_engine->set_time(next_open_event);
+                    session->time_engine->set_time(std::min(next_open_event, session->config.end_time));
                 }
                 continue;
             }

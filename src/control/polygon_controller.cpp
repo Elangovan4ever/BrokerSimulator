@@ -2741,11 +2741,16 @@ void PolygonController::snapshotGainersLosers(const drogon::HttpRequestPtr& req,
     if (session) {
         auto data_source = session_mgr_->api_data_source();
         if (data_source) {
+            auto snapshot_time = session->time_engine->current_time();
+            if (auto requested = utils::parse_ts_any(req->getParameter("timestamp"))) {
+                snapshot_time = *requested;
+            }
+
             std::optional<TopMoversSnapshotRecord> snapshot;
             if (direction == "gainers") {
-                snapshot = data_source->get_top_gainers_snapshot(session->time_engine->current_time(), 20);
+                snapshot = data_source->get_top_gainers_snapshot(snapshot_time, 20);
             } else if (direction == "losers") {
-                snapshot = data_source->get_top_losers_snapshot(session->time_engine->current_time(), 20);
+                snapshot = data_source->get_top_losers_snapshot(snapshot_time, 20);
             }
             if (snapshot) {
                 for (size_t i = 0; i < snapshot->symbols.size(); ++i) {

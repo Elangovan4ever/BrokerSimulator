@@ -68,6 +68,7 @@ struct OrderData {
     std::string status;
     std::string side;
     double position_qty{0.0};
+    double execution_fee{0.0};
 };
 
 struct DividendData {

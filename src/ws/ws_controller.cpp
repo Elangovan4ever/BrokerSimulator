@@ -1056,6 +1056,7 @@ std::string WsController::format_order_alpaca(const OrderData& order, const std:
         data["price"] = order.filled_avg_price;
         data["qty"] = order.filled_qty;
         data["position_qty"] = order.position_qty;
+        data["execution_fee"] = order.execution_fee;
     }
 
     json order_obj;
@@ -1064,6 +1065,7 @@ std::string WsController::format_order_alpaca(const OrderData& order, const std:
     order_obj["qty"] = order.qty;
     order_obj["filled_qty"] = order.filled_qty;
     order_obj["filled_avg_price"] = order.filled_avg_price;
+    order_obj["execution_fee"] = order.execution_fee;
     order_obj["status"] = order.status;
     if (!order.side.empty()) {
         order_obj["side"] = order.side;

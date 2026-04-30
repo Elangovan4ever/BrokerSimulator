@@ -88,7 +88,9 @@ inline void save_checkpoint(const Checkpoint& ckpt, const std::string& dir = "lo
             {"created_at_ns", o.created_at_ns},
             {"submitted_at_ns", o.submitted_at_ns},
             {"updated_at_ns", o.updated_at_ns},
-            {"filled_at_ns", o.filled_at_ns}
+            {"filled_at_ns", o.filled_at_ns},
+            {"last_fill_fee", o.last_fill_fee},
+            {"cumulative_fees", o.cumulative_fees}
         });
     }
     j["orders"] = ord;
@@ -194,6 +196,8 @@ inline std::optional<Checkpoint> load_checkpoint(const std::string& session_id, 
             ord.submitted_at_ns = o.value("submitted_at_ns", int64_t{0});
             ord.updated_at_ns = o.value("updated_at_ns", int64_t{0});
             ord.filled_at_ns = o.value("filled_at_ns", int64_t{0});
+            ord.last_fill_fee = o.value("last_fill_fee", 0.0);
+            ord.cumulative_fees = o.value("cumulative_fees", 0.0);
             if (!ord.id.empty()) {
                 ck.orders[ord.id] = ord;
             }

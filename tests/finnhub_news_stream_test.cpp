@@ -81,7 +81,7 @@ TEST(FinnhubNewsStreamingTest, CompanyNewsSubscriptionEmitsNewsEvent) {
     SessionConfig cfg;
     cfg.symbols = {"AAPL"};
     cfg.start_time = make_ts_ns(0);
-    cfg.end_time = make_ts_ns(10000000);
+    cfg.end_time = make_ts_ns(10000000000);
     cfg.speed_factor = 0.0;
 
     auto session = mgr.create_session(cfg);
@@ -143,7 +143,7 @@ TEST(FinnhubNewsStreamingTest, WildcardNewsSubscriptionEmitsMarketNewsEvent) {
     SessionConfig cfg;
     cfg.symbols = {"SPY"};
     cfg.start_time = make_ts_ns(0);
-    cfg.end_time = make_ts_ns(10000000);
+    cfg.end_time = make_ts_ns(10000000000);
     cfg.speed_factor = 0.0;
 
     auto session = mgr.create_session(cfg);

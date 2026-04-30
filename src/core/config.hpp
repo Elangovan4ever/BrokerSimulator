@@ -112,19 +112,9 @@ struct ExecutionConfig {
     // Extended hours liquidity reduction (% of normal liquidity available)
     double extended_hours_liquidity_pct{30.0}; // Only 30% liquidity in extended hours
 
-    // Market holidays (2025 US market holidays - month/day format "MM-DD")
-    std::vector<std::string> market_holidays{
-        "01-01",  // New Year's Day
-        "01-20",  // Martin Luther King Jr. Day
-        "02-17",  // Presidents Day
-        "04-18",  // Good Friday
-        "05-26",  // Memorial Day
-        "06-19",  // Juneteenth
-        "07-04",  // Independence Day
-        "09-01",  // Labor Day
-        "11-27",  // Thanksgiving
-        "12-25"   // Christmas
-    };
+    // Additional configured market closures (MM-DD). Built-in US market holidays
+    // are calculated dynamically per year.
+    std::vector<std::string> market_holidays{};
 
     // Short sale restrictions
     bool enable_short_sale_restrictions{true};  // Enable SEC Rule 201 (alternative uptick rule)
@@ -154,7 +144,7 @@ struct ExecutionConfig {
      */
     bool is_market_holiday(std::chrono::system_clock::time_point ts) const {
         std::tm tm_et = to_et_tm(ts);
-        return is_market_holiday_date(tm_et.tm_mon + 1, tm_et.tm_mday);
+        return is_market_holiday_date(tm_et.tm_year + 1900, tm_et.tm_mon + 1, tm_et.tm_mday);
     }
 
     /**
@@ -165,7 +155,7 @@ struct ExecutionConfig {
         std::tm tm_et = to_et_tm(ts);
 
         // Check for market holidays first
-        if (is_market_holiday_date(tm_et.tm_mon + 1, tm_et.tm_mday)) {
+        if (is_market_holiday_date(tm_et.tm_year + 1900, tm_et.tm_mon + 1, tm_et.tm_mday)) {
             return MarketSession::CLOSED;
         }
 
@@ -228,7 +218,7 @@ struct ExecutionConfig {
             if (wday == 0 || wday == 6) {
                 return false;
             }
-            return !is_market_holiday_date(m, d);
+            return !is_market_holiday_date(y, m, d);
         };
 
         if (is_trading_day(year, month, day) && minutes_from_midnight < premarket_start_minutes) {
@@ -244,6 +234,31 @@ struct ExecutionConfig {
         return et_local_to_utc(year, month, day,
                                premarket_start_minutes / 60,
                                premarket_start_minutes % 60);
+    }
+
+    /**
+     * Clamp a feeder advance window to the next meaningful market-time boundary.
+     * If the cursor is in a closed period, jump directly to the next market open.
+     * Otherwise, stop at the current day's after-hours close before rolling forward.
+     */
+    std::chrono::system_clock::time_point next_time_boundary_after(
+            std::chrono::system_clock::time_point cursor,
+            std::chrono::system_clock::time_point raw_window_end) const {
+        if (get_market_session(cursor) == MarketSession::CLOSED) {
+            return next_market_open_after(cursor);
+        }
+
+        std::tm tm_et = to_et_tm(cursor);
+        auto close_boundary = et_local_to_utc(
+            tm_et.tm_year + 1900,
+            tm_et.tm_mon + 1,
+            tm_et.tm_mday,
+            afterhours_end_minutes / 60,
+            afterhours_end_minutes % 60);
+        if (close_boundary > cursor && close_boundary < raw_window_end) {
+            return close_boundary;
+        }
+        return raw_window_end;
     }
 
     /**
@@ -438,8 +453,59 @@ private:
         return std::chrono::system_clock::from_time_t(tt) - std::chrono::minutes(offset_min);
     }
 
-    bool is_market_holiday_date(int month, int day) const {
-        char date_str[6];
+    static bool is_leap_year(int year) {
+        return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    }
+
+    static int days_in_month(int year, int month) {
+        static int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        if (month == 2 && is_leap_year(year)) {
+            return 29;
+        }
+        return days[month - 1];
+    }
+
+    static int last_weekday_of_month(int year, int month, int weekday) {
+        int day = days_in_month(year, month);
+        int last_wday = day_of_week(year, month, day);
+        return day - ((7 + last_wday - weekday) % 7);
+    }
+
+    static void easter_sunday(int year, int& month, int& day) {
+        int a = year % 19;
+        int b = year / 100;
+        int c = year % 100;
+        int d = b / 4;
+        int e = b % 4;
+        int f = (b + 8) / 25;
+        int g = (b - f + 1) / 3;
+        int h = (19 * a + b - d - g + 15) % 30;
+        int i = c / 4;
+        int k = c % 4;
+        int l = (32 + 2 * e + 2 * i - h - k) % 7;
+        int m = (a + 11 * h + 22 * l) / 451;
+        int month_value = (h + l - 7 * m + 114) / 31;
+        int day_value = ((h + l - 7 * m + 114) % 31) + 1;
+        month = month_value;
+        day = day_value;
+    }
+
+    static bool observed_fixed_holiday_matches(int query_year, int query_month, int query_day,
+                                               int holiday_year, int holiday_month, int holiday_day) {
+        int observed_year = holiday_year;
+        int observed_month = holiday_month;
+        int observed_day = holiday_day;
+        int wday = day_of_week(holiday_year, holiday_month, holiday_day);
+        if (wday == 6) {
+            add_days(observed_year, observed_month, observed_day, -1);
+        } else if (wday == 0) {
+            add_days(observed_year, observed_month, observed_day, 1);
+        }
+        return query_year == observed_year && query_month == observed_month && query_day == observed_day;
+    }
+
+    bool is_configured_market_holiday_date(int month, int day) const {
+        char date_str[16];
         std::snprintf(date_str, sizeof(date_str), "%02d-%02d", month, day);
         std::string date_key(date_str);
 
@@ -447,6 +513,55 @@ private:
             if (holiday == date_key) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    bool is_market_holiday_date(int year, int month, int day) const {
+        if (is_configured_market_holiday_date(month, day)) {
+            return true;
+        }
+
+        if (observed_fixed_holiday_matches(year, month, day, year, 1, 1) ||
+            observed_fixed_holiday_matches(year, month, day, year + 1, 1, 1)) {
+            return true;
+        }
+
+        if (month == 1 && day == nth_weekday_of_month(year, 1, 1, 3)) {
+            return true;
+        }
+        if (month == 2 && day == nth_weekday_of_month(year, 2, 1, 3)) {
+            return true;
+        }
+
+        int easter_month = 0;
+        int easter_day = 0;
+        easter_sunday(year, easter_month, easter_day);
+        int good_friday_year = year;
+        int good_friday_month = easter_month;
+        int good_friday_day = easter_day;
+        add_days(good_friday_year, good_friday_month, good_friday_day, -2);
+        if (year == good_friday_year && month == good_friday_month && day == good_friday_day) {
+            return true;
+        }
+
+        if (month == 5 && day == last_weekday_of_month(year, 5, 1)) {
+            return true;
+        }
+        if (observed_fixed_holiday_matches(year, month, day, year, 6, 19)) {
+            return true;
+        }
+        if (observed_fixed_holiday_matches(year, month, day, year, 7, 4)) {
+            return true;
+        }
+        if (month == 9 && day == nth_weekday_of_month(year, 9, 1, 1)) {
+            return true;
+        }
+        if (month == 11 && day == nth_weekday_of_month(year, 11, 4, 4)) {
+            return true;
+        }
+        if (observed_fixed_holiday_matches(year, month, day, year, 12, 25)) {
+            return true;
         }
         return false;
     }
@@ -590,6 +705,14 @@ inline void load_config(Config& cfg, const std::string& path) {
                                                              cfg.execution.extended_hours_slippage_mult);
         cfg.execution.extended_hours_liquidity_pct = e.value("extended_hours_liquidity_pct",
                                                              cfg.execution.extended_hours_liquidity_pct);
+        if (e.contains("market_holidays") && e["market_holidays"].is_array()) {
+            cfg.execution.market_holidays.clear();
+            for (const auto& holiday : e["market_holidays"]) {
+                if (holiday.is_string()) {
+                    cfg.execution.market_holidays.push_back(holiday.get<std::string>());
+                }
+            }
+        }
     }
     if (j.contains("fees")) {
         auto& f = j["fees"];

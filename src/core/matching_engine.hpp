@@ -44,6 +44,8 @@ struct Order {
     int64_t canceled_at_ns{0};
     int64_t expired_at_ns{0};
     double last_fill_price{0.0};
+    double last_fill_fee{0.0};
+    double cumulative_fees{0.0};
     std::string rejection_reason;  // Reason for rejection if status is REJECTED
 };
 

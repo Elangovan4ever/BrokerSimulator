@@ -281,11 +281,8 @@ TEST(StressTest, HighVolumeOrderSubmission) {
         }
     });
 
-    // Start session first to process quotes
-    mgr.start_session(session->id);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Submit many orders rapidly
+    // Queue many orders rapidly, then start replay so they fill on the first
+    // live-like quote instead of racing a max-speed terminal clock.
     std::vector<std::string> order_ids;
     auto start = std::chrono::steady_clock::now();
 
@@ -305,6 +302,8 @@ TEST(StressTest, HighVolumeOrderSubmission) {
 
     auto submit_end = std::chrono::steady_clock::now();
     auto submit_duration = std::chrono::duration_cast<std::chrono::microseconds>(submit_end - start);
+
+    mgr.start_session(session->id);
 
     // Wait for fills
     {
@@ -396,10 +395,7 @@ TEST(StressTest, ConcurrentOrdersAcrossSessions) {
         auto session = mgr.create_session(cfg);
         ASSERT_NE(session, nullptr);
         sessions.push_back(session);
-        mgr.start_session(session->id);
     }
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     // Submit orders from multiple threads
     std::vector<std::thread> order_threads;
@@ -426,6 +422,10 @@ TEST(StressTest, ConcurrentOrdersAcrossSessions) {
 
     for (auto& t : order_threads) {
         t.join();
+    }
+
+    for (auto& session : sessions) {
+        mgr.start_session(session->id);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
