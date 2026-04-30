@@ -5,7 +5,41 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <cstdint>
 #include <nlohmann/json.hpp>
+
+namespace {
+
+std::tm gmtime_utc(std::time_t tt) {
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    return tm;
+}
+
+std::string format_timestamp_precise(broker_sim::Timestamp ts) {
+    auto tt = std::chrono::system_clock::to_time_t(ts);
+    auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count() % 1000000000LL;
+    if (nanos < 0) {
+        nanos += 1000000000LL;
+    }
+    auto tm = gmtime_utc(tt);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
+       << "." << std::setw(9) << std::setfill('0') << nanos;
+    return ss.str();
+}
+
+std::string trade_count_column_for_table(const std::string& table) {
+    return table.find("_second_") != std::string::npos
+        || table.find("_5s_") != std::string::npos
+        || table.find("_10s_") != std::string::npos
+        || table.find("_15s_") != std::string::npos
+        || table.find("_30s_") != std::string::npos
+        ? "trades"
+        : "transactions";
+}
+
+} // namespace
 
 namespace broker_sim {
 
@@ -512,8 +546,8 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
         opts.SetPassword(cfg_.password);
         clickhouse::Client client(opts);
 
-        auto start_str = format_timestamp(start_time);
-        auto end_str = format_timestamp(end_time);
+        auto start_str = format_timestamp_precise(start_time);
+        auto end_str = format_timestamp_precise(end_time);
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
         std::string query = fmt::format(R"(
             SELECT
@@ -528,7 +562,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
             WHERE symbol = '{}'
               AND timestamp >= '{}'
               AND timestamp < '{}'
-            ORDER BY timestamp ASC
+            ORDER BY timestamp ASC, participant_timestamp ASC, sequence_number ASC
             {}
         )", symbol, start_str, end_str, limit_clause);
 
@@ -566,8 +600,8 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
         opts.SetPassword(cfg_.password);
         clickhouse::Client client(opts);
 
-        auto start_str = format_timestamp(start_time);
-        auto end_str = format_timestamp(end_time);
+        auto start_str = format_timestamp_precise(start_time);
+        auto end_str = format_timestamp_precise(end_time);
         std::string limit_clause = limit > 0 ? fmt::format(" LIMIT {}", limit) : "";
         // CAST symbol to String to handle LowCardinality(String) column
         std::string query = fmt::format(R"(
@@ -576,7 +610,7 @@ std::vector<QuoteRecord> ClickHouseDataSource::get_quotes(const std::string& sym
             WHERE symbol = '{}'
               AND sip_timestamp >= '{}'
               AND sip_timestamp < '{}'
-            ORDER BY sip_timestamp ASC
+            ORDER BY sip_timestamp ASC, bid_exchange ASC, ask_exchange ASC, bid_price ASC, ask_price ASC, bid_size ASC, ask_size ASC, tape ASC
             {}
         )", symbol, start_str, end_str, limit_clause);
 
@@ -618,8 +652,8 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
         opts.SetPassword(cfg_.password);
         clickhouse::Client client(opts);
 
-        auto start_str = format_timestamp(start_time);
-        auto end_str = format_timestamp(end_time);
+        auto start_str = format_timestamp_precise(start_time);
+        auto end_str = format_timestamp_precise(end_time);
         auto normalized_span = timespan;
         std::transform(normalized_span.begin(), normalized_span.end(), normalized_span.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
@@ -682,6 +716,7 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
         std::string query;
 
         if (!table.empty()) {
+            auto trade_count_column = trade_count_column_for_table(table);
             query = fmt::format(R"(
                 SELECT
                     toDateTime64(timestamp, 9) AS ts,
@@ -691,17 +726,18 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
                     toFloat64(close) AS close,
                     toInt64(volume) AS volume,
                     toFloat64(vwap) AS vwap,
-                    toUInt64(transactions) AS trade_count
+                    toUInt64({}) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
                   AND timestamp >= '{}'
                   AND timestamp < '{}'
                 ORDER BY timestamp ASC
                 {}
-            )", cfg_.database, table, symbol, start_str, end_str, limit_clause);
+            )", trade_count_column, cfg_.database, table, symbol, start_str, end_str, limit_clause);
         } else {
             auto base_table = base_table_for(normalized_span);
             auto interval = interval_expr(mult, normalized_span);
+            auto trade_count_column = trade_count_column_for_table(base_table);
             query = fmt::format(R"(
                 SELECT
                     toDateTime64(toStartOfInterval(timestamp, {}), 9) AS bucket,
@@ -711,7 +747,7 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
                     toFloat64(argMax(close, timestamp)) AS close,
                     toInt64(sum(volume)) AS volume,
                     toFloat64(if(sum(volume) = 0, 0, sum(vwap * volume) / sum(volume))) AS vwap,
-                    toUInt64(sum(transactions)) AS trade_count
+                    toUInt64(sum({})) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
                   AND timestamp >= '{}'
@@ -719,7 +755,7 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
                 GROUP BY bucket
                 ORDER BY bucket ASC
                 {}
-            )", interval, cfg_.database, base_table, symbol, start_str, end_str, limit_clause);
+            )", interval, trade_count_column, cfg_.database, base_table, symbol, start_str, end_str, limit_clause);
         }
 
         client.Select(query, [&out, &symbol](const clickhouse::Block& block) {
@@ -3628,8 +3664,9 @@ std::string ClickHouseDataSource::build_symbol_list(const std::vector<std::strin
 
 std::string ClickHouseDataSource::format_timestamp(Timestamp ts) {
     auto tt = std::chrono::system_clock::to_time_t(ts);
+    auto tm = gmtime_utc(tt);
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&tt), "%Y-%m-%d %H:%M:%S");
+    ss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
     return ss.str();
 }
 
