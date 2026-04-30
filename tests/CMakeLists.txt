@@ -11,6 +11,7 @@ if(NOT GTest_FOUND)
 endif()
 
 add_executable(broker_tests
+    alpaca_format_test.cpp
     account_manager_test.cpp
     fee_config_test.cpp
     rate_limiter_test.cpp

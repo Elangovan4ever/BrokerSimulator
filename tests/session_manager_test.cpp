@@ -166,6 +166,19 @@ Timestamp make_ts(int64_t ns) {
     return Timestamp{} + std::chrono::nanoseconds(ns);
 }
 
+bool wait_until(const std::function<bool()>& predicate,
+                std::chrono::milliseconds timeout,
+                std::chrono::milliseconds interval = std::chrono::milliseconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(interval);
+    }
+    return predicate();
+}
+
 } // namespace
 
 TEST(SessionManagerTest, MarketOrderFillsAfterFirstQuote) {
@@ -254,6 +267,35 @@ TEST(SessionManagerTest, ImmediateFillDoesNotDoubleCountFilledQuantity) {
     EXPECT_DOUBLE_EQ(it->second.qty.value_or(0.0), 2.0);
     EXPECT_DOUBLE_EQ(it->second.filled_qty, 2.0);
     EXPECT_EQ(it->second.status, OrderStatus::FILLED);
+}
+
+TEST(SessionManagerTest, RejectsBackdatedDecisionOrderAfterSessionEnd) {
+    auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{});
+    SessionManager mgr(ds);
+
+    SessionConfig cfg;
+    cfg.symbols = {"AAPL"};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(10'000'000);
+    cfg.speed_factor = 0.0;
+    auto session = mgr.create_session(cfg);
+
+    NBBO nbbo{"AAPL", 100.0, 1000, 100.5, 1000, 1'000'000};
+    session->matching_engine->update_nbbo(nbbo);
+    session->time_engine->set_time(cfg.end_time);
+    session->status = SessionStatus::RUNNING;
+
+    Order order;
+    order.symbol = "AAPL";
+    order.side = OrderSide::BUY;
+    order.type = OrderType::MARKET;
+    order.tif = TimeInForce::DAY;
+    order.qty = 2.0;
+    order.decision_time_ns = 1'000'000;
+
+    auto order_id = mgr.submit_order(session->id, order);
+    EXPECT_TRUE(order_id.empty());
+    EXPECT_TRUE(mgr.get_orders(session->id).empty());
 }
 
 TEST(SessionManagerTest, PauseStopsEventProgression) {
@@ -555,6 +597,70 @@ TEST(SessionManagerTest, FeesAppliedOnFill) {
     auto st = session->account_manager->state();
     EXPECT_DOUBLE_EQ(st.cash, 2000.0 - 10.0 * 101.0 - 1.0);
     EXPECT_DOUBLE_EQ(st.accrued_fees, 1.0);
+
+    mgr.stop_session(session->id);
+}
+
+TEST(SessionManagerTest, SharedFeederAdvancesClockAcrossQuietSubscribedWindow) {
+    MarketEvent ev;
+    ev.timestamp = make_ts(900'000'000);  // 0.9s
+    ev.type = MarketEventType::QUOTE;
+    ev.quote = QuoteRecord{ev.timestamp, "AAPL", 100.0, 100, 101.0, 100, 1, 1, 1};
+
+    auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{ev});
+    ExecutionConfig exec;
+    exec.enable_shared_feed = true;
+    exec.poll_interval_seconds = 1;
+    SessionManager mgr(ds, exec);
+
+    SessionConfig cfg;
+    cfg.symbols = {"AAPL"};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(300'000'000'000);  // 300s
+    cfg.speed_factor = 1000.0;
+    auto session = mgr.create_session(cfg);
+
+    mgr.start_session(session->id);
+
+    ASSERT_TRUE(wait_until(
+        [&] {
+            return session->time_engine->current_time() >= make_ts(10'000'000'000);
+        },
+        std::chrono::milliseconds(300)));
+
+    mgr.stop_session(session->id);
+}
+
+TEST(SessionManagerTest, PollingFeederAdvancesClockAfterDynamicSubscriptionGetsQuiet) {
+    MarketEvent ev;
+    ev.timestamp = make_ts(900'000'000);  // 0.9s
+    ev.type = MarketEventType::QUOTE;
+    ev.quote = QuoteRecord{ev.timestamp, "AAPL", 100.0, 100, 101.0, 100, 1, 1, 1};
+
+    auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{ev});
+    ExecutionConfig exec;
+    exec.enable_shared_feed = false;
+    exec.poll_interval_seconds = 1;
+    SessionManager mgr(ds, exec);
+
+    SessionConfig cfg;
+    cfg.symbols = {};
+    cfg.start_time = make_ts(0);
+    cfg.end_time = make_ts(300'000'000'000);  // 300s
+    cfg.speed_factor = 1000.0;
+    auto session = mgr.create_session(cfg);
+
+    mgr.start_session(session->id);
+    mgr.pause_session(session->id);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    mgr.update_stream_subscriptions(session->id, {"AAPL"}, true);
+    mgr.resume_session(session->id);
+
+    ASSERT_TRUE(wait_until(
+        [&] {
+            return session->time_engine->current_time() >= make_ts(10'000'000'000);
+        },
+        std::chrono::milliseconds(300)));
 
     mgr.stop_session(session->id);
 }

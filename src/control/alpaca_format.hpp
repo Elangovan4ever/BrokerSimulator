@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <mutex>
@@ -76,6 +79,23 @@ inline std::string asset_id_for_symbol(const std::string& symbol) {
     return id;
 }
 
+inline std::string decimal_to_string(double value) {
+    if (std::abs(value) < 0.00000001) {
+        return "0";
+    }
+
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(8) << value;
+    std::string formatted = out.str();
+    while (formatted.find('.') != std::string::npos && formatted.back() == '0') {
+        formatted.pop_back();
+    }
+    if (!formatted.empty() && formatted.back() == '.') {
+        formatted.pop_back();
+    }
+    return formatted.empty() ? "0" : formatted;
+}
+
 inline nlohmann::json format_order(const Order& o) {
     nlohmann::json result;
     result["id"] = o.id;
@@ -100,6 +120,7 @@ inline nlohmann::json format_order(const Order& o) {
     result["filled_avg_price"] = o.filled_qty > 0
                                  ? nlohmann::json(std::to_string(o.last_fill_price))
                                  : nlohmann::json(nullptr);
+    result["execution_fee"] = std::to_string(o.cumulative_fees);
     result["order_class"] = "";
     result["order_type"] = order_type_to_string(o.type);
     result["type"] = order_type_to_string(o.type);
@@ -131,6 +152,7 @@ inline nlohmann::json format_order(const Order& o) {
 inline nlohmann::json format_position(const Position& p) {
     double current_price = p.qty != 0.0 ? (p.market_value / std::abs(p.qty)) : 0.0;
     double unrealized_plpc = p.cost_basis != 0.0 ? (p.unrealized_pl / p.cost_basis) * 100.0 : 0.0;
+    const std::string absolute_qty = decimal_to_string(std::abs(p.qty));
 
     return {
         {"asset_id", asset_id_for_symbol(p.symbol)},
@@ -139,7 +161,7 @@ inline nlohmann::json format_position(const Position& p) {
         {"asset_class", "us_equity"},
         {"asset_marginable", true},
         {"avg_entry_price", std::to_string(p.avg_entry_price)},
-        {"qty", std::to_string(static_cast<int64_t>(std::abs(p.qty)))},
+        {"qty", absolute_qty},
         {"side", p.qty >= 0 ? "long" : "short"},
         {"market_value", std::to_string(p.market_value)},
         {"cost_basis", std::to_string(p.cost_basis)},
@@ -150,7 +172,7 @@ inline nlohmann::json format_position(const Position& p) {
         {"current_price", std::to_string(current_price)},
         {"lastday_price", std::to_string(current_price)},
         {"change_today", "0"},
-        {"qty_available", std::to_string(static_cast<int64_t>(std::abs(p.qty)))}
+        {"qty_available", absolute_qty}
     };
 }
 

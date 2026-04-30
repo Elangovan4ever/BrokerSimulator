@@ -12,6 +12,21 @@ namespace broker_sim {
 
 namespace {
 
+void advance_session_clock_to_window_end(const std::shared_ptr<Session>& session,
+                                         Timestamp window_end) {
+    if (!session || session->time_engine->is_paused()) {
+        return;
+    }
+
+    const auto session_target = std::min(window_end, session->config.end_time);
+    if (session_target > session->time_engine->current_time()) {
+        session->time_engine->set_time(session_target);
+    }
+    if (session_target >= session->config.end_time && session->event_queue) {
+        session->event_queue->stop();
+    }
+}
+
 std::string trim_copy(const std::string& input) {
     size_t first = 0;
     while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first]))) {
@@ -73,6 +88,29 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         return std::nullopt;
     }
 
+    const auto decision_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(decision_time.time_since_epoch()).count();
+    const auto forward_end = decision_time + std::chrono::seconds(90);
+    const auto short_forward_end = decision_time + std::chrono::seconds(5);
+    const auto short_lookback_start = decision_time - std::chrono::seconds(5);
+    const auto minute_lookback_start = decision_time - std::chrono::minutes(2);
+    const auto inclusive_decision_end = decision_time + std::chrono::milliseconds(1);
+
+    auto ts_ns = [](Timestamp ts) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count();
+    };
+
+    auto log_fill_choice = [&](const char* source, Timestamp source_ts, double chosen_price) {
+        spdlog::info(
+            "Decision-time fill source={} order={} symbol={} side={} decision_ns={} source_ns={} price={}",
+            source,
+            order.id,
+            order.symbol,
+            order.side == OrderSide::BUY ? "BUY" : "SELL",
+            decision_ns,
+            ts_ns(source_ts),
+            chosen_price);
+    };
+
     auto quote_fill_price = [&](const QuoteRecord& q) -> std::optional<double> {
         if (order.side == OrderSide::BUY && q.ask_price > 0.0) return q.ask_price;
         if (order.side == OrderSide::SELL && q.bid_price > 0.0) return q.bid_price;
@@ -80,65 +118,83 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         return std::nullopt;
     };
 
-    // Prefer strictly causal forward ticks right after decision time.
-    const auto forward_end = decision_time + std::chrono::seconds(90);
-
-    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 1);
-    if (!trades.empty() && trades.front().price > 0.0) {
-        spdlog::debug("decision_fill source=trade symbol={} ts={} price={}", order.symbol,
-                     std::chrono::duration_cast<std::chrono::nanoseconds>(trades.front().timestamp.time_since_epoch()).count(),
-                     trades.front().price);
-        return trades.front().price;
-    }
-
-    auto quotes = data_source->get_quotes(order.symbol, decision_time, forward_end, 1);
-    if (!quotes.empty()) {
-        if (auto px = quote_fill_price(quotes.front())) {
-            spdlog::debug("decision_fill source=quote symbol={} ts={} bid={} ask={} chosen={}", order.symbol,
-                         std::chrono::duration_cast<std::chrono::nanoseconds>(quotes.front().timestamp.time_since_epoch()).count(),
-                         quotes.front().bid_price, quotes.front().ask_price, *px);
-            return px;
+    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 16);
+    for (const auto& trade : trades) {
+        if (trade.timestamp >= decision_time && trade.timestamp < forward_end && trade.price > 0.0) {
+            log_fill_choice("trade", trade.timestamp, trade.price);
+            return trade.price;
         }
     }
 
-    auto bars = data_source->get_bars(order.symbol, decision_time, forward_end, 1, "minute", 1);
-    if (!bars.empty() && bars.front().close > 0.0) {
-        spdlog::debug("decision_fill source=forward_bar symbol={} ts={} close={}", order.symbol,
-                     std::chrono::duration_cast<std::chrono::nanoseconds>(bars.front().timestamp.time_since_epoch()).count(),
-                     bars.front().close);
-        return bars.front().close;
+    auto quotes = data_source->get_quotes(order.symbol, decision_time, forward_end, 16);
+    for (const auto& quote : quotes) {
+        if (quote.timestamp < decision_time || quote.timestamp >= forward_end) {
+            continue;
+        }
+        if (auto px = quote_fill_price(quote)) {
+            log_fill_choice("quote", quote.timestamp, *px);
+            return *px;
+        }
     }
 
-    // Deterministic fallback: use the latest completed minute bar at-or-before decision time.
-    const auto lookback_start = decision_time - std::chrono::minutes(60);
-    const auto lookback_end = decision_time + std::chrono::milliseconds(1);
-    auto prior_bars = data_source->get_bars(order.symbol, lookback_start, lookback_end, 1, "minute", 0);
-    for (auto it = prior_bars.rbegin(); it != prior_bars.rend(); ++it) {
-        if (it->timestamp <= decision_time && it->close > 0.0) {
-            spdlog::debug("decision_fill source=lookback_bar symbol={} ts={} close={}", order.symbol,
-                         std::chrono::duration_cast<std::chrono::nanoseconds>(it->timestamp.time_since_epoch()).count(),
-                         it->close);
+    auto forward_second_bars = data_source->get_bars(order.symbol, decision_time, short_forward_end, 1, "second", 8);
+    for (const auto& bar : forward_second_bars) {
+        if (bar.timestamp >= decision_time && bar.timestamp < short_forward_end && bar.close > 0.0) {
+            log_fill_choice("forward_second_bar", bar.timestamp, bar.close);
+            return bar.close;
+        }
+    }
+
+    auto recent_second_bars = data_source->get_bars(order.symbol, short_lookback_start, inclusive_decision_end, 1, "second", 0);
+    for (auto it = recent_second_bars.rbegin(); it != recent_second_bars.rend(); ++it) {
+        if (it->timestamp <= decision_time && it->timestamp >= short_lookback_start && it->close > 0.0) {
+            log_fill_choice("lookback_second_bar", it->timestamp, it->close);
             return it->close;
         }
     }
 
-    // Last resort (non-deterministic) compatibility fallback.
+    auto forward_minute_bars = data_source->get_bars(order.symbol, decision_time, forward_end, 1, "minute", 4);
+    for (const auto& bar : forward_minute_bars) {
+        if (bar.timestamp >= decision_time && bar.timestamp < forward_end && bar.close > 0.0) {
+            log_fill_choice("forward_minute_bar", bar.timestamp, bar.close);
+            return bar.close;
+        }
+    }
+
+    auto recent_minute_bars = data_source->get_bars(order.symbol, minute_lookback_start, inclusive_decision_end, 1, "minute", 0);
+    for (auto it = recent_minute_bars.rbegin(); it != recent_minute_bars.rend(); ++it) {
+        if (it->timestamp <= decision_time && it->timestamp >= minute_lookback_start && it->close > 0.0) {
+            log_fill_choice("lookback_minute_bar", it->timestamp, it->close);
+            return it->close;
+        }
+    }
+
     auto nbbo = session->matching_engine->get_nbbo(order.symbol);
-    if (nbbo) {
-        if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) {
-            spdlog::debug("decision_fill source=nbbo symbol={} bid={} ask={} chosen={}", order.symbol,
-                         nbbo->bid_price, nbbo->ask_price, nbbo->ask_price);
-            return nbbo->ask_price;
+    if (nbbo && nbbo->timestamp > 0) {
+        auto nbbo_ts = Timestamp{} + std::chrono::nanoseconds(nbbo->timestamp);
+        if (nbbo_ts + std::chrono::seconds(5) >= decision_time && nbbo_ts <= forward_end) {
+            if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) {
+                log_fill_choice("nbbo", nbbo_ts, nbbo->ask_price);
+                return nbbo->ask_price;
+            }
+            if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) {
+                log_fill_choice("nbbo", nbbo_ts, nbbo->bid_price);
+                return nbbo->bid_price;
+            }
         }
-        if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) {
-            spdlog::debug("decision_fill source=nbbo symbol={} bid={} ask={} chosen={}", order.symbol,
-                         nbbo->bid_price, nbbo->ask_price, nbbo->bid_price);
-            return nbbo->bid_price;
-        }
+        spdlog::warn(
+            "Decision-time NBBO rejected as stale order={} symbol={} decision_ns={} nbbo_ns={} bid={} ask={}",
+            order.id,
+            order.symbol,
+            decision_ns,
+            nbbo->timestamp,
+            nbbo->bid_price,
+            nbbo->ask_price);
     }
 
     return std::nullopt;
 }
+
 
 }  // namespace
 
@@ -426,6 +482,25 @@ void SessionManager::destroy_session(const std::string& session_id) {
 std::string SessionManager::submit_order(const std::string& session_id, Order order) {
     auto session = get_session(session_id);
     if (!session) return {};
+
+    const auto current_session_time = session->time_engine->current_time();
+    const bool has_session_window = session->config.end_time > session->config.start_time;
+    if (session->status == SessionStatus::STOPPED ||
+        session->status == SessionStatus::COMPLETED ||
+        session->status == SessionStatus::ERROR ||
+        (has_session_window && current_session_time >= session->config.end_time)) {
+        spdlog::warn(
+            "Order rejected: session not accepting orders session={} status={} current_ns={} end_ns={} order_symbol={}",
+            session_id,
+            static_cast<int>(session->status),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                current_session_time.time_since_epoch()).count(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                session->config.end_time.time_since_epoch()).count(),
+            order.symbol);
+        return {};
+    }
+
     if (order.id.empty()) order.id = generate_uuid();
     if (order.client_order_id.empty()) order.client_order_id = order.id;
     order.is_maker = false;
@@ -1013,7 +1088,6 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
     }
     auto order = *order_opt;
     order.filled_qty += fill.fill_qty;
-    order.last_fill_price = fill.fill_price;
     if (order.qty && order.filled_qty >= *order.qty) {
         order.status = OrderStatus::FILLED;
         order.filled_at_ns = fill.timestamp;
@@ -1021,7 +1095,6 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
         order.status = OrderStatus::PARTIALLY_FILLED;
     }
     order.updated_at_ns = fill.timestamp;
-    upsert_order(session, order);
 
     Fill applied_fill = fill;
     const bool lock_decision_fill_price = order.decision_time_ns > 0
@@ -1053,6 +1126,9 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
     if (exec_cfg_.enable_latency && exec_cfg_.fixed_latency_us > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(exec_cfg_.fixed_latency_us));
     }
+
+    order.last_fill_price = applied_fill.fill_price;
+    upsert_order(session, order);
 
     double fees = 0.0;
     if (applied_fill.fill_qty > 0.0 && applied_fill.fill_price > 0.0) {
@@ -1225,7 +1301,9 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
             
             while (!session->should_stop.load() && cursor < end) {
                 const auto loop_started_at = std::chrono::steady_clock::now();
-                Timestamp window_end = std::min(cursor + window, end);
+                Timestamp window_end = std::min(
+                    exec_cfg_.next_time_boundary_after(cursor, cursor + window),
+                    end);
 
                 // Get currently subscribed symbols (dynamic, not captured at start)
                 auto symbols = get_stream_symbols(session);
@@ -1242,6 +1320,21 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                     std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
                     continue;
                 }
+
+                if (exec_cfg_.get_market_session(cursor) == ExecutionConfig::MarketSession::CLOSED) {
+                    if (session->time_engine->is_paused()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+
+                    spdlog::debug("[PollingFeeder] session={} closed market gap, jumping clock", session->id);
+                    if (window_end > session->time_engine->current_time()) {
+                        session->time_engine->set_time(window_end);
+                    }
+                    cursor = window_end;
+                    std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
+                    continue;
+                }
                 
                 std::string symbols_str;
                 for (const auto& s : symbols) {
@@ -1251,10 +1344,11 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                 spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
                               session->id, symbols.size(), symbols_str);
 
+                bool emitted_in_window = false;
                 if (session->config.live_bar_aggr_source == "1s") {
                     data_source_->stream_events_with_bars(
                         symbols, cursor, window_end,
-                        [this, session, cursor, window_end](const UnifiedMarketEvent& ev) {
+                        [this, session, cursor, window_end, &emitted_in_window](const UnifiedMarketEvent& ev) {
                             if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
                             if (ev.timestamp < session->config.start_time ||
                                 ev.timestamp >= session->config.end_time) {
@@ -1270,12 +1364,13 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                                               session->id, symbol);
                                 return;
                             }
+                            emitted_in_window = true;
                             enqueue_unified_event(session, ev);
                         }
                     );
                 } else {
                     data_source_->stream_events(symbols, cursor, window_end, 
-                        [this, session, cursor, window_end](const MarketEvent& ev) {
+                        [this, session, cursor, window_end, &emitted_in_window](const MarketEvent& ev) {
                             if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
                             if (ev.timestamp < session->config.start_time ||
                                 ev.timestamp >= session->config.end_time) {
@@ -1289,9 +1384,13 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                                               session->id, symbol);
                                 return;
                             }
+                            emitted_in_window = true;
                             enqueue_event(session, ev);
                         }
                     );
+                }
+                if (!emitted_in_window) {
+                    advance_session_clock_to_window_end(session, window_end);
                 }
                 cursor = window_end;
                 std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
@@ -1346,6 +1445,7 @@ void SessionManager::start_shared_feeder() {
 
             int base_window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 1;
             double max_speed = 1.0;
+
             Timestamp min_start = running_sessions.front()->config.start_time;
             Timestamp max_end = running_sessions.front()->config.end_time;
             std::unordered_map<std::string, std::vector<std::string>> session_symbols;
@@ -1368,7 +1468,9 @@ void SessionManager::start_shared_feeder() {
                     auto current_sim = s->time_engine->current_time();
                     auto cursor = std::max(current_sim, s->config.start_time);
                     const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
-                    auto window_end = std::min(cursor + std::chrono::seconds(window_secs), s->config.end_time);
+                    auto window_end = std::min(
+                        exec_cfg_.next_time_boundary_after(cursor, cursor + std::chrono::seconds(window_secs)),
+                        s->config.end_time);
                     if (window_end > current_sim) {
                         s->time_engine->set_time(window_end);
                     }
@@ -1416,11 +1518,33 @@ void SessionManager::start_shared_feeder() {
                 std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
                 continue;
             }
-            Timestamp window_end = std::min(cursor + std::chrono::seconds(window_secs), max_end);
+            Timestamp window_end = std::min(
+                exec_cfg_.next_time_boundary_after(cursor, cursor + std::chrono::seconds(window_secs)),
+                max_end);
+
+            if (exec_cfg_.get_market_session(cursor) == ExecutionConfig::MarketSession::CLOSED) {
+                for (const auto& s : running_sessions) {
+                    if (s->time_engine->is_paused()) {
+                        continue;
+                    }
+                    auto session_target = std::min(window_end, s->config.end_time);
+                    if (session_target > s->time_engine->current_time()) {
+                        s->time_engine->set_time(session_target);
+                    }
+                    if (session_target >= s->config.end_time && s->event_queue) {
+                        s->event_queue->stop();
+                    }
+                }
+                shared_cursors["__global"] = window_end;
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
+                continue;
+            }
+
+            std::unordered_set<std::string> sessions_with_events;
 
             if (any_bar_source) {
                 data_source_->stream_events_with_bars(symbols, cursor, window_end,
-                    [this, running_sessions, session_symbols, cursor, window_end](const UnifiedMarketEvent& ev) {
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const UnifiedMarketEvent& ev) {
                         if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
                         const std::string& symbol =
                             (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
@@ -1439,6 +1563,7 @@ void SessionManager::start_shared_feeder() {
                             if (ev.type == UnifiedEventType::BAR && s->config.live_bar_aggr_source != "1s") {
                                 continue;
                             }
+                            sessions_with_events.insert(s->id);
                             enqueue_unified_event(s, ev);
                         }
                     }
@@ -1446,7 +1571,7 @@ void SessionManager::start_shared_feeder() {
 
             } else {
                 data_source_->stream_events(symbols, cursor, window_end,
-                    [this, running_sessions, session_symbols, cursor, window_end](const MarketEvent& ev) {
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const MarketEvent& ev) {
                         if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
                         const std::string event_symbol =
                             (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
@@ -1460,13 +1585,15 @@ void SessionManager::start_shared_feeder() {
                                 std::find(syms.begin(), syms.end(), event_symbol) == syms.end()) {
                                 continue;
                             }
+                            sessions_with_events.insert(s->id);
                             enqueue_event(s, ev);
                         }
                     });
             }
             for (const auto& s : running_sessions) {
-                if (window_end >= s->config.end_time && s->event_queue) {
-                    s->time_engine->set_time(s->config.end_time);
+                if (!sessions_with_events.count(s->id)) {
+                    advance_session_clock_to_window_end(s, window_end);
+                } else if (window_end >= s->config.end_time && s->event_queue) {
                     s->event_queue->stop();
                 }
             }
