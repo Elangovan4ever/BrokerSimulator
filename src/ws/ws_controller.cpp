@@ -1088,6 +1088,7 @@ std::string WsController::format_trade_polygon(const std::string& symbol, const 
     item["p"] = trade.price;
     item["s"] = trade.size;
     item["t"] = utils::ts_to_ms(ts);
+    item["t_ns"] = utils::ts_to_ns(ts);
     item["x"] = trade.exchange;
     item["z"] = trade.tape;
     if (!trade.conditions.empty()) {
@@ -1109,6 +1110,7 @@ std::string WsController::format_quote_polygon(const std::string& symbol, const 
     item["bx"] = quote.bid_exchange;
     item["ax"] = quote.ask_exchange;
     item["t"] = utils::ts_to_ms(ts);
+    item["t_ns"] = utils::ts_to_ns(ts);
     item["z"] = quote.tape;
     msg.push_back(item);
     return msg.dump();

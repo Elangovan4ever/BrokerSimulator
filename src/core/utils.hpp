@@ -6,6 +6,9 @@
 #include <sstream>
 #include <iomanip>
 #include <random>
+#include <optional>
+#include <cctype>
+#include <algorithm>
 
 namespace broker_sim {
 
@@ -55,12 +58,27 @@ inline Timestamp ms_to_ts(int64_t ms) {
  * Format timestamp as ISO 8601 string (e.g., "2024-01-15T10:30:00Z").
  */
 inline std::string ts_to_iso(Timestamp ts) {
-    auto t = std::chrono::system_clock::to_time_t(ts);
+    auto total_ns = ts_to_ns(ts);
+    auto seconds = total_ns / 1000000000LL;
+    auto fractional_ns = total_ns % 1000000000LL;
+    if (fractional_ns < 0) {
+        --seconds;
+        fractional_ns += 1000000000LL;
+    }
+
+    std::time_t t = static_cast<std::time_t>(seconds);
     std::tm tm{};
     gmtime_r(&t, &tm);
     char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    return std::string(buf);
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+
+    std::ostringstream out;
+    out << buf;
+    if (fractional_ns > 0) {
+        out << '.' << std::setw(9) << std::setfill('0') << fractional_ns;
+    }
+    out << 'Z';
+    return out.str();
 }
 
 /**
@@ -88,12 +106,66 @@ inline std::string ts_to_date(Timestamp ts) {
  * Supports: "2024-01-15T10:30:00Z" or "2024-01-15T10:30:00"
  */
 inline std::optional<Timestamp> parse_iso_ts(const std::string& s) {
-    if (s.empty()) return std::nullopt;
+    if (s.size() < 19) return std::nullopt;
+
+    std::string base = s.substr(0, 19);
+    if (base[10] == ' ') {
+        base[10] = 'T';
+    }
+
     std::tm tm{};
-    std::istringstream ss(s);
+    std::istringstream ss(base);
     ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
     if (ss.fail()) return std::nullopt;
-    return Timestamp{} + std::chrono::seconds(timegm(&tm));
+
+    int64_t fractional_ns = 0;
+    size_t pos = 19;
+    if (pos < s.size() && s[pos] == '.') {
+        ++pos;
+        int digits = 0;
+        while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
+            if (digits < 9) {
+                fractional_ns = fractional_ns * 10 + (s[pos] - '0');
+            }
+            ++digits;
+            ++pos;
+        }
+        while (digits > 0 && digits < 9) {
+            fractional_ns *= 10;
+            ++digits;
+        }
+    }
+
+    int offset_seconds = 0;
+    if (pos < s.size()) {
+        constexpr char plus = static_cast<char>(43);
+        constexpr char minus = static_cast<char>(45);
+        constexpr char colon = static_cast<char>(58);
+        constexpr char zero = static_cast<char>(48);
+        constexpr char upper_z = static_cast<char>(90);
+        constexpr char lower_z = static_cast<char>(122);
+        const char tz = s[pos];
+        if (tz == plus || tz == minus) {
+            if (pos + 5 >= s.size() || s[pos + 3] != colon
+                || !std::isdigit(static_cast<unsigned char>(s[pos + 1]))
+                || !std::isdigit(static_cast<unsigned char>(s[pos + 2]))
+                || !std::isdigit(static_cast<unsigned char>(s[pos + 4]))
+                || !std::isdigit(static_cast<unsigned char>(s[pos + 5]))) {
+                return std::nullopt;
+            }
+            const int hours = ((s[pos + 1] - zero) * 10) + (s[pos + 2] - zero);
+            const int minutes = ((s[pos + 4] - zero) * 10) + (s[pos + 5] - zero);
+            offset_seconds = (hours * 3600) + (minutes * 60);
+            if (tz == minus) {
+                offset_seconds = -offset_seconds;
+            }
+        } else if (tz != upper_z && tz != lower_z) {
+            return std::nullopt;
+        }
+    }
+
+    const int64_t epoch_seconds = static_cast<int64_t>(timegm(&tm)) - offset_seconds;
+    return Timestamp{} + std::chrono::seconds(epoch_seconds) + std::chrono::nanoseconds(fractional_ns);
 }
 
 /**

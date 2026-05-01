@@ -20,6 +20,7 @@ add_executable(broker_tests
     finnhub_news_stream_test.cpp
     market_hours_test.cpp
     time_engine_test.cpp
+    utils_test.cpp
     performance_test.cpp
     integration_test.cpp
     stress_test.cpp

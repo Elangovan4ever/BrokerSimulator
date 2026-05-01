@@ -1124,14 +1124,16 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
         std::this_thread::sleep_for(std::chrono::microseconds(exec_cfg_.fixed_latency_us));
     }
 
-    order.last_fill_price = applied_fill.fill_price;
-    upsert_order(session, order);
-
     double fees = 0.0;
     if (applied_fill.fill_qty > 0.0 && applied_fill.fill_price > 0.0) {
         bool is_sell = order.side == OrderSide::SELL;
         fees = fee_cfg_.calculate_fees(applied_fill.fill_qty, applied_fill.fill_price, is_sell, order.is_maker);
     }
+
+    order.last_fill_price = applied_fill.fill_price;
+    order.last_fill_fee = fees;
+    order.cumulative_fees += fees;
+    upsert_order(session, order);
 
     session->account_manager->apply_fill(order.symbol, applied_fill, order.side, fees);
     session->cash = session->account_manager->state().cash;
@@ -1152,7 +1154,8 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
             {"symbol", order.symbol},
             {"side", order.side == OrderSide::BUY ? "BUY" : "SELL"},
             {"qty", applied_fill.fill_qty},
-            {"price", applied_fill.fill_price}
+            {"price", applied_fill.fill_price},
+            {"fee", fees}
         };
         std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
@@ -1160,10 +1163,11 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
         }
     }
     append_event_log(session->id,
-        fmt::format(R"({{"event":"fill","order_id":"{}","symbol":"{}","side":"{}","qty":{},"price":{},"ts":{}}})",
+        fmt::format(R"({{"event":"fill","order_id":"{}","symbol":"{}","side":"{}","qty":{},"price":{},"fee":{},"ts":{}}})",
                     fill.order_id, order.symbol,
                     order.side == OrderSide::BUY ? "BUY" : "SELL",
                     applied_fill.fill_qty, applied_fill.fill_price,
+                    fees,
                     fill.timestamp));
 
     Event ev;
@@ -1181,7 +1185,8 @@ void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& 
                         applied_fill.fill_price,
                         order.status == OrderStatus::FILLED ? "filled" : "partially_filled",
                         order.side == OrderSide::BUY ? "buy" : "sell",
-                        pos_qty};
+                        pos_qty,
+                        fees};
     std::vector<EventCallback> callbacks_copy;
     {
         std::lock_guard<std::mutex> lock(mutex_);
