@@ -1401,6 +1401,17 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
     query.limit = static_cast<size_t>(limit);
 
     auto ticker = get_param("ticker");
+    auto feed = get_param("feed");
+    if (feed.empty()) feed = "polygon_news";
+    if (feed != "polygon_news" && feed != "benzinga_news") {
+        cb(error_resp("Invalid value for feed parameter.", 400));
+        return;
+    }
+    query.feed = feed;
+    if (!has_cursor) {
+        param_values["feed"] = feed;
+    }
+
     if (!ticker.empty()) {
         query.ticker = ticker;
         if (!has_cursor) param_values["ticker"] = ticker;
@@ -1499,7 +1510,7 @@ void PolygonController::news(const drogon::HttpRequestPtr& req,
 
         std::vector<std::string> order_keys = {
             "ap", "as",
-            "ticker",
+            "ticker", "feed",
             "published_utc", "published_utc.gte", "published_utc.gt",
             "published_utc.lte", "published_utc.lt",
             "limit", "order", "sort"

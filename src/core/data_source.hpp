@@ -192,6 +192,7 @@ struct StockNewsQuery {
     std::string sort{"published_utc"};
     std::string order{"descending"};
     size_t limit{10};
+    std::string feed{"polygon_news"};
     std::optional<Timestamp> max_published_utc;
 };
 
