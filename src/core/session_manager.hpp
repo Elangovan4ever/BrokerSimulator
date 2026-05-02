@@ -183,6 +183,7 @@ private:
     void run_session_loop(std::shared_ptr<Session> session);
     void process_event(std::shared_ptr<Session> session, const Event& event, bool emit_callbacks);
     void process_fill(std::shared_ptr<Session> session, const Fill& fill);
+    void expire_pending_orders_at(std::shared_ptr<Session> session, Timestamp timestamp);
     void stop_feeds(std::shared_ptr<Session> session);
     void preload_events(std::shared_ptr<Session> session);
     void start_polling_feeder(std::shared_ptr<Session> session);

@@ -269,7 +269,7 @@ TEST(SessionManagerTest, ImmediateFillDoesNotDoubleCountFilledQuantity) {
     EXPECT_EQ(it->second.status, OrderStatus::FILLED);
 }
 
-TEST(SessionManagerTest, RejectsBackdatedDecisionOrderAfterSessionEnd) {
+TEST(SessionManagerTest, AllowsInWindowDecisionOrderAfterNaturalSessionEnd) {
     auto ds = std::make_shared<FakeDataSource>(std::vector<MarketEvent>{});
     SessionManager mgr(ds);
 
@@ -294,8 +294,21 @@ TEST(SessionManagerTest, RejectsBackdatedDecisionOrderAfterSessionEnd) {
     order.decision_time_ns = 1'000'000;
 
     auto order_id = mgr.submit_order(session->id, order);
-    EXPECT_TRUE(order_id.empty());
-    EXPECT_TRUE(mgr.get_orders(session->id).empty());
+    ASSERT_FALSE(order_id.empty());
+    auto orders = mgr.get_orders(session->id);
+    auto it = orders.find(order_id);
+    ASSERT_NE(it, orders.end());
+    EXPECT_EQ(it->second.status, OrderStatus::FILLED);
+    EXPECT_DOUBLE_EQ(it->second.filled_qty, 2.0);
+
+    Order out_of_window_order = order;
+    out_of_window_order.id.clear();
+    out_of_window_order.client_order_id.clear();
+    out_of_window_order.decision_time_ns = 10'000'000;
+
+    auto rejected_order_id = mgr.submit_order(session->id, out_of_window_order);
+    EXPECT_TRUE(rejected_order_id.empty());
+    EXPECT_EQ(mgr.get_orders(session->id).size(), orders.size());
 }
 
 TEST(SessionManagerTest, PauseStopsEventProgression) {

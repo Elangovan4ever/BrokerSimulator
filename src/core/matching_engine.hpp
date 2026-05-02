@@ -118,6 +118,11 @@ public:
     bool cancel_order(const std::string& order_id);
 
     /**
+     * Expire pending orders whose time-in-force has elapsed by the supplied timestamp.
+     */
+    std::vector<Order> expire_pending_orders_at(Timestamp timestamp);
+
+    /**
      * Get current NBBO for a symbol.
      */
     std::optional<NBBO> get_nbbo(const std::string& symbol) const;

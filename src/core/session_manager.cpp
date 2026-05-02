@@ -480,18 +480,32 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
 
     const auto current_session_time = session->time_engine->current_time();
     const bool has_session_window = session->config.end_time > session->config.start_time;
-    if (session->status == SessionStatus::STOPPED ||
-        session->status == SessionStatus::COMPLETED ||
+    const auto decision_time = Timestamp{} + std::chrono::nanoseconds(order.decision_time_ns);
+    const bool has_historical_decision_time = order.decision_time_ns > 0;
+    const bool decision_inside_session =
+        has_historical_decision_time &&
+        (!has_session_window ||
+         (decision_time >= session->config.start_time &&
+          decision_time < session->config.end_time));
+    const bool terminal_reject =
+        session->status == SessionStatus::STOPPED ||
         session->status == SessionStatus::ERROR ||
-        (has_session_window && current_session_time >= session->config.end_time)) {
+        (session->status == SessionStatus::COMPLETED && !decision_inside_session);
+    const bool replay_past_end_reject =
+        has_session_window &&
+        current_session_time >= session->config.end_time &&
+        !decision_inside_session;
+    if (terminal_reject || replay_past_end_reject) {
         spdlog::warn(
-            "Order rejected: session not accepting orders session={} status={} current_ns={} end_ns={} order_symbol={}",
+            "Order rejected: session not accepting orders session={} status={} current_ns={} end_ns={} decision_ns={} decision_inside_session={} order_symbol={}",
             session_id,
             static_cast<int>(session->status),
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 current_session_time.time_since_epoch()).count(),
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 session->config.end_time.time_since_epoch()).count(),
+            order.decision_time_ns,
+            decision_inside_session,
             order.symbol);
         return {};
     }
@@ -887,6 +901,7 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
             if (session->time_engine->current_time() < session->config.end_time) {
                 session->time_engine->set_time(session->config.end_time);
             }
+            expire_pending_orders_at(session, session->config.end_time);
             session->status = SessionStatus::COMPLETED;
             session->completed_at = std::chrono::system_clock::now();
         } else {
@@ -896,6 +911,61 @@ void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
         session->status = SessionStatus::ERROR;
         session->time_engine->stop();
         spdlog::error("Session {} error: {}", session->id, e.what());
+    }
+}
+
+void SessionManager::expire_pending_orders_at(std::shared_ptr<Session> session, Timestamp timestamp) {
+    auto expired_orders = session->matching_engine->expire_pending_orders_at(timestamp);
+    if (expired_orders.empty()) {
+        return;
+    }
+
+    const int64_t timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        timestamp.time_since_epoch()).count();
+    spdlog::info("Session {} expiring {} pending orders at session boundary",
+                 session->id, expired_orders.size());
+
+    for (auto& order : expired_orders) {
+        order.status = OrderStatus::EXPIRED;
+        order.expired_at_ns = timestamp_ns;
+        order.updated_at_ns = timestamp_ns;
+        upsert_order(session, order);
+
+        append_event_log(session->id,
+            fmt::format(R"({{"event":"order_expired","id":"{}","symbol":"{}","side":"{}","qty":{},"filled_qty":{},"ts":{}}})",
+                        order.id,
+                        order.symbol,
+                        order.side == OrderSide::BUY ? "BUY" : "SELL",
+                        order.qty.value_or(0.0),
+                        order.filled_qty,
+                        timestamp_ns));
+
+        Event ev;
+        ev.timestamp = timestamp;
+        ev.sequence = 0;
+        ev.event_type = EventType::ORDER_EXPIRE;
+        ev.symbol = order.symbol;
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        ev.data = OrderData{order.id,
+                            order.client_order_id.empty() ? order.id : order.client_order_id,
+                            order.qty.value_or(0.0),
+                            order.filled_qty,
+                            0.0,
+                            "expired",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
+
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session->id, ev);
+        }
     }
 }
 

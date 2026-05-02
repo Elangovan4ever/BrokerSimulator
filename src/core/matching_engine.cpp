@@ -88,6 +88,28 @@ bool MatchingEngine::cancel_order(const std::string& order_id) {
     return false;
 }
 
+std::vector<Order> MatchingEngine::expire_pending_orders_at(Timestamp timestamp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Order> expired;
+    const int64_t timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        timestamp.time_since_epoch()).count();
+
+    for (auto it = pending_orders_.begin(); it != pending_orders_.end(); ) {
+        if (!it->second.expire_at || timestamp < *it->second.expire_at) {
+            ++it;
+            continue;
+        }
+
+        it->second.status = OrderStatus::EXPIRED;
+        it->second.expired_at_ns = timestamp_ns;
+        it->second.updated_at_ns = timestamp_ns;
+        expired.push_back(it->second);
+        it = pending_orders_.erase(it);
+    }
+
+    return expired;
+}
+
 std::optional<NBBO> MatchingEngine::get_nbbo(const std::string& symbol) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = current_nbbo_.find(symbol);
