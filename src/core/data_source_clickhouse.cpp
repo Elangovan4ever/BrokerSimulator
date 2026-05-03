@@ -2763,7 +2763,12 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
     std::vector<EarningsCalendarRecord> out;
-    if (!client_) return out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected for earnings_calendar, reconnecting...");
+        connect();
+        if (!client_) return out;
+    }
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
@@ -2783,7 +2788,9 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
         ORDER BY date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+
+    auto execute = [&]() {
+        out.clear();
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 EarningsCalendarRecord e;
@@ -2799,9 +2806,23 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                 out.push_back(std::move(e));
             }
         });
+    };
+
+    try {
+        execute();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_earnings_calendar failed: {}", e.what());
-        out.clear();
+        spdlog::warn("ClickHouse get_earnings_calendar failed: {}, reconnecting and retrying once...", e.what());
+        try {
+            connect();
+            if (client_) {
+                execute();
+            } else {
+                out.clear();
+            }
+        } catch (const std::exception& e2) {
+            spdlog::warn("ClickHouse get_earnings_calendar retry failed: {}", e2.what());
+            out.clear();
+        }
     }
     return out;
 }
