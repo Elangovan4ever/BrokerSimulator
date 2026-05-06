@@ -53,6 +53,14 @@ std::string normalize_news_token(const std::string& raw) {
     return token;
 }
 
+bool is_minute_bar_source(const std::string& source) {
+    return source == "minute" || source == "minute_bars" || source == "1m" || source == "bars";
+}
+
+bool is_second_bar_source(const std::string& source) {
+    return source == "1s" || source == "second" || source == "second_bars";
+}
+
 int compute_adaptive_window_secs(int base_window_secs, double speed_factor) {
     const int base = std::max(1, base_window_secs);
     const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
@@ -118,14 +126,6 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         return std::nullopt;
     };
 
-    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 16);
-    for (const auto& trade : trades) {
-        if (trade.timestamp >= decision_time && trade.timestamp < forward_end && trade.price > 0.0) {
-            log_fill_choice("trade", trade.timestamp, trade.price);
-            return trade.price;
-        }
-    }
-
     auto quotes = data_source->get_quotes(order.symbol, decision_time, forward_end, 16);
     for (const auto& quote : quotes) {
         if (quote.timestamp < decision_time || quote.timestamp >= forward_end) {
@@ -134,6 +134,14 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         if (auto px = quote_fill_price(quote)) {
             log_fill_choice("quote", quote.timestamp, *px);
             return *px;
+        }
+    }
+
+    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 16);
+    for (const auto& trade : trades) {
+        if (trade.timestamp >= decision_time && trade.timestamp < forward_end && trade.price > 0.0) {
+            log_fill_choice("trade", trade.timestamp, trade.price);
+            return trade.price;
         }
     }
 
@@ -1417,7 +1425,29 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
                               session->id, symbols.size(), symbols_str);
 
                 bool emitted_in_window = false;
-                if (session->config.live_bar_aggr_source == "1s") {
+                if (is_minute_bar_source(session->config.live_bar_aggr_source)) {
+                    data_source_->stream_aggregate_bars(
+                        symbols, cursor, window_end, 1, "minute",
+                        [this, session, cursor, window_end, &emitted_in_window](const BarRecord& bar) {
+                            if (bar.timestamp < cursor || bar.timestamp >= window_end) return;
+                            if (bar.timestamp < session->config.start_time ||
+                                bar.timestamp >= session->config.end_time) {
+                                return;
+                            }
+                            if (!is_stream_symbol_subscribed(session->id, bar.symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping bar for unsubscribed symbol={}",
+                                              session->id, bar.symbol);
+                                return;
+                            }
+                            UnifiedMarketEvent ev;
+                            ev.timestamp = bar.timestamp;
+                            ev.type = UnifiedEventType::BAR;
+                            ev.bar = bar;
+                            emitted_in_window = true;
+                            enqueue_unified_event(session, ev);
+                        }
+                    );
+                } else if (is_second_bar_source(session->config.live_bar_aggr_source)) {
                     data_source_->stream_events_with_bars(
                         symbols, cursor, window_end,
                         [this, session, cursor, window_end, &emitted_in_window](const UnifiedMarketEvent& ev) {
@@ -1567,10 +1597,17 @@ void SessionManager::start_shared_feeder() {
 
             const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
 
-            bool any_bar_source = std::any_of(
+            bool all_minute_bar_source = std::all_of(
                 running_sessions.begin(), running_sessions.end(),
                 [](const std::shared_ptr<Session>& s) {
-                    return s->config.live_bar_aggr_source == "1s";
+                    return is_minute_bar_source(s->config.live_bar_aggr_source);
+                }
+            );
+
+            bool any_second_bar_source = std::any_of(
+                running_sessions.begin(), running_sessions.end(),
+                [](const std::shared_ptr<Session>& s) {
+                    return is_second_bar_source(s->config.live_bar_aggr_source);
                 }
             );
 
@@ -1614,7 +1651,29 @@ void SessionManager::start_shared_feeder() {
 
             std::unordered_set<std::string> sessions_with_events;
 
-            if (any_bar_source) {
+            if (all_minute_bar_source) {
+                data_source_->stream_aggregate_bars(symbols, cursor, window_end, 1, "minute",
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const BarRecord& bar) {
+                        if (bar.timestamp < cursor || bar.timestamp >= window_end) return;
+                        for (const auto& s : running_sessions) {
+                            if (bar.timestamp < s->config.start_time || bar.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), bar.symbol) == syms.end()) {
+                                continue;
+                            }
+                            UnifiedMarketEvent ev;
+                            ev.timestamp = bar.timestamp;
+                            ev.type = UnifiedEventType::BAR;
+                            ev.bar = bar;
+                            sessions_with_events.insert(s->id);
+                            enqueue_unified_event(s, ev);
+                        }
+                    });
+            } else if (any_second_bar_source) {
                 data_source_->stream_events_with_bars(symbols, cursor, window_end,
                     [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const UnifiedMarketEvent& ev) {
                         if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
@@ -1632,7 +1691,7 @@ void SessionManager::start_shared_feeder() {
                                 std::find(syms.begin(), syms.end(), symbol) == syms.end()) {
                                 continue;
                             }
-                            if (ev.type == UnifiedEventType::BAR && s->config.live_bar_aggr_source != "1s") {
+                            if (ev.type == UnifiedEventType::BAR && !is_second_bar_source(s->config.live_bar_aggr_source)) {
                                 continue;
                             }
                             sessions_with_events.insert(s->id);

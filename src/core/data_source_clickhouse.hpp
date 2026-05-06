@@ -45,6 +45,13 @@ public:
                             Timestamp end_time,
                             const std::function<void(const BarRecord&)>& cb) override;
 
+    void stream_aggregate_bars(const std::vector<std::string>& symbols,
+                               Timestamp start_time,
+                               Timestamp end_time,
+                               int multiplier,
+                               const std::string& timespan,
+                               const std::function<void(const BarRecord&)>& cb) override;
+
     void stream_events_with_bars(const std::vector<std::string>& symbols,
                                  Timestamp start_time,
                                  Timestamp end_time,

@@ -49,6 +49,35 @@ std::string escape_clickhouse_string(const std::string& raw) {
     return escaped;
 }
 
+bool has_trade_condition_code(const std::string& raw, const std::string& code) {
+    size_t start = 0;
+    while (start <= raw.size()) {
+        const auto comma = raw.find(',', start);
+        const auto end = comma == std::string::npos ? raw.size() : comma;
+        auto first = start;
+        auto last = end;
+        while (first < last && std::isspace(static_cast<unsigned char>(raw[first]))) ++first;
+        while (last > first && std::isspace(static_cast<unsigned char>(raw[last - 1]))) --last;
+        if (raw.compare(first, last - first, code) == 0) return true;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
+bool is_realtime_eligible_trade(const broker_sim::TradeRecord& trade) {
+    if (trade.price <= 0.0 || trade.size < 100) return false;
+    return !has_trade_condition_code(trade.conditions, "37");
+}
+
+std::string realtime_trade_sql_filter() {
+    return R"SQL(
+              AND price > 0
+              AND size >= 100
+              AND NOT has(splitByChar(',', replaceAll(toString(conditions), ' ', '')), '37')
+)SQL";
+}
+
 } // namespace
 
 namespace broker_sim {
@@ -94,8 +123,9 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
         WHERE symbol IN ({})
           AND timestamp >= '{}'
           AND timestamp < '{}'
+          {}
         ORDER BY timestamp ASC
-    )", sym_list, start_str, end_str);
+    )", sym_list, start_str, end_str, realtime_trade_sql_filter());
 
     client_->Select(query, [&cb](const clickhouse::Block& block) {
         for (size_t row = 0; row < block.GetRowCount(); ++row) {
@@ -107,6 +137,7 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
             tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
             tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
             tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+            if (!is_realtime_eligible_trade(tr)) continue;
             cb(tr);
         }
     });
@@ -183,6 +214,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
             WHERE symbol IN ({})
               AND timestamp >= '{}'
               AND timestamp < '{}'
+              {}
             UNION ALL
             SELECT sip_timestamp as ts,
                    CAST(symbol AS String) as symbol,
@@ -213,7 +245,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                  size ASC,
                  tape ASC,
                  conditions ASC
-    )", sym_list, start_str, end_str, sym_list, start_str, end_str);
+    )", sym_list, start_str, end_str, realtime_trade_sql_filter(), sym_list, start_str, end_str);
 
     spdlog::info("Starting ClickHouse query for {} symbols, {} to {}", symbols.size(), start_str, end_str);
     auto query_start = std::chrono::steady_clock::now();
@@ -249,6 +281,7 @@ void ClickHouseDataSource::stream_events(const std::vector<std::string>& symbols
                     ev.trade.exchange = exchange;
                     ev.trade.conditions = conditions;
                     ev.trade.tape = tape;
+                    if (!is_realtime_eligible_trade(ev.trade)) continue;
                 } else {
                     ev.quote.bid_price = bid_price;
                     ev.quote.bid_size = bid_size;
@@ -347,6 +380,109 @@ void ClickHouseDataSource::stream_second_bars(const std::vector<std::string>& sy
     spdlog::info("ClickHouse 1s bars query completed: {} bars in {}ms", total_bars, query_ms);
 }
 
+void ClickHouseDataSource::stream_aggregate_bars(const std::vector<std::string>& symbols,
+                                                 Timestamp start_time,
+                                                 Timestamp end_time,
+                                                 int multiplier,
+                                                 const std::string& timespan,
+                                                 const std::function<void(const BarRecord&)>& cb) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected, reconnecting...");
+        connect();
+    }
+
+    auto normalized_span = timespan;
+    std::transform(normalized_span.begin(), normalized_span.end(), normalized_span.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized_span == "sec" || normalized_span == "s") normalized_span = "second";
+    if (normalized_span == "min" || normalized_span == "m") normalized_span = "minute";
+
+    auto resolve_bar_table = [&](const std::string& span, int mult) -> std::string {
+        if (span == "second") {
+            if (mult == 1) return "stock_second_bars";
+            if (mult == 5) return "stock_5s_bars";
+            if (mult == 10) return "stock_10s_bars";
+            if (mult == 15) return "stock_15s_bars";
+            if (mult == 30) return "stock_30s_bars";
+        } else if (span == "minute") {
+            if (mult == 1) return "stock_minute_bars";
+            if (mult == 3) return "stock_3m_bars";
+            if (mult == 5) return "stock_5m_bars";
+            if (mult == 10) return "stock_10m_bars";
+            if (mult == 15) return "stock_15m_bars";
+            if (mult == 30) return "stock_30m_bars";
+        }
+        return "";
+    };
+
+    const int mult = std::max(1, multiplier);
+    const auto table = resolve_bar_table(normalized_span, mult);
+    if (table.empty()) {
+        spdlog::warn("Unsupported aggregate bar stream timespan={} multiplier={}", timespan, multiplier);
+        return;
+    }
+
+    const auto trade_count_column = trade_count_column_for_table(table);
+    const std::string sym_list = build_symbol_list(symbols);
+    const auto start_str = format_timestamp_precise(start_time);
+    const auto end_str = format_timestamp_precise(end_time);
+    const std::string query = fmt::format(R"(
+        SELECT
+            toDateTime64(timestamp, 9) AS ts,
+            CAST(symbol AS String) AS symbol,
+            toFloat64(open) AS open,
+            toFloat64(high) AS high,
+            toFloat64(low) AS low,
+            toFloat64(close) AS close,
+            toInt64(volume) AS volume,
+            toFloat64(vwap) AS vwap,
+            toUInt64({}) AS trade_count
+        FROM {}.{}
+        WHERE symbol IN ({})
+          AND timestamp >= '{}'
+          AND timestamp < '{}'
+        ORDER BY timestamp ASC, symbol ASC
+    )", trade_count_column, cfg_.database, table, sym_list, start_str, end_str);
+
+    spdlog::info("Starting ClickHouse aggregate bar stream for {} symbols, {} {} bars, {} to {}",
+                 symbols.size(), mult, normalized_span, start_str, end_str);
+    const auto query_start = std::chrono::steady_clock::now();
+    size_t total_bars = 0;
+
+    auto execute_query = [&]() {
+        client_->Select(query, [&](const clickhouse::Block& block) {
+            for (size_t row = 0; row < block.GetRowCount(); ++row) {
+                BarRecord bar;
+                bar.timestamp = extract_ts_any(block[0], row);
+                bar.symbol = block[1]->As<clickhouse::ColumnString>()->At(row);
+                bar.open = block[2]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.high = block[3]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.low = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.close = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.volume = block[6]->As<clickhouse::ColumnInt64>()->At(row);
+                bar.vwap = block[7]->As<clickhouse::ColumnFloat64>()->At(row);
+                bar.trade_count = block[8]->As<clickhouse::ColumnUInt64>()->At(row);
+                cb(bar);
+                ++total_bars;
+            }
+        });
+    };
+
+    try {
+        execute_query();
+    } catch (const std::exception& e) {
+        spdlog::warn("ClickHouse aggregate bar stream failed: {}, reconnecting and retrying...", e.what());
+        connect();
+        execute_query();
+    }
+
+    const auto query_end = std::chrono::steady_clock::now();
+    const auto query_ms = std::chrono::duration_cast<std::chrono::milliseconds>(query_end - query_start).count();
+    spdlog::info("ClickHouse aggregate bar stream completed: {} bars in {}ms", total_bars, query_ms);
+}
+
 void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string>& symbols,
                                                    Timestamp start_time,
                                                    Timestamp end_time,
@@ -392,6 +528,7 @@ void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string
             WHERE symbol IN ({})
               AND timestamp >= '{}'
               AND timestamp < '{}'
+              {}
             UNION ALL
             SELECT sip_timestamp as ts,
                    CAST(symbol AS String) as symbol,
@@ -463,7 +600,7 @@ void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string
                  volume ASC,
                  vwap ASC,
                  trade_count ASC
-    )", sym_list, start_str, end_str, sym_list, start_str, end_str, sym_list, start_str, end_str);
+    )", sym_list, start_str, end_str, realtime_trade_sql_filter(), sym_list, start_str, end_str, sym_list, start_str, end_str);
 
     spdlog::info("Starting ClickHouse merged stream for {} symbols, {} to {}", symbols.size(), start_str, end_str);
     auto query_start = std::chrono::steady_clock::now();
@@ -495,6 +632,7 @@ void ClickHouseDataSource::stream_events_with_bars(const std::vector<std::string
                     ev.trade.exchange = exchange;
                     ev.trade.conditions = conditions;
                     ev.trade.tape = tape;
+                    if (!is_realtime_eligible_trade(ev.trade)) continue;
                 } else if (ev.type == UnifiedEventType::QUOTE) {
                     double bid_price = block[5]->As<clickhouse::ColumnFloat64>()->At(row);
                     int64_t bid_size = block[6]->As<clickhouse::ColumnInt64>()->At(row);
@@ -572,9 +710,10 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
             WHERE symbol = '{}'
               AND timestamp >= '{}'
               AND timestamp < '{}'
+              {}
             ORDER BY timestamp ASC, participant_timestamp ASC, sequence_number ASC
             {}
-        )", symbol, start_str, end_str, limit_clause);
+        )", symbol, start_str, end_str, realtime_trade_sql_filter(), limit_clause);
 
         client.Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
@@ -586,6 +725,7 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
                 tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
                 tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
                 tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+                if (!is_realtime_eligible_trade(tr)) continue;
                 out.push_back(std::move(tr));
             }
         });
@@ -2763,12 +2903,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
     std::vector<EarningsCalendarRecord> out;
-    std::lock_guard<std::mutex> lock(client_mutex_);
-    if (!client_) {
-        spdlog::info("ClickHouse client not connected for earnings_calendar, reconnecting...");
-        connect();
-        if (!client_) return out;
-    }
+    if (!client_) return out;
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
@@ -2788,9 +2923,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
         ORDER BY date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-
-    auto execute = [&]() {
-        out.clear();
+    try {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 EarningsCalendarRecord e;
@@ -2806,23 +2939,9 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                 out.push_back(std::move(e));
             }
         });
-    };
-
-    try {
-        execute();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_earnings_calendar failed: {}, reconnecting and retrying once...", e.what());
-        try {
-            connect();
-            if (client_) {
-                execute();
-            } else {
-                out.clear();
-            }
-        } catch (const std::exception& e2) {
-            spdlog::warn("ClickHouse get_earnings_calendar retry failed: {}", e2.what());
-            out.clear();
-        }
+        spdlog::warn("ClickHouse get_earnings_calendar failed: {}", e.what());
+        out.clear();
     }
     return out;
 }

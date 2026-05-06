@@ -35,6 +35,21 @@ public:
         spdlog::warn("StubDataSource: no 1s bars streamed (ClickHouse not linked)");
     }
 
+    void stream_aggregate_bars(const std::vector<std::string>& symbols,
+                               Timestamp start_time,
+                               Timestamp end_time,
+                               int multiplier,
+                               const std::string& timespan,
+                               const std::function<void(const BarRecord&)>& cb) override {
+        (void)symbols;
+        (void)start_time;
+        (void)end_time;
+        (void)multiplier;
+        (void)timespan;
+        (void)cb;
+        spdlog::warn("StubDataSource: no aggregate bars streamed (ClickHouse not linked)");
+    }
+
     void stream_events_with_bars(const std::vector<std::string>& symbols,
                                  Timestamp start_time,
                                  Timestamp end_time,
