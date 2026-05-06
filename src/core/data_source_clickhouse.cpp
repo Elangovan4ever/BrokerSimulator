@@ -2918,7 +2918,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                CAST(hour AS String)
         FROM finnhub_earnings_calendar
         WHERE date >= toDate('{}')
-          AND date < toDate('{}')
+          AND date <= toDate('{}')
           {}
         ORDER BY date DESC
         {}
