@@ -1011,6 +1011,13 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             w["size"] = t.size;
             w["exchange"] = t.exchange;
             w["conditions"] = t.conditions;
+        } else if (ev.event_type == EventType::BAR) {
+            const auto& b = std::get<BarData>(ev.data);
+            w["open"] = b.open;
+            w["high"] = b.high;
+            w["low"] = b.low;
+            w["close"] = b.close;
+            w["volume"] = b.volume;
         }
         std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
@@ -1072,6 +1079,12 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
                     }
                 }
             }
+        }
+    } else if (ev.event_type == EventType::BAR) {
+        const auto& b = std::get<BarData>(ev.data);
+        if (b.close > 0.0) {
+            session->account_manager->mark_to_market(ev.symbol, b.close);
+            enforce_margin(session);
         }
     } else if (ev.event_type == EventType::HALT) {
         // Trading halt - add symbol to halted set
@@ -2311,6 +2324,12 @@ void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_
                 double price = entry.data.value("price", 0.0);
                 if (!symbol.empty() && price > 0.0) {
                     session->account_manager->mark_to_market(symbol, price);
+                }
+            } else if (type == static_cast<int>(EventType::BAR)) {
+                std::string symbol = entry.data.value("symbol", "");
+                double close = entry.data.value("close", 0.0);
+                if (!symbol.empty() && close > 0.0) {
+                    session->account_manager->mark_to_market(symbol, close);
                 }
             }
         } else if (entry.event_type == "dividend") {
