@@ -2909,18 +2909,21 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
     std::string where_symbol;
     if (!symbol.empty()) {
-        where_symbol = fmt::format("AND symbol = '{}'", symbol);
+        where_symbol = fmt::format("AND cal.symbol = '{}'", symbol);
     }
     std::string query = fmt::format(R"(
-        SELECT CAST(symbol AS String), date, quarter, year,
-               toFloat64(eps_estimate), toFloat64(eps_actual),
-               toFloat64(revenue_estimate), toFloat64(revenue_actual),
-               CAST(hour AS String)
-        FROM finnhub_earnings_calendar
-        WHERE date >= toDate('{}')
-          AND date <= toDate('{}')
+        SELECT CAST(cal.symbol AS String), cal.date, cal.quarter, cal.year,
+               toFloat64(coalesce(cal.eps_estimate, hist.estimate)),
+               toFloat64(coalesce(cal.eps_actual, hist.actual)),
+               toFloat64(cal.revenue_estimate), toFloat64(cal.revenue_actual),
+               CAST(cal.hour AS String)
+        FROM finnhub_earnings_calendar AS cal
+        ANY LEFT JOIN finnhub_earnings_history AS hist
+          ON cal.symbol = hist.symbol AND cal.quarter = hist.quarter AND cal.year = hist.year
+        WHERE cal.date >= toDate('{}')
+          AND cal.date <= toDate('{}')
           {}
-        ORDER BY date DESC
+        ORDER BY cal.date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
     try {
@@ -3618,7 +3621,7 @@ std::vector<FinnhubEarningsHistoryRecord> ClickHouseDataSource::get_finnhub_earn
                toFloat64(actual), toFloat64(estimate), toFloat64(surprise), toFloat64(surprise_percent)
         FROM finnhub_earnings_history
         WHERE period >= toDate('{}')
-          AND period < toDate('{}')
+          AND period <= toDate('{}')
           {}
         ORDER BY period DESC
         {}
