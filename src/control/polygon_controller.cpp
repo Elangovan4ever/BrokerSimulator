@@ -605,8 +605,9 @@ void PolygonController::trades(const drogon::HttpRequestPtr& req,
                     trade_item["size"] = t.size;
                     trade_item["tape"] = t.tape;
                     trade_item["sequence_number"] = utils::ts_to_ns(t.timestamp);
-                    trade_item["trf_id"] = 0;
-                    trade_item["trf_timestamp"] = utils::ts_to_ns(t.timestamp);
+                    trade_item["trf_id"] = t.trf_id;
+                    trade_item["trf_timestamp"] = utils::ts_to_ns(
+                        t.trf_timestamp == broker_sim::Timestamp{} ? t.timestamp : t.trf_timestamp);
                     results.push_back(trade_item);
                 }
             }

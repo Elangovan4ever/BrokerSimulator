@@ -20,6 +20,8 @@ struct TradeRecord {
     int exchange;
     std::string conditions;
     int tape;
+    int trf_id{0};
+    Timestamp trf_timestamp{};
 };
 
 struct QuoteRecord {

@@ -126,7 +126,8 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     std::string query = fmt::format(R"(
-        SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape)
+        SELECT timestamp, symbol, toFloat64(price), toInt64(size), toInt32(exchange), conditions, toInt32(tape),
+               toInt32(trf_id), trf_timestamp
         FROM stock_trades
         WHERE symbol IN ({})
           AND timestamp >= '{}'
@@ -145,6 +146,8 @@ void ClickHouseDataSource::stream_trades(const std::vector<std::string>& symbols
             tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
             tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
             tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+            tr.trf_id = block[7]->As<clickhouse::ColumnInt32>()->At(row);
+            tr.trf_timestamp = extract_ts(block[8], row);
             if (!is_realtime_eligible_trade(tr)) continue;
             cb(tr);
         }
@@ -713,7 +716,9 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
                 toInt64(size) AS size,
                 toInt32OrZero(toString(exchange)) AS exchange,
                 toString(conditions) AS conditions,
-                toInt32OrZero(toString(tape)) AS tape
+                toInt32OrZero(toString(tape)) AS tape,
+                toInt32OrZero(toString(trf_id)) AS trf_id,
+                trf_timestamp
             FROM stock_trades
             WHERE symbol = '{}'
               AND timestamp >= '{}'
@@ -733,6 +738,8 @@ std::vector<TradeRecord> ClickHouseDataSource::get_trades(const std::string& sym
                 tr.exchange = block[4]->As<clickhouse::ColumnInt32>()->At(row);
                 tr.conditions = block[5]->As<clickhouse::ColumnString>()->At(row);
                 tr.tape = block[6]->As<clickhouse::ColumnInt32>()->At(row);
+                tr.trf_id = block[7]->As<clickhouse::ColumnInt32>()->At(row);
+                tr.trf_timestamp = extract_ts_any(block[8], row);
                 if (!is_realtime_eligible_trade(tr)) continue;
                 out.push_back(std::move(tr));
             }
