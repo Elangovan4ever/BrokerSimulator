@@ -2902,32 +2902,35 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp start_time,
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
-    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<EarningsCalendarRecord> out;
-    if (!client_) return out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
+    if (!client_) {
+        spdlog::info("ClickHouse client not connected for earnings_calendar, reconnecting...");
+        connect();
+        if (!client_) return out;
+    }
     auto start_str = format_timestamp(start_time);
     auto end_str = format_timestamp(end_time);
     // symbol, hour are LowCardinality(String); eps/revenue are Decimal
     std::string where_symbol;
     if (!symbol.empty()) {
-        where_symbol = fmt::format("AND cal.symbol = '{}'", symbol);
+        where_symbol = fmt::format("AND symbol = '{}'", symbol);
     }
     std::string query = fmt::format(R"(
-        SELECT CAST(cal.symbol AS String), cal.date, cal.quarter, cal.year,
-               toFloat64(coalesce(cal.eps_estimate, hist.estimate)),
-               toFloat64(coalesce(cal.eps_actual, hist.actual)),
-               toFloat64(cal.revenue_estimate), toFloat64(cal.revenue_actual),
-               CAST(cal.hour AS String)
-        FROM finnhub_earnings_calendar AS cal
-        ANY LEFT JOIN finnhub_earnings_history AS hist
-          ON cal.symbol = hist.symbol AND cal.quarter = hist.quarter AND cal.year = hist.year
-        WHERE cal.date >= toDate('{}')
-          AND cal.date <= toDate('{}')
+        SELECT CAST(symbol AS String), date, quarter, year,
+               toFloat64(eps_estimate), toFloat64(eps_actual),
+               toFloat64(revenue_estimate), toFloat64(revenue_actual),
+               CAST(hour AS String)
+        FROM finnhub_earnings_calendar
+        WHERE date >= toDate('{}')
+          AND date < toDate('{}')
           {}
-        ORDER BY cal.date DESC
+        ORDER BY date DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+
+    auto execute = [&]() {
+        out.clear();
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 EarningsCalendarRecord e;
@@ -2943,9 +2946,23 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                 out.push_back(std::move(e));
             }
         });
+    };
+
+    try {
+        execute();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_earnings_calendar failed: {}", e.what());
-        out.clear();
+        spdlog::warn("ClickHouse get_earnings_calendar failed: {}, reconnecting and retrying once...", e.what());
+        try {
+            connect();
+            if (client_) {
+                execute();
+            } else {
+                out.clear();
+            }
+        } catch (const std::exception& e2) {
+            spdlog::warn("ClickHouse get_earnings_calendar retry failed: {}", e2.what());
+            out.clear();
+        }
     }
     return out;
 }
@@ -3316,7 +3333,6 @@ std::vector<FinnhubInsiderTransactionRecord> ClickHouseDataSource::get_finnhub_i
     Timestamp start_time,
     Timestamp end_time,
     size_t limit) {
-    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<FinnhubInsiderTransactionRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -3623,7 +3639,7 @@ std::vector<FinnhubEarningsHistoryRecord> ClickHouseDataSource::get_finnhub_earn
                toFloat64(actual), toFloat64(estimate), toFloat64(surprise), toFloat64(surprise_percent)
         FROM finnhub_earnings_history
         WHERE period >= toDate('{}')
-          AND period <= toDate('{}')
+          AND period < toDate('{}')
           {}
         ORDER BY period DESC
         {}

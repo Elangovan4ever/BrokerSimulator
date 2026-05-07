@@ -99,7 +99,6 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
     const auto decision_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(decision_time.time_since_epoch()).count();
     const auto forward_end = decision_time + std::chrono::seconds(90);
     const auto short_forward_end = decision_time + std::chrono::seconds(5);
-    const auto quote_lookback_start = decision_time - std::chrono::seconds(15);
     const auto short_lookback_start = decision_time - std::chrono::seconds(5);
     const auto minute_lookback_start = decision_time - std::chrono::minutes(2);
     const auto inclusive_decision_end = decision_time + std::chrono::milliseconds(1);
@@ -143,16 +142,6 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
         if (trade.timestamp >= decision_time && trade.timestamp < forward_end && trade.price > 0.0) {
             log_fill_choice("trade", trade.timestamp, trade.price);
             return trade.price;
-        }
-    }
-
-    auto recent_quotes = data_source->get_quotes(order.symbol, quote_lookback_start, inclusive_decision_end, 32);
-    for (auto it = recent_quotes.rbegin(); it != recent_quotes.rend(); ++it) {
-        if (it->timestamp <= decision_time && it->timestamp >= quote_lookback_start) {
-            if (auto px = quote_fill_price(*it)) {
-                log_fill_choice("lookback_quote", it->timestamp, *px);
-                return *px;
-            }
         }
     }
 
@@ -209,27 +198,6 @@ std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSour
             nbbo->timestamp,
             nbbo->bid_price,
             nbbo->ask_price);
-    }
-
-    auto positions = session->account_manager->positions();
-    auto pos_it = positions.find(order.symbol);
-    if (pos_it != positions.end() && std::abs(pos_it->second.qty) > 0.0) {
-        const bool reduces_position =
-            (pos_it->second.qty > 0.0 && order.side == OrderSide::SELL) ||
-            (pos_it->second.qty < 0.0 && order.side == OrderSide::BUY);
-        if (reduces_position) {
-            double mark_price = 0.0;
-            if (std::abs(pos_it->second.market_value) > 0.0) {
-                mark_price = std::abs(pos_it->second.market_value / pos_it->second.qty);
-            }
-            if (mark_price <= 0.0) {
-                mark_price = pos_it->second.avg_entry_price;
-            }
-            if (mark_price > 0.0) {
-                log_fill_choice("position_mark", decision_time, mark_price);
-                return mark_price;
-            }
-        }
     }
 
     return std::nullopt;
@@ -1043,13 +1011,6 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
             w["size"] = t.size;
             w["exchange"] = t.exchange;
             w["conditions"] = t.conditions;
-        } else if (ev.event_type == EventType::BAR) {
-            const auto& b = std::get<BarData>(ev.data);
-            w["open"] = b.open;
-            w["high"] = b.high;
-            w["low"] = b.low;
-            w["close"] = b.close;
-            w["volume"] = b.volume;
         }
         std::lock_guard<std::mutex> lock(session->wal_mutex);
         if (session->wal) {
@@ -1111,12 +1072,6 @@ void SessionManager::process_event(std::shared_ptr<Session> session, const Event
                     }
                 }
             }
-        }
-    } else if (ev.event_type == EventType::BAR) {
-        const auto& b = std::get<BarData>(ev.data);
-        if (b.close > 0.0) {
-            session->account_manager->mark_to_market(ev.symbol, b.close);
-            enforce_margin(session);
         }
     } else if (ev.event_type == EventType::HALT) {
         // Trading halt - add symbol to halted set
@@ -2356,12 +2311,6 @@ void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_
                 double price = entry.data.value("price", 0.0);
                 if (!symbol.empty() && price > 0.0) {
                     session->account_manager->mark_to_market(symbol, price);
-                }
-            } else if (type == static_cast<int>(EventType::BAR)) {
-                std::string symbol = entry.data.value("symbol", "");
-                double close = entry.data.value("close", 0.0);
-                if (!symbol.empty() && close > 0.0) {
-                    session->account_manager->mark_to_market(symbol, close);
                 }
             }
         } else if (entry.event_type == "dividend") {
