@@ -1,0 +1,2557 @@
+#include "session_manager.hpp"
+#include <spdlog/spdlog.h>
+#include <spdlog/fmt/fmt.h>
+#include "data_source_stub.hpp"
+#include "checkpoint.hpp"
+#include "../ws/status_ws_controller.hpp"
+#include <cctype>
+#include <cmath>
+#include <sstream>
+
+namespace broker_sim {
+
+namespace {
+
+void advance_session_clock_to_window_end(const std::shared_ptr<Session>& session,
+                                         Timestamp window_end) {
+    if (!session || session->time_engine->is_paused()) {
+        return;
+    }
+
+    const auto session_target = std::min(window_end, session->config.end_time);
+    if (session_target > session->time_engine->current_time()) {
+        session->time_engine->set_time(session_target);
+    }
+    if (session_target >= session->config.end_time && session->event_queue) {
+        session->event_queue->stop();
+    }
+}
+
+std::string trim_copy(const std::string& input) {
+    size_t first = 0;
+    while (first < input.size() && std::isspace(static_cast<unsigned char>(input[first]))) {
+        ++first;
+    }
+    size_t last = input.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(input[last - 1]))) {
+        --last;
+    }
+    return input.substr(first, last - first);
+}
+
+std::string normalize_news_token(const std::string& raw) {
+    auto token = trim_copy(raw);
+    if (token.empty()) return token;
+
+    for (char& c : token) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+
+    if (token == "NEWS" || token == "GENERAL" || token == "MARKET" || token == "MARKET_NEWS") {
+        return "*";
+    }
+    return token;
+}
+
+bool is_minute_bar_source(const std::string& source) {
+    return source == "minute" || source == "minute_bars" || source == "1m" || source == "bars";
+}
+
+bool is_second_bar_source(const std::string& source) {
+    return source == "1s" || source == "second" || source == "second_bars";
+}
+
+int compute_adaptive_window_secs(int base_window_secs, double speed_factor) {
+    const int base = std::max(1, base_window_secs);
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    // Keep request fan-out bounded at high replay speeds while preserving 1s granularity at low speed.
+    const int speed_window = std::max(1, static_cast<int>(std::ceil(speed / 8.0)));
+    return std::max(base, speed_window);
+}
+
+std::chrono::milliseconds compute_window_loop_sleep(int window_secs, double speed_factor) {
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    return std::chrono::milliseconds(
+        std::max<int64_t>(2, static_cast<int64_t>((window_secs * 1000.0) / speed)));
+}
+
+std::chrono::milliseconds compute_iteration_sleep(std::chrono::steady_clock::time_point started_at,
+                                                  int window_secs,
+                                                  double speed_factor) {
+    const double speed = speed_factor > 0.0 ? speed_factor : 1.0;
+    const auto target = std::chrono::duration<double>(static_cast<double>(window_secs) / speed);
+    const auto elapsed = std::chrono::steady_clock::now() - started_at;
+    if (elapsed >= target) {
+        return std::chrono::milliseconds(2);
+    }
+    return std::max(std::chrono::milliseconds(2),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(target - elapsed));
+}
+
+std::optional<double> resolve_decision_fill_price(const std::shared_ptr<DataSource>& data_source,
+                                                  const std::shared_ptr<Session>& session,
+                                                  const Order& order,
+                                                  Timestamp decision_time) {
+    if (!data_source) {
+        return std::nullopt;
+    }
+
+    const auto decision_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(decision_time.time_since_epoch()).count();
+    const auto forward_end = decision_time + std::chrono::seconds(90);
+    const auto short_forward_end = decision_time + std::chrono::seconds(5);
+    const auto short_lookback_start = decision_time - std::chrono::seconds(5);
+    const auto minute_lookback_start = decision_time - std::chrono::minutes(2);
+    const auto inclusive_decision_end = decision_time + std::chrono::milliseconds(1);
+
+    auto ts_ns = [](Timestamp ts) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count();
+    };
+
+    auto log_fill_choice = [&](const char* source, Timestamp source_ts, double chosen_price) {
+        spdlog::info(
+            "Decision-time fill source={} order={} symbol={} side={} decision_ns={} source_ns={} price={}",
+            source,
+            order.id,
+            order.symbol,
+            order.side == OrderSide::BUY ? "BUY" : "SELL",
+            decision_ns,
+            ts_ns(source_ts),
+            chosen_price);
+    };
+
+    auto quote_fill_price = [&](const QuoteRecord& q) -> std::optional<double> {
+        if (order.side == OrderSide::BUY && q.ask_price > 0.0) return q.ask_price;
+        if (order.side == OrderSide::SELL && q.bid_price > 0.0) return q.bid_price;
+        if (q.bid_price > 0.0 && q.ask_price > 0.0) return (q.bid_price + q.ask_price) / 2.0;
+        return std::nullopt;
+    };
+
+    auto quotes = data_source->get_quotes(order.symbol, decision_time, forward_end, 16);
+    for (const auto& quote : quotes) {
+        if (quote.timestamp < decision_time || quote.timestamp >= forward_end) {
+            continue;
+        }
+        if (auto px = quote_fill_price(quote)) {
+            log_fill_choice("quote", quote.timestamp, *px);
+            return *px;
+        }
+    }
+
+    auto trades = data_source->get_trades(order.symbol, decision_time, forward_end, 16);
+    for (const auto& trade : trades) {
+        if (trade.timestamp >= decision_time && trade.timestamp < forward_end && trade.price > 0.0) {
+            log_fill_choice("trade", trade.timestamp, trade.price);
+            return trade.price;
+        }
+    }
+
+    auto forward_second_bars = data_source->get_bars(order.symbol, decision_time, short_forward_end, 1, "second", 8);
+    for (const auto& bar : forward_second_bars) {
+        if (bar.timestamp >= decision_time && bar.timestamp < short_forward_end && bar.close > 0.0) {
+            log_fill_choice("forward_second_bar", bar.timestamp, bar.close);
+            return bar.close;
+        }
+    }
+
+    auto recent_second_bars = data_source->get_bars(order.symbol, short_lookback_start, inclusive_decision_end, 1, "second", 0);
+    for (auto it = recent_second_bars.rbegin(); it != recent_second_bars.rend(); ++it) {
+        if (it->timestamp <= decision_time && it->timestamp >= short_lookback_start && it->close > 0.0) {
+            log_fill_choice("lookback_second_bar", it->timestamp, it->close);
+            return it->close;
+        }
+    }
+
+    auto forward_minute_bars = data_source->get_bars(order.symbol, decision_time, forward_end, 1, "minute", 4);
+    for (const auto& bar : forward_minute_bars) {
+        if (bar.timestamp >= decision_time && bar.timestamp < forward_end && bar.close > 0.0) {
+            log_fill_choice("forward_minute_bar", bar.timestamp, bar.close);
+            return bar.close;
+        }
+    }
+
+    auto recent_minute_bars = data_source->get_bars(order.symbol, minute_lookback_start, inclusive_decision_end, 1, "minute", 0);
+    for (auto it = recent_minute_bars.rbegin(); it != recent_minute_bars.rend(); ++it) {
+        if (it->timestamp <= decision_time && it->timestamp >= minute_lookback_start && it->close > 0.0) {
+            log_fill_choice("lookback_minute_bar", it->timestamp, it->close);
+            return it->close;
+        }
+    }
+
+    auto nbbo = session->matching_engine->get_nbbo(order.symbol);
+    if (nbbo && nbbo->timestamp > 0) {
+        auto nbbo_ts = Timestamp{} + std::chrono::nanoseconds(nbbo->timestamp);
+        if (nbbo_ts + std::chrono::seconds(5) >= decision_time && nbbo_ts <= forward_end) {
+            if (order.side == OrderSide::BUY && nbbo->ask_price > 0.0) {
+                log_fill_choice("nbbo", nbbo_ts, nbbo->ask_price);
+                return nbbo->ask_price;
+            }
+            if (order.side == OrderSide::SELL && nbbo->bid_price > 0.0) {
+                log_fill_choice("nbbo", nbbo_ts, nbbo->bid_price);
+                return nbbo->bid_price;
+            }
+        }
+        spdlog::warn(
+            "Decision-time NBBO rejected as stale order={} symbol={} decision_ns={} nbbo_ns={} bid={} ask={}",
+            order.id,
+            order.symbol,
+            decision_ns,
+            nbbo->timestamp,
+            nbbo->bid_price,
+            nbbo->ask_price);
+    }
+
+    return std::nullopt;
+}
+
+
+}  // namespace
+
+
+Session::Session(const std::string& session_id, const SessionConfig& cfg)
+    : id(session_id)
+    , config(cfg)
+    , time_engine(std::make_shared<TimeEngine>())
+    , event_queue(std::make_shared<EventQueue>(cfg.queue_capacity, cfg.overflow_policy))
+    , matching_engine(std::make_shared<MatchingEngine>())
+    , account_manager(std::make_shared<AccountManager>(cfg.initial_capital))
+    , perf(std::make_shared<PerformanceTracker>())
+    , created_at(std::chrono::system_clock::now())
+    , cash(cfg.initial_capital)
+    , equity(cfg.initial_capital)
+    , events_processed(0)
+    , last_checkpoint_events(0) {
+    auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(cfg.start_time.time_since_epoch()).count();
+    spdlog::info("Session {} created: start_time_ns={}, speed={}", session_id, start_ns, cfg.speed_factor);
+    time_engine->set_time(cfg.start_time);
+    time_engine->set_speed(cfg.speed_factor);
+    perf->record(cfg.start_time, cfg.initial_capital);
+}
+
+Session::~Session() {
+    stop();
+}
+
+void Session::stop() {
+    should_stop.store(true);
+    time_engine->stop();
+    if (event_queue) event_queue->stop();
+    for (auto& t : feed_threads) {
+        if (t && t->joinable()) t->join();
+    }
+    if (polling_thread && polling_thread->joinable()) {
+        polling_thread->join();
+    }
+    if (worker_thread && worker_thread->joinable()) {
+        worker_thread->join();
+    }
+}
+
+SessionManager::SessionManager(std::shared_ptr<DataSource> data_source,
+                               ExecutionConfig exec_cfg,
+                               FeeConfig fee_cfg,
+                               std::shared_ptr<DataSource> api_data_source)
+    : exec_cfg_(exec_cfg)
+    , fee_cfg_(fee_cfg)
+    , data_source_(std::move(data_source))
+    , api_data_source_(std::move(api_data_source)) {
+    if (!data_source_) {
+        data_source_ = std::make_shared<StubDataSource>();
+    }
+    // If no separate API data source provided, use the main one (less safe but compatible)
+    if (!api_data_source_) {
+        api_data_source_ = data_source_;
+    }
+}
+
+SessionManager::~SessionManager() {
+    stop_shared_feeder();
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& kv : sessions_) {
+        kv.second->stop();
+    }
+}
+
+std::shared_ptr<Session> SessionManager::create_session(const SessionConfig& config,
+                                                        std::optional<std::string> session_id) {
+    std::string id = session_id.value_or(generate_uuid());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sessions_.find(id);
+        if (it != sessions_.end()) {
+            return it->second;
+        }
+    }
+    auto session = std::make_shared<Session>(id, config);
+
+    // Apply execution configuration to matching engine
+    session->matching_engine->set_config(exec_cfg_);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sessions_[id] = session;
+    }
+
+    try {
+        std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
+        std::filesystem::create_directories(wal_dir);
+
+        {
+            std::lock_guard<std::mutex> l(log_mutex_);
+            session_logs_[id] = std::ofstream(wal_dir + "/session_" + id + ".events.jsonl",
+                                              std::ios::out | std::ios::trunc);
+        }
+
+        if (exec_cfg_.enable_wal) {
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
+            session->wal = std::make_unique<WalLogger>(wal_path(wal_dir, id));
+        }
+
+        // Attempt recovery from prior checkpoint
+        if (restore_session(session)) {
+            spdlog::info("Recovered session {} from checkpoint and WAL", id);
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Failed to init event log for session {}: {}", id, e.what());
+    }
+
+    return session;
+}
+
+std::shared_ptr<Session> SessionManager::get_session(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = sessions_.find(session_id);
+    return it != sessions_.end() ? it->second : nullptr;
+}
+
+std::vector<std::shared_ptr<Session>> SessionManager::list_sessions() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::shared_ptr<Session>> out;
+    out.reserve(sessions_.size());
+    for (auto& kv : sessions_) out.push_back(kv.second);
+    return out;
+}
+
+void SessionManager::start_session(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (!session) return;
+
+    // Reset state for restart if session was previously stopped/completed
+    if (session->status == SessionStatus::STOPPED ||
+        session->status == SessionStatus::COMPLETED) {
+        // Reset event queue to accept new events
+        if (session->event_queue) {
+            session->event_queue->reset();
+            session->event_queue->clear();
+        }
+        // Reset time engine to session start time
+        session->time_engine->set_time(session->config.start_time);
+
+        // Allow news feeders to restart on session restart.
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            news_feeder_started_tokens_.erase(session->id);
+        }
+    }
+
+    session->status = SessionStatus::RUNNING;
+    session->started_at = std::chrono::system_clock::now();
+    session->time_engine->start();
+    session->should_stop.store(false);
+    // Data loads when symbols are subscribed via WebSocket
+    spdlog::info("[StartSession] session={} waiting for subscriptions", session->id);
+
+    // Resume pre-existing news subscriptions if they were set before start/restart.
+    std::vector<std::string> news_tokens;
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto it = stream_news_symbol_counts_.find(session->id);
+        if (it != stream_news_symbol_counts_.end()) {
+            for (const auto& kv : it->second) {
+                if (kv.second > 0) news_tokens.push_back(kv.first);
+            }
+        }
+    }
+    for (const auto& token : news_tokens) {
+        start_news_feed_for_symbol(session, token);
+    }
+    if (exec_cfg_.enable_shared_feed) {
+        start_shared_feeder();
+    } else {
+        start_polling_feeder(session);
+    }
+    session->worker_thread = std::make_unique<std::thread>(
+        [this, session]() { run_session_loop(session); }
+    );
+}
+
+void SessionManager::pause_session(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (session) {
+        session->time_engine->pause();
+        session->status = SessionStatus::PAUSED;
+        nlohmann::json w{{"event","session_paused"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+}
+
+void SessionManager::resume_session(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (session) {
+        session->time_engine->resume();
+        session->status = SessionStatus::RUNNING;
+        nlohmann::json w{{"event","session_resumed"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+}
+
+void SessionManager::stop_session(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (session) {
+        session->stop();
+        session->status = SessionStatus::STOPPED;
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            news_feeder_started_tokens_.erase(session_id);
+        }
+        save_session_checkpoint(session_id);
+
+        nlohmann::json w{{"event","session_stopped"},{"session_id",session_id}};
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    if (exec_cfg_.enable_shared_feed) {
+        bool any_running = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& kv : sessions_) {
+                if (kv.second->status == SessionStatus::RUNNING) {
+                    any_running = true;
+                    break;
+                }
+            }
+        }
+        if (!any_running) stop_shared_feeder();
+    }
+}
+
+void SessionManager::destroy_session(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (session) {
+        session->stop();
+        session->status = SessionStatus::STOPPED;
+        save_session_checkpoint(session_id);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = sessions_.find(session_id);
+        if (it != sessions_.end()) {
+            session = it->second;
+            sessions_.erase(it);
+        }
+    }
+    if (session) {
+        session->stop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        stream_symbol_counts_.erase(session_id);
+        stream_news_symbol_counts_.erase(session_id);
+        news_feeder_started_tokens_.erase(session_id);
+    }
+    if (exec_cfg_.enable_shared_feed) {
+        bool any_running = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& kv : sessions_) {
+                if (kv.second->status == SessionStatus::RUNNING) {
+                    any_running = true;
+                    break;
+                }
+            }
+        }
+        if (!any_running) stop_shared_feeder();
+    }
+}
+
+std::string SessionManager::submit_order(const std::string& session_id, Order order) {
+    auto session = get_session(session_id);
+    if (!session) return {};
+
+    const auto current_session_time = session->time_engine->current_time();
+    const bool has_session_window = session->config.end_time > session->config.start_time;
+    const auto decision_time = Timestamp{} + std::chrono::nanoseconds(order.decision_time_ns);
+    const bool has_historical_decision_time = order.decision_time_ns > 0;
+    const bool decision_inside_session =
+        has_historical_decision_time &&
+        (!has_session_window ||
+         (decision_time >= session->config.start_time &&
+          decision_time < session->config.end_time));
+    const bool terminal_reject =
+        session->status == SessionStatus::STOPPED ||
+        session->status == SessionStatus::ERROR ||
+        (session->status == SessionStatus::COMPLETED && !decision_inside_session);
+    const bool replay_past_end_reject =
+        has_session_window &&
+        current_session_time >= session->config.end_time &&
+        !decision_inside_session;
+    if (terminal_reject || replay_past_end_reject) {
+        spdlog::warn(
+            "Order rejected: session not accepting orders session={} status={} current_ns={} end_ns={} decision_ns={} decision_inside_session={} order_symbol={}",
+            session_id,
+            static_cast<int>(session->status),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                current_session_time.time_since_epoch()).count(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                session->config.end_time.time_since_epoch()).count(),
+            order.decision_time_ns,
+            decision_inside_session,
+            order.symbol);
+        return {};
+    }
+
+    if (order.id.empty()) order.id = generate_uuid();
+    if (order.client_order_id.empty()) order.client_order_id = order.id;
+    order.is_maker = false;
+    int64_t wall_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    int64_t order_clock_ns = order.decision_time_ns > 0 ? order.decision_time_ns : wall_now_ns;
+    auto order_clock_ts = Timestamp{} + std::chrono::nanoseconds(order_clock_ns);
+    order.created_at_ns = order_clock_ns;
+    order.submitted_at_ns = order_clock_ns;
+    order.updated_at_ns = order_clock_ns;
+    if (exec_cfg_.enable_latency && exec_cfg_.fixed_latency_us > 0) {
+        if (order.decision_time_ns > 0) {
+            order.min_exec_timestamp = order_clock_ns;
+        } else {
+            int64_t base_ns = session->last_event_ns.load(std::memory_order_acquire);
+            if (base_ns == 0) {
+                base_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    session->config.start_time.time_since_epoch()).count();
+            }
+            order.min_exec_timestamp = base_ns + exec_cfg_.fixed_latency_us * 1000;
+        }
+    }
+
+    // Basic OPG/CLS handling: constrain to session window.
+    if (order.tif == TimeInForce::OPG) {
+        // Only allow up to 5 minutes after session start.
+        Timestamp cutoff = session->config.start_time + std::chrono::minutes(5);
+        order.expire_at = cutoff;
+        if (order_clock_ts > cutoff) {
+            spdlog::warn("Order rejected: OPG past window id={}", order.id);
+            return {};
+        }
+    } else if (order.tif == TimeInForce::CLS) {
+        // Set expiry at session end; allow submits only during session.
+        order.expire_at = session->config.end_time;
+        if (order_clock_ts > session->config.end_time) {
+            spdlog::warn("Order rejected: CLS past session end id={}", order.id);
+            return {};
+        }
+    } else if (order.tif == TimeInForce::DAY) {
+        order.expire_at = session->config.end_time;
+    }
+
+    // Simple buying power check for buys using latest ask/limit.
+    double est_price = 0.0;
+    if (order.limit_price) est_price = *order.limit_price;
+    auto nbbo = session->matching_engine->get_nbbo(order.symbol);
+    if (order.side == OrderSide::BUY) {
+        if (nbbo) est_price = nbbo->ask_price;
+        if (order.qty && est_price > 0.0) {
+            double notional = (*order.qty) * est_price;
+            if (!session->account_manager->has_buying_power(notional, true)) {
+                spdlog::warn("Order rejected: insufficient buying power order={} notional={}", order.id, notional);
+                return {};
+            }
+        }
+    } else { // SELL
+        if (!exec_cfg_.allow_shorting) {
+            auto positions = session->account_manager->positions();
+            auto it = positions.find(order.symbol);
+            double pos_qty = (it != positions.end()) ? it->second.qty : 0.0;
+            if (order.qty && pos_qty < *order.qty) {
+                spdlog::warn("Order rejected: shorting disabled order={} qty={}", order.id, order.qty.value_or(0.0));
+                return {};
+            }
+        } else {
+            if (order.qty && order.limit_price) {
+                double notional = (*order.qty) * (*order.limit_price);
+                if (!session->account_manager->has_buying_power(notional, false)) {
+                    spdlog::warn("Order rejected: insufficient margin for short order={} notional={}", order.id, notional);
+                    return {};
+                }
+            }
+        }
+    }
+
+    if (order.type == OrderType::LIMIT && nbbo) {
+        bool marketable = false;
+        if (order.side == OrderSide::BUY && order.limit_price) {
+            marketable = *order.limit_price >= nbbo->ask_price;
+        } else if (order.side == OrderSide::SELL && order.limit_price) {
+            marketable = *order.limit_price <= nbbo->bid_price;
+        }
+        order.is_maker = !marketable;
+    }
+
+    // Circuit breaker check - reject orders for halted symbols
+    if (exec_cfg_.enable_circuit_breakers) {
+        std::lock_guard<std::mutex> lock(session->halt_mutex);
+        // Check for expired halts first
+        auto now_ts = std::chrono::system_clock::now();
+        auto end_it = session->halt_end_times.find(order.symbol);
+        if (end_it != session->halt_end_times.end() && now_ts >= end_it->second) {
+            // Halt has expired, remove it
+            session->halted_symbols.erase(order.symbol);
+            session->halt_end_times.erase(end_it);
+        }
+        // Check if symbol is currently halted
+        if (session->halted_symbols.find(order.symbol) != session->halted_symbols.end()) {
+            spdlog::warn("Order rejected: {} is halted (circuit breaker active)", order.symbol);
+            return {};
+        }
+    }
+
+    // Short Sale Restriction (SSR) check - SEC Rule 201 Alternative Uptick Rule
+    // When SSR is active, short sales must be at or above the current national best bid
+    if (exec_cfg_.enable_short_sale_restrictions && order.side == OrderSide::SELL) {
+        // Check if this is a short sale (selling more than we own)
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        double pos_qty = (pos_it != positions.end()) ? pos_it->second.qty : 0.0;
+        bool is_short_sale = order.qty && (*order.qty > pos_qty);
+
+        if (is_short_sale) {
+            std::lock_guard<std::mutex> lock(session->ssr_mutex);
+            if (session->ssr_symbols.find(order.symbol) != session->ssr_symbols.end()) {
+                // SSR is active for this symbol - enforce uptick rule
+                if (nbbo && nbbo->bid_price > 0.0) {
+                    // For market orders, we can't guarantee the price, so reject
+                    if (order.type == OrderType::MARKET) {
+                        spdlog::warn("Order rejected: Market short sell not allowed for {} (SSR active)",
+                                     order.symbol);
+                        return {};
+                    }
+                    // For limit orders, price must be >= national best bid
+                    if (order.limit_price && *order.limit_price < nbbo->bid_price) {
+                        spdlog::warn("Order rejected: Short sell limit ${:.2f} below NBB ${:.2f} for {} (SSR active)",
+                                     *order.limit_price, nbbo->bid_price, order.symbol);
+                        return {};
+                    }
+                }
+            }
+        }
+    }
+
+    std::optional<Fill> fill;
+    const bool use_decision_fill = order.decision_time_ns > 0
+        && order.type == OrderType::MARKET
+        && order.qty.has_value()
+        && order.qty.value() > 0.0;
+
+    if (use_decision_fill) {
+        auto decision_price = resolve_decision_fill_price(api_data_source_, session, order, order_clock_ts);
+        if (decision_price && *decision_price > 0.0) {
+            fill = Fill{order.id, order.qty.value(), *decision_price, order_clock_ns, false};
+            spdlog::debug("Decision-time fill for order {} at {}", order.id, *decision_price);
+        } else {
+            spdlog::warn("Decision-time fill fallback to matching engine for order {} (price unavailable)", order.id);
+            fill = session->matching_engine->submit_order(order);
+        }
+    } else {
+        fill = session->matching_engine->submit_order(order);
+    }
+
+    if (fill && fill->fill_qty > 0.0 && !use_decision_fill) {
+        // Matching engine mutates immediate fills on the local order instance.
+        // SessionManager applies fills via process_fill(); normalize here to avoid double-counting.
+        if (order.filled_qty >= fill->fill_qty) {
+            order.filled_qty -= fill->fill_qty;
+        } else {
+            order.filled_qty = 0.0;
+        }
+        if (order.status == OrderStatus::PARTIALLY_FILLED || order.status == OrderStatus::FILLED) {
+            order.status = OrderStatus::NEW;
+        }
+    }
+
+    upsert_order(session, order);
+    {
+        std::lock_guard<std::mutex> lock(session->orders_mutex);
+        auto it = session->orders.find(order.id);
+        if (it != session->orders.end()) {
+            it->second.updated_at_ns = order_clock_ns;
+        }
+    }
+    {
+        Event ev;
+        ev.timestamp = order_clock_ts;
+        ev.sequence = 0;
+        ev.event_type = EventType::ORDER_NEW;
+        ev.symbol = order.symbol;
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0),
+                            order.filled_qty, 0.0, "new",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session->id, ev);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> l(log_mutex_);
+        auto it = session_logs_.find(session_id);
+        if (it != session_logs_.end() && it->second.good()) {
+            it->second << fmt::format(R"({{"event":"order_submitted","id":"{}","symbol":"{}","side":"{}","type":{},"qty":{},"limit":{},"stop":{}}})",
+                                       order.id, order.symbol, (order.side == OrderSide::BUY ? "BUY" : "SELL"),
+                                       static_cast<int>(order.type),
+                                       order.qty.value_or(0.0),
+                                       order.limit_price.value_or(0.0),
+                                       order.stop_price.value_or(0.0))
+                       << "\n";
+        }
+    }
+    {
+        nlohmann::json w{
+            {"ts_ns", session->last_event_ns.load(std::memory_order_acquire)},
+            {"event", "order_submitted"},
+            {"id", order.id},
+            {"symbol", order.symbol},
+            {"side", order.side == OrderSide::BUY ? "BUY" : "SELL"},
+            {"type", static_cast<int>(order.type)},
+            {"tif", static_cast<int>(order.tif)},
+            {"qty", order.qty.value_or(0.0)},
+            {"limit", order.limit_price.value_or(0.0)},
+            {"stop", order.stop_price.value_or(0.0)}
+        };
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    if (fill && fill->fill_qty > 0.0) process_fill(session, *fill);
+
+    // IOC/FOK remainder canceled immediately if not fully filled.
+    if (order.qty) {
+        double remaining = *order.qty - order.filled_qty - (fill ? fill->fill_qty : 0.0);
+        if (remaining > 0.0 && (order.tif == TimeInForce::IOC || order.tif == TimeInForce::FOK)) {
+            order.filled_qty += fill ? fill->fill_qty : 0.0;
+            order.status = OrderStatus::CANCELED;
+            order.updated_at_ns = order_clock_ns;
+            order.canceled_at_ns = order_clock_ns;
+            upsert_order(session, order);
+            Event ev;
+            ev.timestamp = order_clock_ts;
+            ev.sequence = 0;
+            ev.event_type = EventType::ORDER_CANCEL;
+            ev.symbol = order.symbol;
+            double pos_qty = 0.0;
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(order.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+            ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0),
+                                order.filled_qty, 0.0, "canceled",
+                                order.side == OrderSide::BUY ? "buy" : "sell",
+                                pos_qty};
+            std::vector<EventCallback> callbacks_copy;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                callbacks_copy = event_callbacks_;
+            }
+            for (auto& cb : callbacks_copy) {
+                if (cb) cb(session->id, ev);
+            }
+        }
+    }
+    return order.id;
+}
+
+bool SessionManager::cancel_order(const std::string& session_id, const std::string& order_id) {
+    auto session = get_session(session_id);
+    if (!session) return false;
+    bool canceled = session->matching_engine->cancel_order(order_id);
+    std::optional<Order> order_opt;
+    if (canceled) {
+        std::lock_guard<std::mutex> lock(session->orders_mutex);
+        auto it = session->orders.find(order_id);
+        if (it != session->orders.end()) {
+            it->second.status = OrderStatus::CANCELED;
+            int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            it->second.updated_at_ns = now_ns;
+            it->second.canceled_at_ns = now_ns;
+            order_opt = it->second;
+        }
+    }
+    if (canceled) {
+        std::lock_guard<std::mutex> l(log_mutex_);
+        auto it = session_logs_.find(session_id);
+        if (it != session_logs_.end() && it->second.good()) {
+            it->second << R"({"event":"order_canceled","id":")" << order_id << "\"}\n";
+        }
+    }
+    if (canceled) {
+        nlohmann::json w{
+            {"ts_ns", session->last_event_ns.load(std::memory_order_acquire)},
+            {"event","order_canceled"},
+            {"id", order_id}
+        };
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    if (canceled) {
+        Event ev;
+        ev.timestamp = std::chrono::system_clock::now();
+        ev.sequence = 0;
+        ev.event_type = EventType::ORDER_CANCEL;
+        ev.symbol = order_opt ? order_opt->symbol : "";
+        double qty = order_opt ? order_opt->qty.value_or(0.0) : 0.0;
+        double filled_qty = order_opt ? order_opt->filled_qty : 0.0;
+        std::string side = order_opt ? (order_opt->side == OrderSide::BUY ? "buy" : "sell") : "buy";
+        double pos_qty = 0.0;
+        if (!ev.symbol.empty()) {
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(ev.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        }
+        ev.data = OrderData{order_id, order_opt ? order_opt->client_order_id : order_id,
+                            qty, filled_qty, 0.0, "canceled",
+                            side,
+                            pos_qty};
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session_id, ev);
+        }
+    }
+    return canceled;
+}
+
+std::unordered_map<std::string, Order> SessionManager::get_orders(const std::string& session_id) const {
+    auto session = get_session(session_id);
+    if (!session) return {};
+    std::lock_guard<std::mutex> lock(session->orders_mutex);
+    return session->orders;
+}
+
+void SessionManager::add_event_callback(EventCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    event_callbacks_.push_back(std::move(cb));
+}
+
+void SessionManager::run_session_loop(std::shared_ptr<Session> session) {
+    spdlog::info("Session {} loop starting, queue_size={}", session->id, session->event_queue->size());
+    try {
+        size_t processed = 0;
+        while (!session->should_stop.load()) {
+            auto ev_opt = session->event_queue->wait_and_pop();
+            if (!ev_opt) {
+                spdlog::info("Session {} loop: wait_and_pop returned empty", session->id);
+                break;
+            }
+            const Event& ev = *ev_opt;
+            if (ev.timestamp >= session->config.end_time) {
+                session->time_engine->set_time(session->config.end_time);
+                spdlog::info(
+                    "Session {} loop: reached end_time boundary; dropping remaining queued events",
+                    session->id);
+                break;
+            }
+            auto current_ts = session->time_engine->current_time();
+            if (exec_cfg_.get_market_session(current_ts) == ExecutionConfig::MarketSession::CLOSED) {
+                auto next_open = exec_cfg_.next_market_open_after(current_ts);
+                if (next_open > current_ts && next_open <= ev.timestamp) {
+                    session->time_engine->set_time(std::min(next_open, session->config.end_time));
+                }
+            }
+            if (exec_cfg_.get_market_session(ev.timestamp) == ExecutionConfig::MarketSession::CLOSED) {
+                auto next_open_event = exec_cfg_.next_market_open_after(ev.timestamp);
+                if (next_open_event > ev.timestamp) {
+                    session->time_engine->set_time(std::min(next_open_event, session->config.end_time));
+                }
+                continue;
+            }
+            if (!session->time_engine->wait_for_next_event(ev.timestamp)) {
+                spdlog::info("Session {} loop: wait_for_next_event returned false", session->id);
+                break;
+            }
+            process_event(session, ev, true);
+            processed++;
+            if (processed == 1 || processed % 10000 == 0) {
+                spdlog::info("Session {} processed {} events", session->id, processed);
+            }
+        }
+        spdlog::info("Session {} loop ended, processed {} events", session->id, processed);
+        if (!session->should_stop.load()) {
+            if (session->time_engine->current_time() < session->config.end_time) {
+                session->time_engine->set_time(session->config.end_time);
+            }
+            expire_pending_orders_at(session, session->config.end_time);
+            session->status = SessionStatus::COMPLETED;
+            session->completed_at = std::chrono::system_clock::now();
+        } else {
+        }
+        session->time_engine->stop();
+    } catch (const std::exception& e) {
+        session->status = SessionStatus::ERROR;
+        session->time_engine->stop();
+        spdlog::error("Session {} error: {}", session->id, e.what());
+    }
+}
+
+void SessionManager::expire_pending_orders_at(std::shared_ptr<Session> session, Timestamp timestamp) {
+    auto expired_orders = session->matching_engine->expire_pending_orders_at(timestamp);
+    if (expired_orders.empty()) {
+        return;
+    }
+
+    const int64_t timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        timestamp.time_since_epoch()).count();
+    spdlog::info("Session {} expiring {} pending orders at session boundary",
+                 session->id, expired_orders.size());
+
+    for (auto& order : expired_orders) {
+        order.status = OrderStatus::EXPIRED;
+        order.expired_at_ns = timestamp_ns;
+        order.updated_at_ns = timestamp_ns;
+        upsert_order(session, order);
+
+        append_event_log(session->id,
+            fmt::format(R"({{"event":"order_expired","id":"{}","symbol":"{}","side":"{}","qty":{},"filled_qty":{},"ts":{}}})",
+                        order.id,
+                        order.symbol,
+                        order.side == OrderSide::BUY ? "BUY" : "SELL",
+                        order.qty.value_or(0.0),
+                        order.filled_qty,
+                        timestamp_ns));
+
+        Event ev;
+        ev.timestamp = timestamp;
+        ev.sequence = 0;
+        ev.event_type = EventType::ORDER_EXPIRE;
+        ev.symbol = order.symbol;
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        ev.data = OrderData{order.id,
+                            order.client_order_id.empty() ? order.id : order.client_order_id,
+                            order.qty.value_or(0.0),
+                            order.filled_qty,
+                            0.0,
+                            "expired",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
+
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session->id, ev);
+        }
+    }
+}
+
+void SessionManager::process_event(std::shared_ptr<Session> session, const Event& ev, bool emit_callbacks) {
+    // Track event processing for periodic checkpointing
+    session->events_processed.fetch_add(1, std::memory_order_relaxed);
+
+    append_event_log(session->id,
+        fmt::format(R"({{"ts_ns":{},"seq":{},"symbol":"{}","type":{}}})",
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
+                    ev.sequence,
+                    ev.symbol,
+                    static_cast<int>(ev.event_type)));
+    session->last_event_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count(),
+                                 std::memory_order_release);
+    {
+        nlohmann::json w{
+            {"ts_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count()},
+            {"event","market_event"},
+            {"symbol", ev.symbol},
+            {"type", static_cast<int>(ev.event_type)},
+            {"seq", ev.sequence}
+        };
+        if (ev.event_type == EventType::QUOTE) {
+            const auto& q = std::get<QuoteData>(ev.data);
+            w["bid_price"] = q.bid_price;
+            w["bid_size"] = q.bid_size;
+            w["ask_price"] = q.ask_price;
+            w["ask_size"] = q.ask_size;
+            w["bid_exch"] = q.bid_exchange;
+            w["ask_exch"] = q.ask_exchange;
+        } else if (ev.event_type == EventType::TRADE) {
+            const auto& t = std::get<TradeData>(ev.data);
+            w["price"] = t.price;
+            w["size"] = t.size;
+            w["exchange"] = t.exchange;
+            w["conditions"] = t.conditions;
+        }
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    if (ev.event_type == EventType::QUOTE) {
+        const auto& q = std::get<QuoteData>(ev.data);
+        NBBO nbbo{ev.symbol, q.bid_price, q.bid_size, q.ask_price, q.ask_size,
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(ev.timestamp.time_since_epoch()).count()};
+        auto result = session->matching_engine->update_nbbo(nbbo);
+        for (auto& f : result.fills) process_fill(session, f);
+        for (auto& o : result.expired) {
+            o.status = OrderStatus::EXPIRED;
+            o.expired_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                ev.timestamp.time_since_epoch()).count();
+            o.updated_at_ns = o.expired_at_ns;
+            upsert_order(session, o);
+            Event oe;
+            oe.timestamp = ev.timestamp;
+            oe.sequence = ev.sequence;
+            oe.event_type = EventType::ORDER_EXPIRE;
+            oe.symbol = o.symbol;
+            double pos_qty = 0.0;
+            auto positions = session->account_manager->positions();
+            auto pos_it = positions.find(o.symbol);
+            if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+            oe.data = OrderData{o.id, o.client_order_id.empty() ? o.id : o.client_order_id,
+                                o.qty.value_or(0.0), o.filled_qty, 0.0, "expired",
+                                o.side == OrderSide::BUY ? "buy" : "sell",
+                                pos_qty};
+            std::vector<EventCallback> callbacks_copy;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                callbacks_copy = event_callbacks_;
+            }
+            for (auto& cb : callbacks_copy) {
+                if (cb) cb(session->id, oe);
+            }
+        }
+        // Mark to market using mid-price.
+        session->account_manager->mark_to_market(ev.symbol, nbbo.mid_price());
+        enforce_margin(session);
+    } else if (ev.event_type == EventType::TRADE) {
+        const auto& t = std::get<TradeData>(ev.data);
+        session->account_manager->mark_to_market(ev.symbol, t.price);
+
+        // SSR check: If stock drops 10%+ from prior close, trigger SSR
+        if (exec_cfg_.enable_short_sale_restrictions) {
+            std::lock_guard<std::mutex> lock(session->ssr_mutex);
+            auto prior_it = session->prior_close.find(ev.symbol);
+            if (prior_it != session->prior_close.end() && prior_it->second > 0.0) {
+                double drop_pct = (prior_it->second - t.price) / prior_it->second * 100.0;
+                if (drop_pct >= exec_cfg_.ssr_threshold_pct) {
+                    if (session->ssr_symbols.find(ev.symbol) == session->ssr_symbols.end()) {
+                        session->ssr_symbols.insert(ev.symbol);
+                        spdlog::info("SSR triggered for {} (down {:.2f}% from prior close)",
+                                     ev.symbol, drop_pct);
+                    }
+                }
+            }
+        }
+    } else if (ev.event_type == EventType::HALT) {
+        // Trading halt - add symbol to halted set
+        const auto& h = std::get<HaltData>(ev.data);
+        if (h.is_halted) {
+            std::lock_guard<std::mutex> lock(session->halt_mutex);
+            session->halted_symbols.insert(ev.symbol);
+            // Set halt end time if duration is configured
+            if (exec_cfg_.luld_halt_duration_sec > 0) {
+                auto halt_end = ev.timestamp + std::chrono::seconds(exec_cfg_.luld_halt_duration_sec);
+                session->halt_end_times[ev.symbol] = halt_end;
+            }
+            spdlog::info("Trading halted for {} (reason: {})", ev.symbol, h.reason);
+        } else {
+            // Resume trading
+            std::lock_guard<std::mutex> lock(session->halt_mutex);
+            session->halted_symbols.erase(ev.symbol);
+            session->halt_end_times.erase(ev.symbol);
+            spdlog::info("Trading resumed for {}", ev.symbol);
+        }
+    } else if (ev.event_type == EventType::RESUME) {
+        // Trading resume
+        std::lock_guard<std::mutex> lock(session->halt_mutex);
+        session->halted_symbols.erase(ev.symbol);
+        session->halt_end_times.erase(ev.symbol);
+        spdlog::info("Trading resumed for {}", ev.symbol);
+    } else if (ev.event_type == EventType::DIVIDEND) {
+        // Apply dividend automatically if enabled
+        if (exec_cfg_.enable_auto_corporate_actions) {
+            const auto& d = std::get<DividendData>(ev.data);
+            session->account_manager->apply_dividend(ev.symbol, d.amount_per_share);
+            session->cash = session->account_manager->state().cash;
+            nlohmann::json w{
+                {"event", "dividend"},
+                {"symbol", ev.symbol},
+                {"amount_per_share", d.amount_per_share}
+            };
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
+            if (session->wal) {
+                session->wal->append(w);
+            }
+            spdlog::info("Applied dividend for {}: ${:.4f}/share", ev.symbol, d.amount_per_share);
+        }
+    } else if (ev.event_type == EventType::SPLIT) {
+        // Apply stock split automatically if enabled
+        if (exec_cfg_.enable_auto_corporate_actions) {
+            const auto& s = std::get<SplitData>(ev.data);
+            double ratio = s.ratio();
+            session->account_manager->apply_split(ev.symbol, ratio);
+            session->cash = session->account_manager->state().cash;
+            nlohmann::json w{
+                {"event", "split"},
+                {"symbol", ev.symbol},
+                {"ratio", ratio}
+            };
+            std::lock_guard<std::mutex> lock(session->wal_mutex);
+            if (session->wal) {
+                session->wal->append(w);
+            }
+            spdlog::info("Applied split for {}: {}:{} (ratio {:.4f})",
+                         ev.symbol, s.from_factor, s.to_factor, ratio);
+        }
+    }
+    session->equity = session->account_manager->state().equity;
+    if (session->perf) {
+        session->perf->record(ev.timestamp, session->equity);
+    }
+
+    if (emit_callbacks) {
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session->id, ev);
+        }
+    }
+
+    // Periodic checkpointing
+    maybe_checkpoint(session);
+}
+
+void SessionManager::process_fill(std::shared_ptr<Session> session, const Fill& fill) {
+    auto order_opt = find_order(session, fill.order_id);
+    if (!order_opt) {
+        spdlog::warn("Fill for unknown order {}", fill.order_id);
+        return;
+    }
+    auto order = *order_opt;
+    order.filled_qty += fill.fill_qty;
+    if (order.qty && order.filled_qty >= *order.qty) {
+        order.status = OrderStatus::FILLED;
+        order.filled_at_ns = fill.timestamp;
+    } else {
+        order.status = OrderStatus::PARTIALLY_FILLED;
+    }
+    order.updated_at_ns = fill.timestamp;
+
+    Fill applied_fill = fill;
+    const bool lock_decision_fill_price = order.decision_time_ns > 0
+        && fill.timestamp == order.decision_time_ns;
+
+    if (!lock_decision_fill_price && exec_cfg_.enable_market_impact && exec_cfg_.market_impact_bps > 0.0) {
+        auto nbbo = session->matching_engine->get_nbbo(order.symbol);
+        if (nbbo) {
+            double available = order.side == OrderSide::BUY ? nbbo->ask_size : nbbo->bid_size;
+            if (available > 0.0 && applied_fill.fill_price > 0.0) {
+                double ratio = std::min(1.0, applied_fill.fill_qty / available);
+                double impact_bps = exec_cfg_.market_impact_bps * ratio / 10000.0;
+                if (order.side == OrderSide::BUY) {
+                    applied_fill.fill_price *= (1.0 + impact_bps);
+                } else {
+                    applied_fill.fill_price *= (1.0 - impact_bps);
+                }
+            }
+        }
+    }
+    if (!lock_decision_fill_price && exec_cfg_.enable_slippage && exec_cfg_.fixed_slippage_bps != 0.0) {
+        double bps = exec_cfg_.fixed_slippage_bps / 10000.0;
+        if (order.side == OrderSide::BUY) {
+            applied_fill.fill_price *= (1.0 + bps);
+        } else {
+            applied_fill.fill_price *= (1.0 - bps);
+        }
+    }
+    if (exec_cfg_.enable_latency && exec_cfg_.fixed_latency_us > 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(exec_cfg_.fixed_latency_us));
+    }
+
+    double fees = 0.0;
+    if (applied_fill.fill_qty > 0.0 && applied_fill.fill_price > 0.0) {
+        bool is_sell = order.side == OrderSide::SELL;
+        fees = fee_cfg_.calculate_fees(applied_fill.fill_qty, applied_fill.fill_price, is_sell, order.is_maker);
+    }
+
+    order.last_fill_price = applied_fill.fill_price;
+    order.last_fill_fee = fees;
+    order.cumulative_fees += fees;
+    upsert_order(session, order);
+
+    session->account_manager->apply_fill(order.symbol, applied_fill, order.side, fees);
+    session->cash = session->account_manager->state().cash;
+    session->equity = session->account_manager->state().equity;
+    if (session->perf) {
+        session->perf->record(Timestamp{} + std::chrono::nanoseconds(fill.timestamp), session->equity);
+    }
+    spdlog::info("Fill: order={} side={} qty={} price={} cash={} equity={}",
+                 fill.order_id,
+                 order.side == OrderSide::BUY ? "BUY" : "SELL",
+                 applied_fill.fill_qty, applied_fill.fill_price,
+                 session->cash, session->equity);
+    {
+        nlohmann::json w{
+            {"ts_ns", fill.timestamp},
+            {"event","fill"},
+            {"order_id", fill.order_id},
+            {"symbol", order.symbol},
+            {"side", order.side == OrderSide::BUY ? "BUY" : "SELL"},
+            {"qty", applied_fill.fill_qty},
+            {"price", applied_fill.fill_price},
+            {"fee", fees}
+        };
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    append_event_log(session->id,
+        fmt::format(R"({{"event":"fill","order_id":"{}","symbol":"{}","side":"{}","qty":{},"price":{},"fee":{},"ts":{}}})",
+                    fill.order_id, order.symbol,
+                    order.side == OrderSide::BUY ? "BUY" : "SELL",
+                    applied_fill.fill_qty, applied_fill.fill_price,
+                    fees,
+                    fill.timestamp));
+
+    Event ev;
+    ev.timestamp = Timestamp{} + std::chrono::nanoseconds(fill.timestamp);
+    ev.sequence = 0;
+    ev.event_type = EventType::ORDER_FILL;
+    ev.symbol = order.symbol;
+    double pos_qty = 0.0;
+    {
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+    }
+    ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0), order.filled_qty,
+                        applied_fill.fill_price,
+                        order.status == OrderStatus::FILLED ? "filled" : "partially_filled",
+                        order.side == OrderSide::BUY ? "buy" : "sell",
+                        pos_qty,
+                        fees};
+    std::vector<EventCallback> callbacks_copy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        callbacks_copy = event_callbacks_;
+    }
+    for (auto& cb : callbacks_copy) {
+        if (cb) cb(session->id, ev);
+    }
+}
+
+bool SessionManager::apply_dividend(const std::string& session_id, const std::string& symbol, double amount_per_share) {
+    auto session = get_session(session_id);
+    if (!session) return false;
+    session->account_manager->apply_dividend(symbol, amount_per_share);
+    session->cash = session->account_manager->state().cash;
+    session->equity = session->account_manager->state().equity;
+    {
+        nlohmann::json w{
+            {"event","dividend"},
+            {"symbol", symbol},
+            {"amount_per_share", amount_per_share}
+        };
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    append_event_log(session_id,
+        fmt::format(R"({{"event":"dividend","symbol":"{}","amount_per_share":{}}})",
+                    symbol, amount_per_share));
+    return true;
+}
+
+bool SessionManager::apply_split(const std::string& session_id, const std::string& symbol, double split_ratio) {
+    auto session = get_session(session_id);
+    if (!session) return false;
+    session->account_manager->apply_split(symbol, split_ratio);
+    session->cash = session->account_manager->state().cash;
+    session->equity = session->account_manager->state().equity;
+    {
+        nlohmann::json w{
+            {"event","split"},
+            {"symbol", symbol},
+            {"ratio", split_ratio}
+        };
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        if (session->wal) {
+            session->wal->append(w);
+        }
+    }
+    append_event_log(session_id,
+        fmt::format(R"({{"event":"split","symbol":"{}","ratio":{}}})",
+                    symbol, split_ratio));
+    return true;
+}
+
+void SessionManager::preload_events(std::shared_ptr<Session> session) {
+    if (!data_source_) return;
+    auto symbols = session->config.symbols;
+    auto start = session->config.start_time;
+    auto end = session->config.end_time;
+
+    if (session->config.live_bar_aggr_source == "1s") {
+        // Stream trades/quotes + 1s bars in a single ordered stream, but only a small
+        // initial window to avoid preloading the entire session and overwhelming the
+        // event queue. The polling feeder will load subsequent windows.
+        int window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 300;
+        Timestamp window_end = std::min(start + std::chrono::seconds(window_secs), end);
+
+        spdlog::info("Using merged trade/quote/1s bar stream (session {}), initial window {}s", session->id, window_secs);
+        data_source_->stream_events_with_bars(
+            symbols, start, window_end,
+            [this, session](const UnifiedMarketEvent& ev) {
+                enqueue_unified_event(session, ev);
+            }
+        );
+    } else {
+        // Default: stream trades and quotes
+        data_source_->stream_events(symbols, start, end, [this, session](const MarketEvent& ev) {
+            enqueue_event(session, ev);
+        });
+    }
+
+    if (session->event_queue) {
+        session->event_queue->stop();
+        spdlog::info("Session {} preload complete; event queue closed", session->id);
+    }
+}
+
+void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
+    if (!data_source_) return;
+    auto start = session->config.start_time;
+    auto end = session->config.end_time;
+    int base_window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 1;
+    
+    auto start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+    auto end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    spdlog::info("[PollingFeeder] session={} starting polling feeder start_ns={} end_ns={} base_window_secs={}",
+                 session->id, start_ns, end_ns, base_window_secs);
+    
+    session->polling_thread = std::make_unique<std::thread>(
+        [this, session, start, end, base_window_secs]() {
+            Timestamp cursor = start;
+            const double speed = session->config.speed_factor > 0.0 ? session->config.speed_factor : 1.0;
+            const int window_secs = compute_adaptive_window_secs(base_window_secs, speed);
+            const auto window = std::chrono::seconds(window_secs);
+            const auto loop_sleep = compute_window_loop_sleep(window_secs, speed);
+            spdlog::info(
+                "[PollingFeeder] session={} adaptive_window_secs={} loop_sleep_ms={} speed={}",
+                session->id,
+                window_secs,
+                loop_sleep.count(),
+                speed);
+            
+            while (!session->should_stop.load() && cursor < end) {
+                const auto loop_started_at = std::chrono::steady_clock::now();
+                Timestamp window_end = std::min(
+                    exec_cfg_.next_time_boundary_after(cursor, cursor + window),
+                    end);
+
+                // Get currently subscribed symbols (dynamic, not captured at start)
+                auto symbols = get_stream_symbols(session);
+                
+                if (symbols.empty()) {
+                    if (session->time_engine->is_paused()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+
+                    spdlog::debug("[PollingFeeder] session={} no symbols subscribed, advancing time", session->id);
+                    session->time_engine->set_time(window_end);
+                    cursor = window_end;
+                    std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
+                    continue;
+                }
+
+                if (exec_cfg_.get_market_session(cursor) == ExecutionConfig::MarketSession::CLOSED) {
+                    if (session->time_engine->is_paused()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
+                    }
+
+                    spdlog::debug("[PollingFeeder] session={} closed market gap, jumping clock", session->id);
+                    if (window_end > session->time_engine->current_time()) {
+                        session->time_engine->set_time(window_end);
+                    }
+                    cursor = window_end;
+                    std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
+                    continue;
+                }
+                
+                std::string symbols_str;
+                for (const auto& s : symbols) {
+                    if (!symbols_str.empty()) symbols_str += ",";
+                    symbols_str += s;
+                }
+                spdlog::debug("[PollingFeeder] session={} polling {} symbols: [{}]",
+                              session->id, symbols.size(), symbols_str);
+
+                bool emitted_in_window = false;
+                if (is_minute_bar_source(session->config.live_bar_aggr_source)) {
+                    data_source_->stream_aggregate_bars(
+                        symbols, cursor, window_end, 1, "minute",
+                        [this, session, cursor, window_end, &emitted_in_window](const BarRecord& bar) {
+                            if (bar.timestamp < cursor || bar.timestamp >= window_end) return;
+                            if (bar.timestamp < session->config.start_time ||
+                                bar.timestamp >= session->config.end_time) {
+                                return;
+                            }
+                            if (!is_stream_symbol_subscribed(session->id, bar.symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping bar for unsubscribed symbol={}",
+                                              session->id, bar.symbol);
+                                return;
+                            }
+                            UnifiedMarketEvent ev;
+                            ev.timestamp = bar.timestamp;
+                            ev.type = UnifiedEventType::BAR;
+                            ev.bar = bar;
+                            emitted_in_window = true;
+                            enqueue_unified_event(session, ev);
+                        }
+                    );
+                } else if (is_second_bar_source(session->config.live_bar_aggr_source)) {
+                    data_source_->stream_events_with_bars(
+                        symbols, cursor, window_end,
+                        [this, session, cursor, window_end, &emitted_in_window](const UnifiedMarketEvent& ev) {
+                            if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                            if (ev.timestamp < session->config.start_time ||
+                                ev.timestamp >= session->config.end_time) {
+                                return;
+                            }
+                            const std::string& symbol =
+                                (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                                (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                                ev.bar.symbol;
+                            
+                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                              session->id, symbol);
+                                return;
+                            }
+                            emitted_in_window = true;
+                            enqueue_unified_event(session, ev);
+                        }
+                    );
+                } else {
+                    data_source_->stream_events(symbols, cursor, window_end, 
+                        [this, session, cursor, window_end, &emitted_in_window](const MarketEvent& ev) {
+                            if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                            if (ev.timestamp < session->config.start_time ||
+                                ev.timestamp >= session->config.end_time) {
+                                return;
+                            }
+                            const std::string& symbol = 
+                                (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
+                            
+                            if (!is_stream_symbol_subscribed(session->id, symbol)) {
+                                spdlog::trace("[PollingFeeder] session={} dropping event for unsubscribed symbol={}",
+                                              session->id, symbol);
+                                return;
+                            }
+                            emitted_in_window = true;
+                            enqueue_event(session, ev);
+                        }
+                    );
+                }
+                if (!emitted_in_window) {
+                    advance_session_clock_to_window_end(session, window_end);
+                }
+                cursor = window_end;
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, speed));
+            }
+
+            if (session->event_queue) {
+                session->event_queue->stop();
+            }
+            
+            spdlog::info("[PollingFeeder] session={} polling feeder stopped", session->id);
+        }
+    );
+}
+
+void SessionManager::append_event_log(const std::string& session_id, const std::string& payload) {
+    std::lock_guard<std::mutex> l(log_mutex_);
+    auto it = session_logs_.find(session_id);
+    if (it != session_logs_.end() && it->second.good()) {
+        it->second << payload << "\n";
+    }
+}
+
+void SessionManager::stop_feeds(std::shared_ptr<Session> session) {
+    (void)session;
+    // DataSource streaming API is currently blocking without cancel; threads will exit when stream ends.
+}
+
+void SessionManager::start_shared_feeder() {
+    if (shared_feed_running_.exchange(true)) return;
+    if (!data_source_) {
+        shared_feed_running_.store(false, std::memory_order_release);
+        return;
+    }
+    shared_feed_thread_ = std::make_unique<std::thread>([this]() {
+        // Track per-session cursors so we only stream a bounded window ahead.
+        std::unordered_map<std::string, Timestamp> shared_cursors;
+        while (shared_feed_running_.load(std::memory_order_acquire)) {
+            const auto loop_started_at = std::chrono::steady_clock::now();
+            std::vector<std::shared_ptr<Session>> running_sessions;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                for (const auto& kv : sessions_) {
+                    if (kv.second->status == SessionStatus::RUNNING) {
+                        running_sessions.push_back(kv.second);
+                    }
+                }
+            }
+            if (running_sessions.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
+            int base_window_secs = exec_cfg_.poll_interval_seconds > 0 ? exec_cfg_.poll_interval_seconds : 1;
+            double max_speed = 1.0;
+
+            Timestamp min_start = running_sessions.front()->config.start_time;
+            Timestamp max_end = running_sessions.front()->config.end_time;
+            std::unordered_map<std::string, std::vector<std::string>> session_symbols;
+            std::vector<std::string> symbols;
+            symbols.reserve(64);
+            for (const auto& s : running_sessions) {
+                if (s->config.start_time < min_start) min_start = s->config.start_time;
+                if (s->config.end_time > max_end) max_end = s->config.end_time;
+                if (s->config.speed_factor > max_speed) max_speed = s->config.speed_factor;
+
+                auto syms = get_stream_symbols(s);
+                std::sort(syms.begin(), syms.end());
+                syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
+                session_symbols[s->id] = syms;
+
+                if (syms.empty()) {
+                    if (s->time_engine->is_paused()) {
+                        continue;
+                    }
+                    auto current_sim = s->time_engine->current_time();
+                    auto cursor = std::max(current_sim, s->config.start_time);
+                    const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
+                    auto window_end = std::min(
+                        exec_cfg_.next_time_boundary_after(cursor, cursor + std::chrono::seconds(window_secs)),
+                        s->config.end_time);
+                    if (window_end > current_sim) {
+                        s->time_engine->set_time(window_end);
+                    }
+                    if (window_end >= s->config.end_time && s->event_queue) {
+                        s->event_queue->stop();
+                    }
+                    continue;
+                }
+
+                for (const auto& sym : syms) symbols.push_back(sym);
+            }
+            std::sort(symbols.begin(), symbols.end());
+            symbols.erase(std::unique(symbols.begin(), symbols.end()), symbols.end());
+
+            if (symbols.empty()) {
+                std::this_thread::sleep_for(
+                    compute_iteration_sleep(loop_started_at,
+                                            compute_adaptive_window_secs(base_window_secs, max_speed),
+                                            max_speed));
+                continue;
+            }
+
+            const int window_secs = compute_adaptive_window_secs(base_window_secs, max_speed);
+
+            bool all_minute_bar_source = std::all_of(
+                running_sessions.begin(), running_sessions.end(),
+                [](const std::shared_ptr<Session>& s) {
+                    return is_minute_bar_source(s->config.live_bar_aggr_source);
+                }
+            );
+
+            bool any_second_bar_source = std::any_of(
+                running_sessions.begin(), running_sessions.end(),
+                [](const std::shared_ptr<Session>& s) {
+                    return is_second_bar_source(s->config.live_bar_aggr_source);
+                }
+            );
+
+            Timestamp cursor = min_start;
+            auto it = shared_cursors.find("__global");
+            if (it != shared_cursors.end()) {
+                cursor = std::max(cursor, it->second);
+            }
+            if (cursor >= max_end) {
+                shared_cursors["__global"] = max_end;
+                for (const auto& s : running_sessions) {
+                    if (s->event_queue) {
+                        s->time_engine->set_time(s->config.end_time);
+                        s->event_queue->stop();
+                    }
+                }
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
+                continue;
+            }
+            Timestamp window_end = std::min(
+                exec_cfg_.next_time_boundary_after(cursor, cursor + std::chrono::seconds(window_secs)),
+                max_end);
+
+            if (exec_cfg_.get_market_session(cursor) == ExecutionConfig::MarketSession::CLOSED) {
+                for (const auto& s : running_sessions) {
+                    if (s->time_engine->is_paused()) {
+                        continue;
+                    }
+                    auto session_target = std::min(window_end, s->config.end_time);
+                    if (session_target > s->time_engine->current_time()) {
+                        s->time_engine->set_time(session_target);
+                    }
+                    if (session_target >= s->config.end_time && s->event_queue) {
+                        s->event_queue->stop();
+                    }
+                }
+                shared_cursors["__global"] = window_end;
+                std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
+                continue;
+            }
+
+            std::unordered_set<std::string> sessions_with_events;
+
+            if (all_minute_bar_source) {
+                data_source_->stream_aggregate_bars(symbols, cursor, window_end, 1, "minute",
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const BarRecord& bar) {
+                        if (bar.timestamp < cursor || bar.timestamp >= window_end) return;
+                        for (const auto& s : running_sessions) {
+                            if (bar.timestamp < s->config.start_time || bar.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), bar.symbol) == syms.end()) {
+                                continue;
+                            }
+                            UnifiedMarketEvent ev;
+                            ev.timestamp = bar.timestamp;
+                            ev.type = UnifiedEventType::BAR;
+                            ev.bar = bar;
+                            sessions_with_events.insert(s->id);
+                            enqueue_unified_event(s, ev);
+                        }
+                    });
+            } else if (any_second_bar_source) {
+                data_source_->stream_events_with_bars(symbols, cursor, window_end,
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const UnifiedMarketEvent& ev) {
+                        if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                        const std::string& symbol =
+                            (ev.type == UnifiedEventType::QUOTE) ? ev.quote.symbol :
+                            (ev.type == UnifiedEventType::TRADE) ? ev.trade.symbol :
+                            ev.bar.symbol;
+                        for (const auto& s : running_sessions) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), symbol) == syms.end()) {
+                                continue;
+                            }
+                            if (ev.type == UnifiedEventType::BAR && !is_second_bar_source(s->config.live_bar_aggr_source)) {
+                                continue;
+                            }
+                            sessions_with_events.insert(s->id);
+                            enqueue_unified_event(s, ev);
+                        }
+                    }
+                );
+
+            } else {
+                data_source_->stream_events(symbols, cursor, window_end,
+                    [this, running_sessions, session_symbols, cursor, window_end, &sessions_with_events](const MarketEvent& ev) {
+                        if (ev.timestamp < cursor || ev.timestamp >= window_end) return;
+                        const std::string event_symbol =
+                            (ev.type == MarketEventType::QUOTE) ? ev.quote.symbol : ev.trade.symbol;
+                        for (const auto& s : running_sessions) {
+                            if (ev.timestamp < s->config.start_time || ev.timestamp >= s->config.end_time) continue;
+                            auto syms_it = session_symbols.find(s->id);
+                            const auto& syms = (syms_it != session_symbols.end())
+                                ? syms_it->second
+                                : s->config.symbols;
+                            if (!syms.empty() &&
+                                std::find(syms.begin(), syms.end(), event_symbol) == syms.end()) {
+                                continue;
+                            }
+                            sessions_with_events.insert(s->id);
+                            enqueue_event(s, ev);
+                        }
+                    });
+            }
+            for (const auto& s : running_sessions) {
+                if (!sessions_with_events.count(s->id)) {
+                    advance_session_clock_to_window_end(s, window_end);
+                } else if (window_end >= s->config.end_time && s->event_queue) {
+                    s->event_queue->stop();
+                }
+            }
+            shared_cursors["__global"] = window_end;
+            std::this_thread::sleep_for(compute_iteration_sleep(loop_started_at, window_secs, max_speed));
+        }
+    });
+}
+
+void SessionManager::stop_shared_feeder() {
+    if (!shared_feed_running_.exchange(false)) return;
+    if (shared_feed_thread_ && shared_feed_thread_->joinable()) {
+        shared_feed_thread_->join();
+    }
+    shared_feed_thread_.reset();
+}
+
+bool SessionManager::enqueue_event(std::shared_ptr<Session> session, const MarketEvent& ev) {
+    bool ok = false;
+    if (ev.type == MarketEventType::QUOTE) {
+        ok = session->event_queue->push(ev.timestamp, EventType::QUOTE, ev.quote.symbol,
+            QuoteData{ev.quote.bid_price, ev.quote.bid_size, ev.quote.ask_price, ev.quote.ask_size,
+                      ev.quote.bid_exchange, ev.quote.ask_exchange, ev.quote.tape});
+    } else {
+        ok = session->event_queue->push(ev.timestamp, EventType::TRADE, ev.trade.symbol,
+            TradeData{ev.trade.price, ev.trade.size, ev.trade.exchange, ev.trade.conditions, ev.trade.tape});
+    }
+    session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+    if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+bool SessionManager::enqueue_unified_event(std::shared_ptr<Session> session, const UnifiedMarketEvent& ev) {
+    bool ok = false;
+    if (ev.type == UnifiedEventType::QUOTE) {
+        ok = session->event_queue->push(ev.timestamp, EventType::QUOTE, ev.quote.symbol,
+            QuoteData{ev.quote.bid_price, ev.quote.bid_size, ev.quote.ask_price, ev.quote.ask_size,
+                      ev.quote.bid_exchange, ev.quote.ask_exchange, ev.quote.tape});
+    } else if (ev.type == UnifiedEventType::TRADE) {
+        ok = session->event_queue->push(ev.timestamp, EventType::TRADE, ev.trade.symbol,
+            TradeData{ev.trade.price, ev.trade.size, ev.trade.exchange, ev.trade.conditions, ev.trade.tape});
+    } else {
+        BarData bd{ev.bar.open, ev.bar.high, ev.bar.low, ev.bar.close, ev.bar.volume, ev.bar.vwap, ev.bar.trade_count};
+        ok = session->event_queue->push(ev.timestamp, EventType::BAR, ev.bar.symbol, bd);
+    }
+    session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+    if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+bool SessionManager::enqueue_news_event(std::shared_ptr<Session> session, const CompanyNewsRecord& news) {
+    if (!session || !session->event_queue) return false;
+
+    std::string symbol = news.symbol;
+    if (symbol.empty()) symbol = news.related;
+    if (symbol.empty()) symbol = news.category;
+
+    NewsData payload;
+    payload.category = news.category;
+    payload.headline = news.headline;
+    payload.summary = news.summary;
+    payload.source = news.source;
+    payload.url = news.url;
+    payload.image = news.image;
+    payload.related = news.related;
+    payload.id = news.id;
+    payload.raw_json = news.raw_json;
+
+    bool ok = session->event_queue->push(news.datetime, EventType::NEWS, symbol, std::move(payload));
+    session->events_enqueued.fetch_add(1, std::memory_order_relaxed);
+    if (!ok) session->events_dropped.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+void SessionManager::start_news_feed_for_symbol(std::shared_ptr<Session> session,
+                                                const std::string& symbol_token) {
+    if (!session || !data_source_) return;
+
+    const std::string token = normalize_news_token(symbol_token);
+    if (token.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& started_tokens = news_feeder_started_tokens_[session->id];
+        if (started_tokens.find(token) != started_tokens.end()) {
+            return;
+        }
+        started_tokens.insert(token);
+    }
+
+    session->feed_threads.push_back(std::make_unique<std::thread>(
+        [this, session, token]() {
+            if (!data_source_) return;
+            spdlog::info("[NewsSub] session={} token={} query start", session->id, token);
+
+            std::vector<CompanyNewsRecord> buffered_news;
+            buffered_news.reserve(256);
+
+            auto collect_news = [session, token, &buffered_news](const CompanyNewsRecord& news) {
+                if (news.datetime < session->config.start_time || news.datetime > session->config.end_time) {
+                    spdlog::debug("[NewsSub] session={} token={} dropping news id={} ts={} outside session window",
+                                  session->id, token, news.id, news.datetime.time_since_epoch().count());
+                    return;
+                }
+                buffered_news.push_back(news);
+            };
+
+            try {
+                if (token == "*") {
+                    data_source_->stream_finnhub_market_news(session->config.start_time,
+                                                             session->config.end_time,
+                                                             collect_news);
+                } else {
+                    data_source_->stream_company_news(std::vector<std::string>{token},
+                                                      session->config.start_time,
+                                                      session->config.end_time,
+                                                      collect_news);
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("[NewsSub] session={} token={} stream failed: {}", session->id, token, e.what());
+            }
+
+            if (buffered_news.empty()) {
+                spdlog::info("[NewsSub] session={} token={} query done buffered_rows=0 emitted_rows=0",
+                             session->id, token);
+                return;
+            }
+
+            std::sort(buffered_news.begin(), buffered_news.end(),
+                      [](const CompanyNewsRecord& lhs, const CompanyNewsRecord& rhs) {
+                          return lhs.datetime < rhs.datetime;
+                      });
+
+            constexpr auto kNewsLookahead = std::chrono::seconds(2);
+            size_t emitted_rows = 0;
+
+            while (emitted_rows < buffered_news.size()) {
+                if (session->should_stop.load(std::memory_order_acquire)) {
+                    spdlog::debug("[NewsSub] session={} token={} stopping with {} rows pending",
+                                  session->id, token, buffered_news.size() - emitted_rows);
+                    break;
+                }
+
+                if (!is_news_symbol_subscribed(session->id, token)) {
+                    spdlog::debug("[NewsSub] session={} token={} unsubscribed; dropping {} buffered rows",
+                                  session->id, token, buffered_news.size() - emitted_rows);
+                    break;
+                }
+
+                const auto& next_news = buffered_news[emitted_rows];
+                auto current_sim_time = session->time_engine->current_time();
+                if (next_news.datetime > current_sim_time + kNewsLookahead) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    continue;
+                }
+
+                CompanyNewsRecord normalized = next_news;
+                if (normalized.symbol.empty() && token != "*") {
+                    normalized.symbol = token;
+                }
+
+                bool queued = enqueue_news_event(session, normalized);
+                std::string headline_preview = normalized.headline;
+                if (headline_preview.size() > 120) {
+                    headline_preview = headline_preview.substr(0, 120) + "...";
+                }
+
+                if (queued) {
+                    spdlog::info(
+                        "[NewsSub] session={} token={} enqueued id={} symbol={} ts={} headline= {}",
+                        session->id,
+                        token,
+                        normalized.id,
+                        normalized.symbol,
+                        normalized.datetime.time_since_epoch().count(),
+                        headline_preview
+                    );
+                } else {
+                    spdlog::warn(
+                        "[NewsSub] session={} token={} failed enqueue id={} symbol={} ts={} headline= {}",
+                        session->id,
+                        token,
+                        normalized.id,
+                        normalized.symbol,
+                        normalized.datetime.time_since_epoch().count(),
+                        headline_preview
+                    );
+                }
+
+                emitted_rows++;
+            }
+
+            spdlog::info("[NewsSub] session={} token={} query done buffered_rows={} emitted_rows={}",
+                         session->id, token, buffered_news.size(), emitted_rows);
+        }
+    ));
+}
+
+void SessionManager::enforce_margin(std::shared_ptr<Session> session) {
+    if (!exec_cfg_.enable_margin_call_checks) return;
+    auto st = session->account_manager->state();
+    if (st.maintenance_margin <= 0.0) {
+        session->margin_call_active.store(false, std::memory_order_release);
+        return;
+    }
+    if (st.equity >= st.maintenance_margin) {
+        session->margin_call_active.store(false, std::memory_order_release);
+        return;
+    }
+    if (session->margin_call_active.exchange(true)) return;
+    if (!exec_cfg_.enable_forced_liquidation) return;
+
+    auto positions = session->account_manager->positions();
+    for (const auto& kv : positions) {
+        const auto& pos = kv.second;
+        if (pos.qty == 0.0) continue;
+        auto nbbo = session->matching_engine->get_nbbo(pos.symbol);
+        if (!nbbo) continue;
+        double price = pos.qty > 0 ? nbbo->bid_price : nbbo->ask_price;
+        if (price <= 0.0) continue;
+        Order order;
+        order.id = generate_uuid();
+        order.client_order_id = order.id;
+        order.symbol = pos.symbol;
+        order.side = pos.qty > 0 ? OrderSide::SELL : OrderSide::BUY;
+        order.type = OrderType::MARKET;
+        order.tif = TimeInForce::DAY;
+        order.qty = std::abs(pos.qty);
+        order.status = OrderStatus::NEW;
+        int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        order.created_at_ns = now_ns;
+        order.submitted_at_ns = now_ns;
+        order.updated_at_ns = now_ns;
+        upsert_order(session, order);
+
+        Event ev;
+        ev.timestamp = Timestamp{} + std::chrono::nanoseconds(nbbo->timestamp);
+        ev.sequence = 0;
+        ev.event_type = EventType::ORDER_NEW;
+        ev.symbol = order.symbol;
+        double pos_qty = 0.0;
+        auto positions = session->account_manager->positions();
+        auto pos_it = positions.find(order.symbol);
+        if (pos_it != positions.end()) pos_qty = pos_it->second.qty;
+        ev.data = OrderData{order.id, order.client_order_id, order.qty.value_or(0.0), 0.0, 0.0, "liquidation_new",
+                            order.side == OrderSide::BUY ? "buy" : "sell",
+                            pos_qty};
+        std::vector<EventCallback> callbacks_copy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callbacks_copy = event_callbacks_;
+        }
+        for (auto& cb : callbacks_copy) {
+            if (cb) cb(session->id, ev);
+        }
+
+        Fill fill{order.id, order.qty.value_or(0.0), price, nbbo->timestamp, false};
+        process_fill(session, fill);
+    }
+
+    auto st_after = session->account_manager->state();
+    if (st_after.equity >= st_after.maintenance_margin) {
+        session->margin_call_active.store(false, std::memory_order_release);
+    }
+}
+
+std::optional<Order> SessionManager::find_order(std::shared_ptr<Session> session, const std::string& order_id) {
+    std::lock_guard<std::mutex> lock(session->orders_mutex);
+    auto it = session->orders.find(order_id);
+    if (it != session->orders.end()) return it->second;
+    return std::nullopt;
+}
+
+void SessionManager::upsert_order(std::shared_ptr<Session> session, const Order& order) {
+    std::lock_guard<std::mutex> lock(session->orders_mutex);
+    session->orders[order.id] = order;
+}
+
+std::string SessionManager::generate_uuid() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    static constexpr char hex[] = "0123456789abcdef";
+    uint64_t a = rng();
+    uint64_t b = rng();
+    std::string s(32, '0');
+    for (int i = 0; i < 16; ++i) {
+        s[i] = hex[(a >> (i * 4)) & 0xF];
+    }
+    for (int i = 0; i < 16; ++i) {
+        s[16 + i] = hex[(b >> (i * 4)) & 0xF];
+    }
+    return s;
+}
+
+void SessionManager::set_speed(const std::string& session_id, double speed) {
+    auto session = get_session(session_id);
+    if (session) {
+        session->config.speed_factor = speed;
+        session->time_engine->set_speed(speed);
+    }
+}
+
+void SessionManager::jump_to(const std::string& session_id, Timestamp ts) {
+    auto session = get_session(session_id);
+    if (session) {
+        bool was_running = session->status == SessionStatus::RUNNING;
+        bool was_paused = session->status == SessionStatus::PAUSED;
+        session->should_stop.store(true);
+        session->time_engine->stop();
+        if (session->event_queue) session->event_queue->stop();
+        for (auto& t : session->feed_threads) {
+            if (t && t->joinable()) t->join();
+        }
+        session->feed_threads.clear();
+        if (session->polling_thread && session->polling_thread->joinable()) {
+            session->polling_thread->join();
+        }
+        session->polling_thread.reset();
+        if (session->worker_thread && session->worker_thread->joinable()) {
+            session->worker_thread->join();
+        }
+        session->worker_thread.reset();
+        session->event_queue = std::make_shared<EventQueue>(session->config.queue_capacity,
+                                                            session->config.overflow_policy);
+        session->matching_engine = std::make_shared<MatchingEngine>();
+        session->account_manager = std::make_shared<AccountManager>(session->config.initial_capital);
+        session->perf = std::make_shared<PerformanceTracker>();
+        {
+            std::lock_guard<std::mutex> lock(session->orders_mutex);
+            session->orders.clear();
+        }
+        session->last_event_ns.store(0, std::memory_order_release);
+        session->cash = session->config.initial_capital;
+        session->equity = session->config.initial_capital;
+        session->perf->record(ts, session->equity);
+        session->time_engine->set_time(ts);
+        session->config.start_time = ts;
+        session->should_stop.store(false);
+
+        if (was_running || was_paused) {
+            session->status = SessionStatus::RUNNING;
+            session->time_engine->start();
+            if (exec_cfg_.poll_interval_seconds > 0) {
+                start_polling_feeder(session);
+            } else {
+                preload_events(session);
+            }
+            session->worker_thread = std::make_unique<std::thread>(
+                [this, session]() { run_session_loop(session); }
+            );
+            if (was_paused) {
+                session->time_engine->pause();
+                session->status = SessionStatus::PAUSED;
+            }
+        }
+    }
+}
+
+void SessionManager::fast_forward(const std::string& session_id, Timestamp ts) {
+    auto session = get_session(session_id);
+    if (!session) return;
+
+    bool was_running = session->status == SessionStatus::RUNNING;
+    bool was_paused = session->status == SessionStatus::PAUSED;
+
+    session->should_stop.store(true);
+    session->time_engine->stop();
+    if (session->event_queue) session->event_queue->stop();
+    for (auto& t : session->feed_threads) {
+        if (t && t->joinable()) t->join();
+    }
+    session->feed_threads.clear();
+    if (session->polling_thread && session->polling_thread->joinable()) {
+        session->polling_thread->join();
+    }
+    session->polling_thread.reset();
+    if (session->worker_thread && session->worker_thread->joinable()) {
+        session->worker_thread->join();
+    }
+    session->worker_thread.reset();
+
+    if (session->event_queue) session->event_queue->reset();
+    session->should_stop.store(false);
+
+    while (true) {
+        auto next = session->event_queue->peek();
+        if (!next) break;
+        if (next->timestamp > ts) break;
+        auto ev_opt = session->event_queue->pop();
+        if (!ev_opt) break;
+        session->time_engine->set_time(ev_opt->timestamp);
+        process_event(session, *ev_opt, false);
+    }
+    session->time_engine->set_time(ts);
+
+    if (was_running || was_paused) {
+        session->status = SessionStatus::RUNNING;
+        session->time_engine->start();
+        if (exec_cfg_.poll_interval_seconds > 0) {
+            start_polling_feeder(session);
+        }
+        session->worker_thread = std::make_unique<std::thread>(
+            [this, session]() { run_session_loop(session); }
+        );
+        if (was_paused) {
+            session->time_engine->pause();
+            session->status = SessionStatus::PAUSED;
+        }
+    }
+}
+
+std::optional<int64_t> SessionManager::watermark_ns(const std::string& session_id) const {
+    auto session = get_session(session_id);
+    if (!session) return std::nullopt;
+    return session->last_event_ns.load(std::memory_order_acquire);
+}
+
+void SessionManager::save_session_checkpoint(const std::string& session_id) {
+    auto session = get_session(session_id);
+    if (!session) return;
+
+    std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
+
+    Checkpoint ck;
+    ck.session_id = session->id;
+    ck.account = session->account_manager->state();
+    ck.positions = session->account_manager->positions();
+    {
+        std::lock_guard<std::mutex> lock(session->orders_mutex);
+        ck.orders = session->orders;
+    }
+    ck.last_event_ns = session->last_event_ns.load(std::memory_order_acquire);
+    ck.events_processed = session->events_processed.load(std::memory_order_acquire);
+
+    // Get pending orders from matching engine to preserve their state
+    auto pending = session->matching_engine->get_pending_orders();
+    for (const auto& ord : pending) {
+        ck.orders[ord.id] = ord;
+    }
+
+    save_checkpoint(ck, wal_dir);
+    session->last_checkpoint_events.store(ck.events_processed, std::memory_order_release);
+
+    // Archive old WAL and cleanup old archives
+    int64_t ckpt_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    truncate_wal_after_checkpoint(session_id, ckpt_ns, wal_dir);
+    cleanup_old_checkpoints(session_id, 3, wal_dir);
+
+    // Recreate WAL logger for new entries
+    if (exec_cfg_.enable_wal) {
+        std::lock_guard<std::mutex> lock(session->wal_mutex);
+        session->wal = std::make_unique<WalLogger>(wal_path(wal_dir, session_id));
+    }
+
+    spdlog::debug("Saved checkpoint for session {} at {} events", session_id, ck.events_processed);
+}
+
+bool SessionManager::restore_session(std::shared_ptr<Session> session) {
+    std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
+
+    auto ck = load_checkpoint(session->id, wal_dir);
+    if (!ck) return false;
+
+    // Restore account state and positions
+    session->account_manager->restore_state(ck->account);
+    session->account_manager->restore_positions(ck->positions);
+
+    // Restore orders
+    {
+        std::lock_guard<std::mutex> lock(session->orders_mutex);
+        session->orders = ck->orders;
+    }
+
+    // Restore NBBO cache to matching engine
+    for (const auto& kv : ck->nbbo_cache) {
+        session->matching_engine->update_nbbo(kv.second);
+    }
+
+    // Restore pending orders to matching engine
+    for (const auto& kv : ck->orders) {
+        if (kv.second.status == OrderStatus::ACCEPTED ||
+            kv.second.status == OrderStatus::PARTIALLY_FILLED ||
+            kv.second.status == OrderStatus::PENDING_NEW) {
+            Order ord = kv.second;
+            session->matching_engine->submit_order(ord);
+        }
+    }
+
+    session->last_event_ns.store(ck->last_event_ns, std::memory_order_release);
+    session->events_processed.store(ck->events_processed, std::memory_order_release);
+    session->last_checkpoint_events.store(ck->events_processed, std::memory_order_release);
+    session->cash = ck->account.cash;
+    session->equity = ck->account.equity;
+
+    // Replay WAL entries after checkpoint
+    replay_wal_entries(session, ck->last_event_ns);
+
+    return true;
+}
+
+void SessionManager::maybe_checkpoint(std::shared_ptr<Session> session) {
+    if (exec_cfg_.checkpoint_interval_events <= 0) return;
+
+    uint64_t current = session->events_processed.load(std::memory_order_relaxed);
+    uint64_t last = session->last_checkpoint_events.load(std::memory_order_relaxed);
+
+    if (current - last >= static_cast<uint64_t>(exec_cfg_.checkpoint_interval_events)) {
+        save_session_checkpoint(session->id);
+    }
+}
+
+void SessionManager::replay_wal_entries(std::shared_ptr<Session> session, int64_t after_ns) {
+    std::string wal_dir = exec_cfg_.wal_directory.empty() ? "logs" : exec_cfg_.wal_directory;
+
+    auto entries = load_wal_entries_after(session->id, after_ns, wal_dir);
+    if (entries.empty()) return;
+
+    spdlog::info("Replaying {} WAL entries for session {}", entries.size(), session->id);
+
+    for (const auto& entry : entries) {
+        if (entry.event_type == "fill") {
+            // Replay fill
+            Fill fill;
+            fill.order_id = entry.data.value("order_id", "");
+            fill.fill_qty = entry.data.value("qty", 0.0);
+            fill.fill_price = entry.data.value("price", 0.0);
+            fill.timestamp = entry.ts_ns;
+            fill.is_partial = entry.data.value("is_partial", false);
+
+            if (!fill.order_id.empty() && fill.fill_qty > 0) {
+                process_fill(session, fill);
+            }
+        } else if (entry.event_type == "order_submitted") {
+            // Restore order to session
+            Order order;
+            order.id = entry.data.value("id", "");
+            order.symbol = entry.data.value("symbol", "");
+            order.side = entry.data.value("side", "BUY") == "BUY" ? OrderSide::BUY : OrderSide::SELL;
+            order.type = static_cast<OrderType>(entry.data.value("type", 0));
+            order.tif = static_cast<TimeInForce>(entry.data.value("tif", 0));
+            order.qty = entry.data.value("qty", 0.0);
+            double lp = entry.data.value("limit", 0.0);
+            if (lp > 0.0) order.limit_price = lp;
+            double sp = entry.data.value("stop", 0.0);
+            if (sp > 0.0) order.stop_price = sp;
+            order.status = OrderStatus::ACCEPTED;
+
+            if (!order.id.empty()) {
+                upsert_order(session, order);
+                session->matching_engine->submit_order(order);
+            }
+        } else if (entry.event_type == "order_canceled") {
+            std::string order_id = entry.data.value("id", "");
+            if (!order_id.empty()) {
+                session->matching_engine->cancel_order(order_id);
+                std::lock_guard<std::mutex> lock(session->orders_mutex);
+                auto it = session->orders.find(order_id);
+                if (it != session->orders.end()) {
+                    it->second.status = OrderStatus::CANCELED;
+                }
+            }
+        } else if (entry.event_type == "market_event") {
+            // Replay market event for NBBO update
+            int type = entry.data.value("type", 0);
+            if (type == static_cast<int>(EventType::QUOTE)) {
+                NBBO nbbo;
+                nbbo.symbol = entry.data.value("symbol", "");
+                nbbo.bid_price = entry.data.value("bid_price", 0.0);
+                nbbo.bid_size = entry.data.value("bid_size", int64_t{0});
+                nbbo.ask_price = entry.data.value("ask_price", 0.0);
+                nbbo.ask_size = entry.data.value("ask_size", int64_t{0});
+                nbbo.timestamp = entry.ts_ns;
+
+                if (!nbbo.symbol.empty()) {
+                    auto result = session->matching_engine->update_nbbo(nbbo);
+                    for (auto& f : result.fills) {
+                        process_fill(session, f);
+                    }
+                    session->account_manager->mark_to_market(nbbo.symbol, nbbo.mid_price());
+                }
+            } else if (type == static_cast<int>(EventType::TRADE)) {
+                std::string symbol = entry.data.value("symbol", "");
+                double price = entry.data.value("price", 0.0);
+                if (!symbol.empty() && price > 0.0) {
+                    session->account_manager->mark_to_market(symbol, price);
+                }
+            }
+        } else if (entry.event_type == "dividend") {
+            std::string symbol = entry.data.value("symbol", "");
+            double amount = entry.data.value("amount_per_share", 0.0);
+            if (!symbol.empty()) {
+                session->account_manager->apply_dividend(symbol, amount);
+            }
+        } else if (entry.event_type == "split") {
+            std::string symbol = entry.data.value("symbol", "");
+            double ratio = entry.data.value("ratio", 1.0);
+            if (!symbol.empty() && ratio != 1.0) {
+                session->account_manager->apply_split(symbol, ratio);
+            }
+        }
+
+        session->last_event_ns.store(entry.ts_ns, std::memory_order_release);
+    }
+
+    session->equity = session->account_manager->state().equity;
+    session->cash = session->account_manager->state().cash;
+}
+
+// ============================================================================
+// Subscription-based streaming methods
+// ============================================================================
+
+void SessionManager::update_stream_subscriptions(const std::string& session_id,
+                                                  const std::vector<std::string>& symbols,
+                                                  bool subscribe) {
+    auto session = get_session(session_id);
+    if (!session) {
+        spdlog::warn("[StreamSub] session={} not found", session_id);
+        return;
+    }
+    
+    std::vector<std::string> new_symbols;
+    
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& symbol_counts = stream_symbol_counts_[session_id];
+        
+        for (const auto& symbol : symbols) {
+            if (subscribe) {
+                int prev = symbol_counts[symbol];
+                symbol_counts[symbol]++;
+                spdlog::info("[StreamSub] session={} symbol={} count {} -> {}", 
+                              session_id, symbol, prev, symbol_counts[symbol]);
+                if (prev == 0) {
+                    new_symbols.push_back(symbol);
+                }
+            } else {
+                auto it = symbol_counts.find(symbol);
+                if (it != symbol_counts.end()) {
+                    it->second--;
+                    spdlog::info("[StreamSub] session={} symbol={} count={}", 
+                                  session_id, symbol, it->second);
+                    if (it->second <= 0) {
+                        symbol_counts.erase(it);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Load data for new subscriptions
+    for (const auto& symbol : new_symbols) {
+        if (session->status != SessionStatus::RUNNING) continue;
+        if (session->polling_thread) {
+            spdlog::info("[StreamSub] session={} deferred {} to polling feeder (thread already active)",
+                         session_id,
+                         symbol);
+            continue;
+        }
+        spdlog::info("[StreamSub] session={} LOADING DATA for symbol={}", session_id, symbol);
+        session->feed_threads.push_back(std::make_unique<std::thread>(
+            [this, session, symbol]() {
+                if (!data_source_) return;
+                std::vector<std::string> syms = {symbol};
+                spdlog::info("[StreamSub] session={} symbol={} query start", session->id, symbol);
+                data_source_->stream_events(syms, session->config.start_time, session->config.end_time,
+                    [this, session](const MarketEvent& ev) {
+                        enqueue_event(session, ev);
+                    });
+                spdlog::info("[StreamSub] session={} symbol={} query done", session->id, symbol);
+            }
+        ));
+    }
+}
+
+std::vector<std::string> SessionManager::get_stream_symbols(std::shared_ptr<Session> session) const {
+    if (!session) {
+        spdlog::warn("[StreamSub] get_stream_symbols called with null session");
+        return {};
+    }
+    
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto it = stream_symbol_counts_.find(session->id);
+    
+    if (it == stream_symbol_counts_.end() || it->second.empty()) {
+        // Fallback: return session config symbols for backward compatibility
+        spdlog::debug("[StreamSub] session={} no active subscriptions, falling back to config symbols (count={})",
+                      session->id, session->config.symbols.size());
+        return session->config.symbols;
+    }
+    
+    std::vector<std::string> result;
+    result.reserve(it->second.size());
+    for (const auto& kv : it->second) {
+        if (kv.second > 0) {
+            result.push_back(kv.first);
+        }
+    }
+    
+    spdlog::debug("[StreamSub] session={} returning {} subscribed symbols", 
+                  session->id, result.size());
+    return result;
+}
+
+bool SessionManager::is_stream_symbol_subscribed(const std::string& session_id, 
+                                                  const std::string& symbol) const {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto session_it = stream_symbol_counts_.find(session_id);
+    
+    if (session_it == stream_symbol_counts_.end() || session_it->second.empty()) {
+        // No subscriptions for this session - fallback behavior (stream everything)
+        spdlog::trace("[StreamSub] session={} symbol={} no subscriptions, allowing (fallback)", 
+                      session_id, symbol);
+        return true;
+    }
+    
+    auto symbol_it = session_it->second.find(symbol);
+    bool subscribed = (symbol_it != session_it->second.end() && symbol_it->second > 0);
+    
+    spdlog::trace("[StreamSub] session={} symbol={} subscribed={}", 
+                  session_id, symbol, subscribed);
+    return subscribed;
+}
+
+void SessionManager::clear_stream_subscriptions(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto it = stream_symbol_counts_.find(session_id);
+    if (it != stream_symbol_counts_.end()) {
+        size_t count = it->second.size();
+        stream_symbol_counts_.erase(it);
+        spdlog::info("[StreamSub] session={} cleared {} symbol subscriptions", 
+                     session_id, count);
+    }
+}
+
+void SessionManager::update_news_subscriptions(const std::string& session_id,
+                                               const std::vector<std::string>& symbols,
+                                               bool subscribe) {
+    auto session = get_session(session_id);
+    if (!session) {
+        spdlog::warn("[NewsSub] session={} not found", session_id);
+        return;
+    }
+
+    std::vector<std::string> new_tokens;
+
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        auto& token_counts = stream_news_symbol_counts_[session_id];
+
+        for (const auto& raw_symbol : symbols) {
+            const auto token = normalize_news_token(raw_symbol);
+            if (token.empty()) continue;
+
+            if (subscribe) {
+                int prev = token_counts[token];
+                token_counts[token]++;
+                spdlog::info("[NewsSub] session={} token={} count {} -> {}",
+                             session_id, token, prev, token_counts[token]);
+                if (prev == 0) {
+                    new_tokens.push_back(token);
+                }
+            } else {
+                auto it = token_counts.find(token);
+                if (it != token_counts.end()) {
+                    it->second--;
+                    spdlog::info("[NewsSub] session={} token={} count={}",
+                                 session_id, token, it->second);
+                    if (it->second <= 0) {
+                        token_counts.erase(it);
+                        auto started_it = news_feeder_started_tokens_.find(session_id);
+                        if (started_it != news_feeder_started_tokens_.end()) {
+                            started_it->second.erase(token);
+                            if (started_it->second.empty()) {
+                                news_feeder_started_tokens_.erase(started_it);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (token_counts.empty()) {
+            stream_news_symbol_counts_.erase(session_id);
+        }
+    }
+
+    for (const auto& token : new_tokens) {
+        if (session->status != SessionStatus::RUNNING) continue;
+        start_news_feed_for_symbol(session, token);
+    }
+}
+
+bool SessionManager::is_news_symbol_subscribed(const std::string& session_id,
+                                               const std::string& symbol) const {
+    const auto token = normalize_news_token(symbol);
+    if (token.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    auto session_it = stream_news_symbol_counts_.find(session_id);
+    if (session_it == stream_news_symbol_counts_.end() || session_it->second.empty()) {
+        return false;
+    }
+
+    if (token != "*") {
+        auto all_it = session_it->second.find("*");
+        if (all_it != session_it->second.end() && all_it->second > 0) {
+            return true;
+        }
+    }
+
+    auto token_it = session_it->second.find(token);
+    return token_it != session_it->second.end() && token_it->second > 0;
+}
+
+void SessionManager::clear_news_subscriptions(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+
+    auto count_it = stream_news_symbol_counts_.find(session_id);
+    if (count_it != stream_news_symbol_counts_.end()) {
+        size_t count = count_it->second.size();
+        stream_news_symbol_counts_.erase(count_it);
+        spdlog::info("[NewsSub] session={} cleared {} news subscriptions", session_id, count);
+    }
+
+    news_feeder_started_tokens_.erase(session_id);
+}
+
+} // namespace broker_sim
