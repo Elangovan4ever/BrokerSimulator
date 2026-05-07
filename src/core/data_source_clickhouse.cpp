@@ -29,6 +29,14 @@ std::string format_timestamp_precise(broker_sim::Timestamp ts) {
     return ss.str();
 }
 
+std::string format_date(broker_sim::Timestamp ts) {
+    auto tt = std::chrono::system_clock::to_time_t(ts);
+    auto tm = gmtime_utc(tt);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d");
+    return ss.str();
+}
+
 std::string trade_count_column_for_table(const std::string& table) {
     return table.find("_second_") != std::string::npos
         || table.find("_5s_") != std::string::npos
@@ -1091,8 +1099,64 @@ std::optional<NewsSentimentRecord> ClickHouseDataSource::get_news_sentiment(cons
     return out;
 }
 
-std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(const std::string& symbol) {
+std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(
+    const std::string& symbol,
+    std::optional<Timestamp> as_of) {
     if (!client_) return std::nullopt;
+    const std::string escaped_symbol = escape_clickhouse_string(symbol);
+    if (as_of) {
+        const std::string as_of_date = format_date(*as_of);
+        std::string query = fmt::format(R"(
+            SELECT CAST(symbol AS String),
+                   toDateTime(date),
+                   toFloat64(market_cap),
+                   pe_ratio,
+                   pb_ratio,
+                   ps_ratio,
+                   roe,
+                   roa,
+                   gross_margin,
+                   operating_margin,
+                   net_margin,
+                   debt_to_equity,
+                   current_ratio,
+                   eps,
+                   book_value_per_share,
+                   revenue_per_share
+            FROM stock_calculated_ratios
+            WHERE symbol = '{}'
+              AND date <= toDate('{}')
+            ORDER BY date DESC
+            LIMIT 1
+        )", escaped_symbol, as_of_date);
+        std::optional<BasicFinancialsRecord> out;
+        try {
+            client_->Select(query, [&out](const clickhouse::Block& block) {
+                if (block.GetRowCount() == 0) return;
+                BasicFinancialsRecord b;
+                b.symbol = block[0]->As<clickhouse::ColumnString>()->At(0);
+                b.metric_date = extract_ts_any(block[1], 0);
+                if (auto v = get_nullable_float(block[2], 0)) b.market_capitalization = *v;
+                if (auto v = get_nullable_float(block[3], 0)) b.pe_ttm = *v;
+                if (auto v = get_nullable_float(block[4], 0)) b.pb = *v;
+                if (auto v = get_nullable_float(block[5], 0)) b.ps_ttm = *v;
+                if (auto v = get_nullable_float(block[6], 0)) b.roe_ttm = *v;
+                if (auto v = get_nullable_float(block[7], 0)) b.roa_ttm = *v;
+                if (auto v = get_nullable_float(block[8], 0)) b.gross_margin_ttm = *v;
+                if (auto v = get_nullable_float(block[9], 0)) b.operating_margin_ttm = *v;
+                if (auto v = get_nullable_float(block[10], 0)) b.net_margin_ttm = *v;
+                if (auto v = get_nullable_float(block[11], 0)) b.debt_to_equity = *v;
+                if (auto v = get_nullable_float(block[12], 0)) b.current_ratio = *v;
+                if (auto v = get_nullable_float(block[13], 0)) b.eps_ttm = *v;
+                if (auto v = get_nullable_float(block[14], 0)) b.book_value_per_share = *v;
+                if (auto v = get_nullable_float(block[15], 0)) b.revenue_per_share_ttm = *v;
+                out = std::move(b);
+            });
+        } catch (const std::exception& e) {
+            spdlog::warn("ClickHouse get_basic_financials as-of failed: {}", e.what());
+        }
+        return out;
+    }
     // symbol is LowCardinality(String), market_capitalization is Decimal
     std::string query = fmt::format(R"(
         SELECT CAST(symbol AS String), metric_date, toFloat64(market_capitalization), pe_ttm, forward_pe, pb,
@@ -1102,7 +1166,7 @@ std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(
         WHERE symbol = '{}'
         ORDER BY inserted_at DESC
         LIMIT 1
-    )", symbol);
+    )", escaped_symbol);
     std::optional<BasicFinancialsRecord> out;
     try {
         client_->Select(query, [&out](const clickhouse::Block& block) {

@@ -97,6 +97,15 @@ struct BasicFinancialsRecord {
     double pe_ttm{0.0};
     double forward_pe{0.0};
     double pb{0.0};
+    double ps_ttm{0.0};
+    double roe_ttm{0.0};
+    double roa_ttm{0.0};
+    double gross_margin_ttm{0.0};
+    double operating_margin_ttm{0.0};
+    double net_margin_ttm{0.0};
+    double debt_to_equity{0.0};
+    double current_ratio{0.0};
+    double book_value_per_share{0.0};
     double dividend_yield_ttm{0.0};
     double revenue_per_share_ttm{0.0};
     double eps_ttm{0.0};
@@ -721,7 +730,9 @@ public:
 
     virtual std::optional<NewsSentimentRecord> get_news_sentiment(const std::string& symbol) = 0;
 
-    virtual std::optional<BasicFinancialsRecord> get_basic_financials(const std::string& symbol) = 0;
+    virtual std::optional<BasicFinancialsRecord> get_basic_financials(
+        const std::string& symbol,
+        std::optional<Timestamp> as_of = std::nullopt) = 0;
 
     virtual std::vector<DividendRecord> get_dividends(const std::string& symbol,
                                                       Timestamp start_time,

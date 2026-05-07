@@ -74,7 +74,9 @@ public:
         return std::nullopt;
     }
 
-    std::optional<BasicFinancialsRecord> get_basic_financials(const std::string&) override {
+    std::optional<BasicFinancialsRecord> get_basic_financials(
+        const std::string&,
+        std::optional<Timestamp> = std::nullopt) override {
         return std::nullopt;
     }
 

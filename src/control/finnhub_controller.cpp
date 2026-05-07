@@ -163,7 +163,22 @@ void FinnhubController::basic_financials(const drogon::HttpRequestPtr& req,
     auto sym = symbol_param(req);
     if (sym.empty()) { cb(json_resp(json{{"error","Missing parameters"}},422)); return; }
 
-    auto financials = data_source_->get_basic_financials(sym);
+    std::optional<Timestamp> as_of;
+    auto as_of_param = req->getParameter("as_of");
+    if (as_of_param.empty()) {
+        as_of_param = req->getParameter("date");
+    }
+    if (!as_of_param.empty()) {
+        as_of = parse_date(as_of_param);
+        if (!as_of) {
+            cb(json_resp(json{{"error","Wrong date format. Please use YYYY-MM-DD or Unix timestamp for as_of/date."}},422));
+            return;
+        }
+    } else if (!req->getParameter("session_id").empty()) {
+        as_of = current_time(req);
+    }
+
+    auto financials = data_source_->get_basic_financials(sym, as_of);
     if (!financials) {
         cb(json_resp(json{{"metric", json::object()}, {"symbol", sym}}));
         return;
@@ -185,15 +200,25 @@ void FinnhubController::basic_financials(const drogon::HttpRequestPtr& req,
         {"dividendYieldIndicatedAnnual", financials->dividend_yield_ttm},
         {"epsBasicExclExtraItemsTTM", financials->eps_ttm},
         {"freeCashFlowPerShareTTM", financials->free_cash_flow_per_share_ttm},
+        {"grossMarginTTM", financials->gross_margin_ttm},
         {"marketCapitalization", financials->market_capitalization},
+        {"netMarginTTM", financials->net_margin_ttm},
         {"pbAnnual", financials->pb},
+        {"psTTM", financials->ps_ttm},
         {"peBasicExclExtraTTM", financials->pe_ttm},
         {"peExclExtraTTM", financials->forward_pe},
+        {"roaTTM", financials->roa_ttm},
+        {"roeTTM", financials->roe_ttm},
+        {"operatingMarginTTM", financials->operating_margin_ttm},
+        {"totalDebt/totalEquityAnnual", financials->debt_to_equity},
+        {"currentRatioAnnual", financials->current_ratio},
+        {"bookValuePerShareAnnual", financials->book_value_per_share},
         {"revenuePerShareTTM", financials->revenue_per_share_ttm}
     };
 
     json out{
         {"metric", metric},
+        {"metricDate", format_date(financials->metric_date)},
         {"metricType", "all"},
         {"symbol", sym}
     };

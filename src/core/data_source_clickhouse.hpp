@@ -86,7 +86,9 @@ public:
 
     std::optional<NewsSentimentRecord> get_news_sentiment(const std::string& symbol) override;
 
-    std::optional<BasicFinancialsRecord> get_basic_financials(const std::string& symbol) override;
+    std::optional<BasicFinancialsRecord> get_basic_financials(
+        const std::string& symbol,
+        std::optional<Timestamp> as_of = std::nullopt) override;
 
     std::vector<DividendRecord> get_dividends(const std::string& symbol,
                                               Timestamp start_time,

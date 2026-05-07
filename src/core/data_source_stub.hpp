@@ -122,8 +122,11 @@ public:
         return std::nullopt;
     }
 
-    std::optional<BasicFinancialsRecord> get_basic_financials(const std::string& symbol) override {
+    std::optional<BasicFinancialsRecord> get_basic_financials(
+        const std::string& symbol,
+        std::optional<Timestamp> as_of = std::nullopt) override {
         (void)symbol;
+        (void)as_of;
         return std::nullopt;
     }
 
