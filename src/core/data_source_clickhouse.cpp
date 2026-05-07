@@ -2902,6 +2902,7 @@ std::vector<EarningsCalendarRecord> ClickHouseDataSource::get_earnings_calendar(
                                                                                 Timestamp start_time,
                                                                                 Timestamp end_time,
                                                                                 size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<EarningsCalendarRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -3315,6 +3316,7 @@ std::vector<FinnhubInsiderTransactionRecord> ClickHouseDataSource::get_finnhub_i
     Timestamp start_time,
     Timestamp end_time,
     size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<FinnhubInsiderTransactionRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
