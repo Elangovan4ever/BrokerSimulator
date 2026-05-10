@@ -2816,21 +2816,47 @@ void PolygonController::tickerDetails(const drogon::HttpRequestPtr& req,
         return;
     }
 
+    json address = json::object();
+    if (!details->address1.empty()) address["address1"] = details->address1;
+    if (!details->city.empty()) address["city"] = details->city;
+    if (!details->state.empty()) address["state"] = details->state;
+    if (!details->postal_code.empty()) address["postal_code"] = details->postal_code;
+
+    json branding = json::object();
+    if (!details->logo_url.empty()) branding["logo_url"] = details->logo_url;
+    if (!details->icon_url.empty()) branding["icon_url"] = details->icon_url;
+
     json result = {
-        {"ticker", symbol},
+        {"ticker", details->ticker.empty() ? symbol : details->ticker},
         {"name", details->name},
-        {"market", "stocks"},
-        {"locale", "us"},
-        {"primary_exchange", ""},
-        {"type", ""},
-        {"active", true},
-        {"currency_name", ""},
+        {"market", details->market},
+        {"locale", details->locale},
+        {"primary_exchange", details->primary_exchange},
+        {"type", details->type},
+        {"active", details->active},
+        {"currency_name", details->currency_name},
         {"cik", details->cik},
         {"composite_figi", details->composite_figi},
-        {"share_class_figi", ""},
-        {"address", json::object()},
-        {"branding", json::object()}
+        {"share_class_figi", details->share_class_figi},
+        {"description", details->description},
+        {"homepage_url", details->homepage_url},
+        {"phone_number", details->phone_number},
+        {"sic_code", details->sic_code},
+        {"sic_description", details->sic_description},
+        {"address", std::move(address)},
+        {"branding", std::move(branding)}
     };
+
+    if (details->market_cap) result["market_cap"] = *details->market_cap;
+    if (details->share_class_shares_outstanding) {
+        result["share_class_shares_outstanding"] = *details->share_class_shares_outstanding;
+    }
+    if (details->weighted_shares_outstanding) {
+        result["weighted_shares_outstanding"] = *details->weighted_shares_outstanding;
+    }
+    if (details->total_employees) result["total_employees"] = *details->total_employees;
+    if (details->round_lot) result["round_lot"] = *details->round_lot;
+    if (details->list_date) result["list_date"] = format_date(*details->list_date);
 
     json response = {
         {"status", "OK"},
