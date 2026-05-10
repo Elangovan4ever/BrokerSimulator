@@ -1,6 +1,8 @@
 #include "finnhub_controller.hpp"
 #include <spdlog/spdlog.h>
 #include <drogon/drogon.h>
+#include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 
@@ -96,6 +98,21 @@ static std::string format_datetime(Timestamp ts) {
 
 static bool has_timestamp(Timestamp ts) {
     return ts.time_since_epoch().count() != 0;
+}
+
+static bool is_ymd_date_string(const std::string& value) {
+    if (value.size() != 10 || value[4] != '-' || value[7] != '-') {
+        return false;
+    }
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i == 4 || i == 7) {
+            continue;
+        }
+        if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -566,7 +583,35 @@ void FinnhubController::upgrade_downgrade(const drogon::HttpRequestPtr& req,
 
     auto sym = symbol_param(req);
     auto now = current_time(req);
-    auto grades = data_source_->get_upgrades_downgrades(sym, now - std::chrono::hours(24 * 365), now, 50);
+    auto from_str = req->getParameter("from");
+    auto to_str = req->getParameter("to");
+    auto start_ts = from_str.empty()
+        ? now - std::chrono::hours(24 * 365)
+        : parse_date(from_str).value_or(now - std::chrono::hours(24 * 365));
+    auto end_ts = to_str.empty() ? now : parse_date(to_str).value_or(now);
+    if (!to_str.empty() && is_ymd_date_string(to_str)) {
+        end_ts += std::chrono::hours(24);
+    }
+    if (end_ts > now) {
+        end_ts = now;
+    }
+    if (start_ts > end_ts) {
+        cb(json_resp(json::array(), 200));
+        return;
+    }
+
+    size_t limit = 2000;
+    auto limit_str = req->getParameter("limit");
+    if (!limit_str.empty()) {
+        try {
+            limit = std::stoul(limit_str);
+        } catch (...) {
+            limit = 2000;
+        }
+    }
+    limit = std::clamp<size_t>(limit, 1, 5000);
+
+    auto grades = data_source_->get_upgrades_downgrades(sym, start_ts, end_ts, limit);
 
     json out = json::array();
     for (const auto& g : grades) {
