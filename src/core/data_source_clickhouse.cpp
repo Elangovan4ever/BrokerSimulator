@@ -47,6 +47,15 @@ std::string trade_count_column_for_table(const std::string& table) {
         : "transactions";
 }
 
+std::string bar_time_expr_for_table(const std::string& table) {
+    if (table == "stock_daily_bars") return "toDateTime64(date, 9)";
+    if (table == "stock_weekly_bars") return "toDateTime64(week_start, 9)";
+    if (table == "stock_monthly_bars") return "toDateTime64(month_start, 9)";
+    if (table == "stock_quarterly_bars") return "toDateTime64(quarter_start, 9)";
+    if (table == "stock_yearly_bars") return "toDateTime64(year_start, 9)";
+    return "toDateTime64(timestamp, 9)";
+}
+
 std::string escape_clickhouse_string(const std::string& raw) {
     std::string escaped;
     escaped.reserve(raw.size());
@@ -882,9 +891,10 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
 
         if (!table.empty()) {
             auto trade_count_column = trade_count_column_for_table(table);
+            auto time_expr = bar_time_expr_for_table(table);
             query = fmt::format(R"(
                 SELECT
-                    toDateTime64(timestamp, 9) AS ts,
+                    {} AS ts,
                     toFloat64(open) AS open,
                     toFloat64(high) AS high,
                     toFloat64(low) AS low,
@@ -894,33 +904,37 @@ std::vector<BarRecord> ClickHouseDataSource::get_bars(const std::string& symbol,
                     toUInt64({}) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
-                  AND timestamp >= '{}'
-                  AND timestamp < '{}'
-                ORDER BY timestamp ASC
+                  AND {} >= toDateTime64('{}', 9)
+                  AND {} < toDateTime64('{}', 9)
+                ORDER BY ts ASC
                 {}
-            )", trade_count_column, cfg_.database, table, symbol, start_str, end_str, limit_clause);
+            )", time_expr, trade_count_column, cfg_.database, table, symbol,
+               time_expr, start_str, time_expr, end_str, limit_clause);
         } else {
             auto base_table = base_table_for(normalized_span);
             auto interval = interval_expr(mult, normalized_span);
             auto trade_count_column = trade_count_column_for_table(base_table);
+            auto time_expr = bar_time_expr_for_table(base_table);
             query = fmt::format(R"(
                 SELECT
-                    toDateTime64(toStartOfInterval(timestamp, {}), 9) AS bucket,
-                    toFloat64(argMin(open, timestamp)) AS open,
+                    toDateTime64(toStartOfInterval({}, {}), 9) AS bucket,
+                    toFloat64(argMin(open, {})) AS open,
                     toFloat64(max(high)) AS high,
                     toFloat64(min(low)) AS low,
-                    toFloat64(argMax(close, timestamp)) AS close,
+                    toFloat64(argMax(close, {})) AS close,
                     toInt64(sum(volume)) AS volume,
                     toFloat64(if(sum(volume) = 0, 0, sum(vwap * volume) / sum(volume))) AS vwap,
                     toUInt64(sum({})) AS trade_count
                 FROM {}.{}
                 WHERE symbol = '{}'
-                  AND timestamp >= '{}'
-                  AND timestamp < '{}'
+                  AND {} >= toDateTime64('{}', 9)
+                  AND {} < toDateTime64('{}', 9)
                 GROUP BY bucket
                 ORDER BY bucket ASC
                 {}
-            )", interval, trade_count_column, cfg_.database, base_table, symbol, start_str, end_str, limit_clause);
+            )", time_expr, interval, time_expr, time_expr, trade_count_column,
+               cfg_.database, base_table, symbol, time_expr, start_str, time_expr, end_str,
+               limit_clause);
         }
 
         client.Select(query, [&out, &symbol](const clickhouse::Block& block) {
@@ -1109,7 +1123,16 @@ std::optional<NewsSentimentRecord> ClickHouseDataSource::get_news_sentiment(cons
 std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(
     const std::string& symbol,
     std::optional<Timestamp> as_of) {
-    if (!client_) return std::nullopt;
+    // This method backs request/response broker endpoints such as Finnhub
+    // /stock/metric. Use a short-lived client so API calls cannot inherit a
+    // stale streaming connection from the session loop.
+    clickhouse::ClientOptions opts;
+    opts.SetHost(cfg_.host);
+    opts.SetPort(cfg_.port);
+    opts.SetDefaultDatabase(cfg_.database);
+    opts.SetUser(cfg_.user);
+    opts.SetPassword(cfg_.password);
+    clickhouse::Client client(opts);
     const std::string escaped_symbol = escape_clickhouse_string(symbol);
     if (as_of) {
         const std::string as_of_date = format_date(*as_of);
@@ -1138,7 +1161,7 @@ std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(
         )", escaped_symbol, as_of_date);
         std::optional<BasicFinancialsRecord> out;
         try {
-            client_->Select(query, [&out](const clickhouse::Block& block) {
+            client.Select(query, [&out](const clickhouse::Block& block) {
                 if (block.GetRowCount() == 0) return;
                 BasicFinancialsRecord b;
                 b.symbol = block[0]->As<clickhouse::ColumnString>()->At(0);
@@ -1176,7 +1199,7 @@ std::optional<BasicFinancialsRecord> ClickHouseDataSource::get_basic_financials(
     )", escaped_symbol);
     std::optional<BasicFinancialsRecord> out;
     try {
-        client_->Select(query, [&out](const clickhouse::Block& block) {
+        client.Select(query, [&out](const clickhouse::Block& block) {
             if (block.GetRowCount() == 0) return;
             BasicFinancialsRecord b;
             b.symbol = block[0]->As<clickhouse::ColumnString>()->At(0);

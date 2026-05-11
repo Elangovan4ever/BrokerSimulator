@@ -1413,19 +1413,25 @@ void SessionManager::start_polling_feeder(std::shared_ptr<Session> session) {
     session->polling_thread = std::make_unique<std::thread>(
         [this, session, start, end, base_window_secs]() {
             Timestamp cursor = start;
-            const double speed = session->config.speed_factor > 0.0 ? session->config.speed_factor : 1.0;
-            const int window_secs = compute_adaptive_window_secs(base_window_secs, speed);
-            const auto window = std::chrono::seconds(window_secs);
-            const auto loop_sleep = compute_window_loop_sleep(window_secs, speed);
-            spdlog::info(
-                "[PollingFeeder] session={} adaptive_window_secs={} loop_sleep_ms={} speed={}",
-                session->id,
-                window_secs,
-                loop_sleep.count(),
-                speed);
+            double logged_speed = -1.0;
             
             while (!session->should_stop.load() && cursor < end) {
                 const auto loop_started_at = std::chrono::steady_clock::now();
+                const double speed = session->config.speed_factor > 0.0
+                    ? session->config.speed_factor
+                    : 1.0;
+                const int window_secs = compute_adaptive_window_secs(base_window_secs, speed);
+                const auto window = std::chrono::seconds(window_secs);
+                if (std::abs(speed - logged_speed) > 0.000001) {
+                    const auto loop_sleep = compute_window_loop_sleep(window_secs, speed);
+                    spdlog::info(
+                        "[PollingFeeder] session={} adaptive_window_secs={} loop_sleep_ms={} speed={}",
+                        session->id,
+                        window_secs,
+                        loop_sleep.count(),
+                        speed);
+                    logged_speed = speed;
+                }
                 Timestamp window_end = std::min(
                     exec_cfg_.next_time_boundary_after(cursor, cursor + window),
                     end);
