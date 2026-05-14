@@ -1429,7 +1429,14 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
         const std::string id_col = use_benzinga ? "benzinga_id" : "id";
 
         if (query.ticker && !query.ticker->empty()) {
-            where.push_back(fmt::format("has(tickers, '{}')", escape_clickhouse_string(*query.ticker)));
+            const auto escaped_ticker = escape_clickhouse_string(*query.ticker);
+            if (use_benzinga) {
+                where.push_back(fmt::format("has(tickers, '{}')", escaped_ticker));
+            } else {
+                where.push_back(fmt::format(
+                    "(has(tickers, '{}') OR id IN (SELECT article_id FROM stock_news_insights WHERE upperUTF8(ticker) = upperUTF8('{}')))",
+                    escaped_ticker, escaped_ticker));
+            }
         }
 
         add_ts(published_col, query.published_utc, "=");
