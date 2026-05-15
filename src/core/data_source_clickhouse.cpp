@@ -1523,14 +1523,7 @@ std::vector<StockNewsRecord> ClickHouseDataSource::get_stock_news(const StockNew
         const std::string id_col = use_benzinga ? "benzinga_id" : "id";
 
         if (query.ticker && !query.ticker->empty()) {
-            const auto escaped_ticker = escape_clickhouse_string(*query.ticker);
-            if (use_benzinga) {
-                where.push_back(fmt::format("has(tickers, '{}')", escaped_ticker));
-            } else {
-                where.push_back(fmt::format(
-                    "(has(tickers, '{}') OR id IN (SELECT article_id FROM stock_news_insights WHERE upperUTF8(ticker) = upperUTF8('{}')))",
-                    escaped_ticker, escaped_ticker));
-            }
+            where.push_back(fmt::format("has(tickers, '{}')", escape_clickhouse_string(*query.ticker)));
         }
 
         add_ts(published_col, query.published_utc, "=");
@@ -2284,6 +2277,9 @@ std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume
         std::string sql = fmt::format(R"(
             SELECT CAST(ticker AS String),
                    trade_date,
+                   ifNull(total_volume, 0),
+                   ifNull(short_volume, 0),
+                   toFloat64(ifNull(short_volume_ratio, 0)),
                    raw_json
             FROM stock_short_volume
             {}
@@ -2296,7 +2292,10 @@ std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume
                 StockShortVolumeRecord r;
                 r.ticker = block[0]->As<clickhouse::ColumnString>()->At(row);
                 r.trade_date = extract_ts_any(block[1], row);
-                r.raw_json = block[2]->As<clickhouse::ColumnString>()->At(row);
+                r.total_volume = block[2]->As<clickhouse::ColumnUInt64>()->At(row);
+                r.short_volume = block[3]->As<clickhouse::ColumnUInt64>()->At(row);
+                r.short_volume_ratio = block[4]->As<clickhouse::ColumnFloat64>()->At(row);
+                r.raw_json = block[5]->As<clickhouse::ColumnString>()->At(row);
                 out.push_back(std::move(r));
             }
         });

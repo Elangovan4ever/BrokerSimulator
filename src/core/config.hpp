@@ -7,6 +7,7 @@
 #include <cmath>
 #include <chrono>
 #include <ctime>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
@@ -119,6 +120,13 @@ struct ExecutionConfig {
     // Short sale restrictions
     bool enable_short_sale_restrictions{true};  // Enable SEC Rule 201 (alternative uptick rule)
     double ssr_threshold_pct{10.0};             // SSR triggered when stock drops 10% from prior close
+    bool enable_short_locate_checks{false};     // Gate opening shorts on historical availability evidence
+    bool short_locate_reject_missing{true};      // Reject opening shorts when no availability record exists
+    uint64_t short_locate_min_prior_total_volume{0};
+    uint64_t short_locate_min_prior_short_volume{0};
+    double short_locate_min_prior_short_volume_ratio{0.0};
+    double short_locate_max_prior_short_volume_ratio{100.0};
+    int short_locate_max_age_days{7};
 
     // Circuit breakers (LULD - Limit Up Limit Down)
     bool enable_circuit_breakers{true};
@@ -705,6 +713,28 @@ inline void load_config(Config& cfg, const std::string& path) {
                                                              cfg.execution.extended_hours_slippage_mult);
         cfg.execution.extended_hours_liquidity_pct = e.value("extended_hours_liquidity_pct",
                                                              cfg.execution.extended_hours_liquidity_pct);
+        cfg.execution.allow_shorting = e.value("allow_shorting", cfg.execution.allow_shorting);
+        cfg.execution.enable_short_sale_restrictions = e.value("enable_short_sale_restrictions",
+                                                               cfg.execution.enable_short_sale_restrictions);
+        cfg.execution.ssr_threshold_pct = e.value("ssr_threshold_pct", cfg.execution.ssr_threshold_pct);
+        cfg.execution.enable_short_locate_checks = e.value("enable_short_locate_checks",
+                                                           cfg.execution.enable_short_locate_checks);
+        cfg.execution.short_locate_reject_missing = e.value("short_locate_reject_missing",
+                                                            cfg.execution.short_locate_reject_missing);
+        cfg.execution.short_locate_min_prior_total_volume = e.value(
+            "short_locate_min_prior_total_volume",
+            cfg.execution.short_locate_min_prior_total_volume);
+        cfg.execution.short_locate_min_prior_short_volume = e.value(
+            "short_locate_min_prior_short_volume",
+            cfg.execution.short_locate_min_prior_short_volume);
+        cfg.execution.short_locate_min_prior_short_volume_ratio = e.value(
+            "short_locate_min_prior_short_volume_ratio",
+            cfg.execution.short_locate_min_prior_short_volume_ratio);
+        cfg.execution.short_locate_max_prior_short_volume_ratio = e.value(
+            "short_locate_max_prior_short_volume_ratio",
+            cfg.execution.short_locate_max_prior_short_volume_ratio);
+        cfg.execution.short_locate_max_age_days = e.value("short_locate_max_age_days",
+                                                          cfg.execution.short_locate_max_age_days);
         if (e.contains("market_holidays") && e["market_holidays"].is_array()) {
             cfg.execution.market_holidays.clear();
             for (const auto& holiday : e["market_holidays"]) {

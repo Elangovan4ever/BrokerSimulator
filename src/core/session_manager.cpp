@@ -4,6 +4,7 @@
 #include "data_source_stub.hpp"
 #include "checkpoint.hpp"
 #include "../ws/status_ws_controller.hpp"
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <sstream>
@@ -51,6 +52,107 @@ std::string normalize_news_token(const std::string& raw) {
         return "*";
     }
     return token;
+}
+
+std::tm gmtime_utc(std::time_t tt) {
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    return tm;
+}
+
+std::time_t utc_midnight(Timestamp ts) {
+    auto tt = std::chrono::system_clock::to_time_t(ts);
+    auto tm = gmtime_utc(tt);
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    return timegm(&tm);
+}
+
+double current_position_qty(const std::shared_ptr<Session>& session, const std::string& symbol) {
+    auto positions = session->account_manager->positions();
+    auto it = positions.find(symbol);
+    return it != positions.end() ? it->second.qty : 0.0;
+}
+
+bool is_opening_short_sale(const std::shared_ptr<Session>& session, const Order& order) {
+    if (order.side != OrderSide::SELL || !order.qty || *order.qty <= 0.0) {
+        return false;
+    }
+    double long_qty = std::max(current_position_qty(session, order.symbol), 0.0);
+    return *order.qty > long_qty;
+}
+
+bool passes_short_locate_check(const ExecutionConfig& cfg,
+                               const std::shared_ptr<DataSource>& data_source,
+                               const Order& order,
+                               Timestamp order_clock_ts) {
+    if (!cfg.enable_short_locate_checks) {
+        return true;
+    }
+    if (!data_source) {
+        spdlog::warn("Order rejected: short locate check has no data source symbol={}", order.symbol);
+        return !cfg.short_locate_reject_missing;
+    }
+
+    StockShortVolumeQuery query;
+    query.ticker = order.symbol;
+    query.trade_date_lt = order_clock_ts;
+    query.sort = "date";
+    query.order = "desc";
+    query.limit = 1;
+
+    auto rows = data_source->get_stock_short_volume(query);
+    if (rows.empty()) {
+        spdlog::warn("Order rejected: no prior short-volume availability record symbol={}", order.symbol);
+        return !cfg.short_locate_reject_missing;
+    }
+
+    const auto& row = rows.front();
+    if (cfg.short_locate_max_age_days >= 0) {
+        auto order_day = utc_midnight(order_clock_ts);
+        auto record_day = utc_midnight(row.trade_date);
+        auto age_days = static_cast<int>((order_day - record_day) / (60 * 60 * 24));
+        if (age_days < 1 || age_days > cfg.short_locate_max_age_days) {
+            spdlog::warn(
+                "Order rejected: stale short-volume availability symbol={} age_days={} max_age_days={}",
+                order.symbol, age_days, cfg.short_locate_max_age_days);
+            return false;
+        }
+    }
+
+    const auto total_volume = row.total_volume.value_or(0);
+    const auto short_volume = row.short_volume.value_or(0);
+    double ratio = row.short_volume_ratio.value_or(0.0);
+    if (ratio <= 0.0 && total_volume > 0) {
+        ratio = static_cast<double>(short_volume) / static_cast<double>(total_volume) * 100.0;
+    }
+
+    if (total_volume < cfg.short_locate_min_prior_total_volume) {
+        spdlog::warn(
+            "Order rejected: insufficient prior total volume for short locate symbol={} total={} min={}",
+            order.symbol, total_volume, cfg.short_locate_min_prior_total_volume);
+        return false;
+    }
+    if (short_volume < cfg.short_locate_min_prior_short_volume) {
+        spdlog::warn(
+            "Order rejected: insufficient prior short volume for short locate symbol={} short={} min={}",
+            order.symbol, short_volume, cfg.short_locate_min_prior_short_volume);
+        return false;
+    }
+    if (!std::isfinite(ratio) ||
+        ratio < cfg.short_locate_min_prior_short_volume_ratio ||
+        ratio > cfg.short_locate_max_prior_short_volume_ratio) {
+        spdlog::warn(
+            "Order rejected: prior short-volume ratio outside locate bounds symbol={} ratio={:.4f} min={:.4f} max={:.4f}",
+            order.symbol,
+            ratio,
+            cfg.short_locate_min_prior_short_volume_ratio,
+            cfg.short_locate_max_prior_short_volume_ratio);
+        return false;
+    }
+
+    return true;
 }
 
 bool is_minute_bar_source(const std::string& source) {
@@ -607,15 +709,17 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
             }
         }
     } else { // SELL
+        const bool opening_short_sale = is_opening_short_sale(session, order);
         if (!exec_cfg_.allow_shorting) {
-            auto positions = session->account_manager->positions();
-            auto it = positions.find(order.symbol);
-            double pos_qty = (it != positions.end()) ? it->second.qty : 0.0;
-            if (order.qty && pos_qty < *order.qty) {
+            if (opening_short_sale) {
                 spdlog::warn("Order rejected: shorting disabled order={} qty={}", order.id, order.qty.value_or(0.0));
                 return {};
             }
         } else {
+            if (opening_short_sale &&
+                !passes_short_locate_check(exec_cfg_, api_data_source_, order, order_clock_ts)) {
+                return {};
+            }
             if (order.qty && order.limit_price) {
                 double notional = (*order.qty) * (*order.limit_price);
                 if (!session->account_manager->has_buying_power(notional, false)) {
@@ -657,11 +761,7 @@ std::string SessionManager::submit_order(const std::string& session_id, Order or
     // Short Sale Restriction (SSR) check - SEC Rule 201 Alternative Uptick Rule
     // When SSR is active, short sales must be at or above the current national best bid
     if (exec_cfg_.enable_short_sale_restrictions && order.side == OrderSide::SELL) {
-        // Check if this is a short sale (selling more than we own)
-        auto positions = session->account_manager->positions();
-        auto pos_it = positions.find(order.symbol);
-        double pos_qty = (pos_it != positions.end()) ? pos_it->second.qty : 0.0;
-        bool is_short_sale = order.qty && (*order.qty > pos_qty);
+        bool is_short_sale = is_opening_short_sale(session, order);
 
         if (is_short_sale) {
             std::lock_guard<std::mutex> lock(session->ssr_mutex);

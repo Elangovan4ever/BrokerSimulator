@@ -31,7 +31,16 @@
     "enable_latency": false,
     "fixed_latency_us": 0,
     "enable_slippage": false,
-    "fixed_slippage_bps": 0.0
+    "fixed_slippage_bps": 0.0,
+    "allow_shorting": true,
+    "enable_short_sale_restrictions": true,
+    "enable_short_locate_checks": true,
+    "short_locate_reject_missing": true,
+    "short_locate_min_prior_total_volume": 500000,
+    "short_locate_min_prior_short_volume": 0,
+    "short_locate_min_prior_short_volume_ratio": 0.0,
+    "short_locate_max_prior_short_volume_ratio": 100.0,
+    "short_locate_max_age_days": 7
   },
   "websocket": {
     "queue_size": 1000,

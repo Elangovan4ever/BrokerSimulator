@@ -2,10 +2,76 @@
 #include "alpaca_format.hpp"
 #include <spdlog/spdlog.h>
 #include <drogon/drogon.h>
+#include <cmath>
 
 using json = nlohmann::json;
 
 namespace broker_sim {
+
+namespace {
+
+std::tm gmtime_utc(std::time_t tt) {
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    return tm;
+}
+
+std::time_t utc_midnight(Timestamp ts) {
+    auto tt = std::chrono::system_clock::to_time_t(ts);
+    auto tm = gmtime_utc(tt);
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    return timegm(&tm);
+}
+
+bool shortable_by_locate_proxy(const std::shared_ptr<SessionManager>& session_mgr,
+                               const Config& cfg,
+                               const std::string& symbol,
+                               Timestamp as_of) {
+    if (!cfg.execution.enable_short_locate_checks) {
+        return cfg.execution.allow_shorting;
+    }
+    auto data_source = session_mgr ? session_mgr->api_data_source() : nullptr;
+    if (!data_source) {
+        return false;
+    }
+
+    StockShortVolumeQuery query;
+    query.ticker = symbol;
+    query.trade_date_lt = as_of;
+    query.sort = "date";
+    query.order = "desc";
+    query.limit = 1;
+    auto rows = data_source->get_stock_short_volume(query);
+    if (rows.empty()) {
+        return !cfg.execution.short_locate_reject_missing;
+    }
+
+    const auto& row = rows.front();
+    if (cfg.execution.short_locate_max_age_days >= 0) {
+        auto age_days = static_cast<int>(
+            (utc_midnight(as_of) - utc_midnight(row.trade_date)) / (60 * 60 * 24));
+        if (age_days < 1 || age_days > cfg.execution.short_locate_max_age_days) {
+            return false;
+        }
+    }
+
+    const auto total_volume = row.total_volume.value_or(0);
+    const auto short_volume = row.short_volume.value_or(0);
+    double ratio = row.short_volume_ratio.value_or(0.0);
+    if (ratio <= 0.0 && total_volume > 0) {
+        ratio = static_cast<double>(short_volume) / static_cast<double>(total_volume) * 100.0;
+    }
+
+    return total_volume >= cfg.execution.short_locate_min_prior_total_volume &&
+           short_volume >= cfg.execution.short_locate_min_prior_short_volume &&
+           std::isfinite(ratio) &&
+           ratio >= cfg.execution.short_locate_min_prior_short_volume_ratio &&
+           ratio <= cfg.execution.short_locate_max_prior_short_volume_ratio;
+}
+
+} // namespace
 
 AlpacaController::AlpacaController(std::shared_ptr<SessionManager> session_mgr, const Config& cfg)
     : session_mgr_(std::move(session_mgr)), cfg_(cfg) {
@@ -809,7 +875,11 @@ void AlpacaController::assets(const drogon::HttpRequestPtr& req,
         "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "JPM", "V", "JNJ"
     };
 
+    auto session = get_session(req);
+    auto as_of = session ? session->time_engine->current_time() : std::chrono::system_clock::now();
+
     for (const auto& sym : sample_symbols) {
+        bool shortable = shortable_by_locate_proxy(session_mgr_, cfg_, sym, as_of);
         assets.push_back({
             {"id", sym},
             {"class", "us_equity"},
@@ -819,8 +889,8 @@ void AlpacaController::assets(const drogon::HttpRequestPtr& req,
             {"status", "active"},
             {"tradable", true},
             {"marginable", true},
-            {"shortable", true},
-            {"easy_to_borrow", true},
+            {"shortable", shortable},
+            {"easy_to_borrow", shortable},
             {"fractionable", true}
         });
     }
@@ -833,6 +903,10 @@ void AlpacaController::getAsset(const drogon::HttpRequestPtr& req,
                                 std::string symbol_or_id) {
     if (!authorize(req)) { cb(unauthorized()); return; }
 
+    auto session = get_session(req);
+    auto as_of = session ? session->time_engine->current_time() : std::chrono::system_clock::now();
+    bool shortable = shortable_by_locate_proxy(session_mgr_, cfg_, symbol_or_id, as_of);
+
     // Return asset info
     cb(json_resp({
         {"id", symbol_or_id},
@@ -843,8 +917,8 @@ void AlpacaController::getAsset(const drogon::HttpRequestPtr& req,
         {"status", "active"},
         {"tradable", true},
         {"marginable", true},
-        {"shortable", true},
-        {"easy_to_borrow", true},
+        {"shortable", shortable},
+        {"easy_to_borrow", shortable},
         {"fractionable", true}
     }));
 }

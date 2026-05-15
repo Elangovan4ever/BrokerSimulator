@@ -2237,6 +2237,9 @@ void PolygonController::shortVolume(const drogon::HttpRequestPtr& req,
         if (has_timestamp(r.trade_date)) {
             item["date"] = format_date(r.trade_date);
         }
+        if (r.total_volume) item["total_volume"] = *r.total_volume;
+        if (r.short_volume) item["short_volume"] = *r.short_volume;
+        if (r.short_volume_ratio) item["short_volume_ratio"] = *r.short_volume_ratio;
         results.push_back(std::move(item));
     }
 
