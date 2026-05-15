@@ -1019,6 +1019,7 @@ std::vector<CompanyNewsRecord> ClickHouseDataSource::get_company_news(const std:
 }
 
 std::optional<CompanyProfileRecord> ClickHouseDataSource::get_company_profile(const std::string& symbol) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     if (!client_) return std::nullopt;
     // LowCardinality(String) columns need CAST(... AS String) for clickhouse-cpp
     std::string query = fmt::format(R"(
@@ -1033,7 +1034,7 @@ std::optional<CompanyProfileRecord> ClickHouseDataSource::get_company_profile(co
         LIMIT 1
     )", symbol);
     std::optional<CompanyProfileRecord> out;
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             if (block.GetRowCount() == 0) return;
             CompanyProfileRecord p;
@@ -1053,8 +1054,19 @@ std::optional<CompanyProfileRecord> ClickHouseDataSource::get_company_profile(co
             p.raw_json = block[13]->As<clickhouse::ColumnString>()->At(0);
             out = std::move(p);
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_company_profile failed: {}", e.what());
+        spdlog::warn("ClickHouse get_company_profile failed: {}, reconnecting...", e.what());
+        out.reset();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_company_profile retry failed: {}", retry_e.what());
+            out.reset();
+        }
     }
     return out;
 }
@@ -2224,7 +2236,7 @@ std::vector<StockShortInterestRecord> ClickHouseDataSource::get_stock_short_inte
 
 std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume(const StockShortVolumeQuery& query) {
     std::vector<StockShortVolumeRecord> out;
-    try {
+    auto run_select = [&out, this, &query]() {
         clickhouse::ClientOptions opts;
         opts.SetHost(cfg_.host);
         opts.SetPort(cfg_.port);
@@ -2299,9 +2311,18 @@ std::vector<StockShortVolumeRecord> ClickHouseDataSource::get_stock_short_volume
                 out.push_back(std::move(r));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_stock_short_volume failed: {}", e.what());
+        spdlog::warn("ClickHouse get_stock_short_volume failed: {}, retrying...", e.what());
         out.clear();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_stock_short_volume retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
@@ -3476,6 +3497,7 @@ std::vector<FinnhubSecFilingRecord> ClickHouseDataSource::get_finnhub_sec_filing
                                                                                   Timestamp start_time,
                                                                                   Timestamp end_time,
                                                                                   size_t limit) {
+    std::lock_guard<std::mutex> lock(client_mutex_);
     std::vector<FinnhubSecFilingRecord> out;
     if (!client_) return out;
     auto start_str = format_timestamp(start_time);
@@ -3488,13 +3510,13 @@ std::vector<FinnhubSecFilingRecord> ClickHouseDataSource::get_finnhub_sec_filing
         SELECT CAST(symbol AS String), filed_date, accepted_datetime, CAST(form AS String),
                access_number, report_url, raw_json
         FROM finnhub_sec_filings
-        WHERE filed_date >= toDate('{}')
-          AND filed_date < toDate('{}')
+        WHERE accepted_datetime >= toDateTime('{}', 'UTC')
+          AND accepted_datetime <= toDateTime('{}', 'UTC')
           {}
-        ORDER BY filed_date DESC
+        ORDER BY accepted_datetime DESC
         {}
     )", start_str, end_str, where_symbol, limit_clause(limit));
-    try {
+    auto run_select = [&]() {
         client_->Select(query, [&out](const clickhouse::Block& block) {
             for (size_t row = 0; row < block.GetRowCount(); ++row) {
                 FinnhubSecFilingRecord r;
@@ -3508,9 +3530,19 @@ std::vector<FinnhubSecFilingRecord> ClickHouseDataSource::get_finnhub_sec_filing
                 out.push_back(std::move(r));
             }
         });
+    };
+    try {
+        run_select();
     } catch (const std::exception& e) {
-        spdlog::warn("ClickHouse get_finnhub_sec_filings failed: {}", e.what());
+        spdlog::warn("ClickHouse get_finnhub_sec_filings failed: {}, reconnecting...", e.what());
         out.clear();
+        connect();
+        try {
+            run_select();
+        } catch (const std::exception& retry_e) {
+            spdlog::warn("ClickHouse get_finnhub_sec_filings retry failed: {}", retry_e.what());
+            out.clear();
+        }
     }
     return out;
 }
