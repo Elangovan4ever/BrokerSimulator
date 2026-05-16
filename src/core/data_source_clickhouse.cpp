@@ -84,7 +84,8 @@ bool has_trade_condition_code(const std::string& raw, const std::string& code) {
 
 bool is_realtime_eligible_trade(const broker_sim::TradeRecord& trade) {
     if (trade.price <= 0.0 || trade.size < 100) return false;
-    return !has_trade_condition_code(trade.conditions, "37");
+    return !has_trade_condition_code(trade.conditions, "37")
+        && !has_trade_condition_code(trade.conditions, "2");
 }
 
 std::string realtime_trade_sql_filter() {
@@ -92,6 +93,7 @@ std::string realtime_trade_sql_filter() {
               AND price > 0
               AND size >= 100
               AND NOT has(splitByChar(',', replaceAll(toString(conditions), ' ', '')), '37')
+              AND NOT has(splitByChar(',', replaceAll(toString(conditions), ' ', '')), '2')
 )SQL";
 }
 
